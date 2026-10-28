@@ -1058,7 +1058,7 @@ here; nothing in 14.1 was changed.
 - **`show-key` prints the bare hex**, one line and nothing else, so it can
   be copied or piped.
 - **make-keys prints the unit install as its second next command** although
-  the registry row (operator guide step 8) comes between the database and
+  the registry row (operator guide step 9) comes between the database and
   the unit; the printed text says so.
 - **Registry messages** are prefixed `network/testnet.registry.json:` and
   name the row by position and id, for example `row 1 (id 1): publicKey is
