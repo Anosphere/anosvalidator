@@ -1,6 +1,6 @@
 {
   "firstLeader": 1,
   "validators": [
-    { "id": 1, "publicKey": "<fill in>", "url": "https://<doorman static ip>:3000", "active": true }
+    { "id": 1, "publicKey": "021c35350f8ee1654cf737e26509ce0b70a0079425227e002435e9dcc6fc2f35c4", "url": "https://35.237.125.139:3000", "active": true }
   ]
 }
