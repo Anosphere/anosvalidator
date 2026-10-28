@@ -37,7 +37,75 @@ socket, and TCP connections take a password.
 
 ## 3. Network
 
-Doorman, static IP, firewall, outbound path, TLS: see the doorman plan.
+Two VMs in your project, in the same zone: the doorman, which holds the
+static external IP, terminates TLS and checks every request before it
+reaches you, and the worker, which has an internal IP only and reaches the
+internet through the doorman. Set the doorman up first: until it runs, the
+worker cannot reach apt, GitHub or npm. The doorman's own install, in
+order, is "The doorman VM" in the doormansoftware README. What the project
+needs around the two VMs, with `gcloud` from your own machine; `<zone>`,
+`<region>`, `<doorman>` and `<worker>` are your zone, region and VM names,
+and the rules assume the project's `default` network:
+
+1. The doorman's external IP is a reserved static address, so it survives
+   a stop or a rebuild. If it is still ephemeral, promote it:
+
+```bash
+gcloud compute addresses create doorman-ip --region <region> --addresses <the IP>
+```
+
+2. IP forwarding on the doorman, which the worker's outbound path needs.
+   Check it; when it is `False`, export the instance, change
+   `canIpForward: false` to `true` in the file, and apply it, which needs
+   no stop:
+
+```bash
+gcloud compute instances describe <doorman> --zone <zone> --format='value(canIpForward)'
+gcloud compute instances export <doorman> --zone <zone> --destination doorman.yaml
+gcloud compute instances update-from-file <doorman> --zone <zone> --source doorman.yaml --most-disruptive-allowed-action REFRESH
+```
+
+3. Network tags, which the firewall rules and the route select by:
+
+```bash
+gcloud compute instances add-tags <doorman> --zone <zone> --tags doorman
+gcloud compute instances add-tags <worker> --zone <zone> --tags worker
+```
+
+4. Firewall: the four rules a new project's default network comes with
+   go, and four of ours replace them. Nothing reaches the worker but the
+   doorman, and nothing reaches port 22 anywhere but IAP:
+
+```bash
+gcloud compute firewall-rules delete default-allow-ssh default-allow-rdp default-allow-icmp default-allow-internal
+gcloud compute firewall-rules create doorman-public --network default --direction INGRESS --allow tcp:80,tcp:3000,tcp:3200 --source-ranges 0.0.0.0/0 --target-tags doorman
+gcloud compute firewall-rules create iap-ssh --network default --direction INGRESS --allow tcp:22 --source-ranges 35.235.240.0/20 --target-tags doorman,worker
+gcloud compute firewall-rules create worker-to-doorman --network default --direction INGRESS --allow all --source-tags worker --target-tags doorman
+gcloud compute firewall-rules create doorman-to-worker --network default --direction INGRESS --allow tcp:3000,tcp:3200 --source-tags doorman --target-tags worker
+```
+
+5. The worker's route to the internet, through the doorman. It applies to
+   the `worker` tag only, so the doorman keeps the default route:
+
+```bash
+gcloud compute routes create worker-egress --network default --destination-range 0.0.0.0/0 --next-hop-instance <doorman> --next-hop-instance-zone <zone> --priority 900 --tags worker
+```
+
+6. SSH to either VM goes through IAP, never a public port 22:
+
+```bash
+gcloud compute ssh <doorman> --zone <zone> --tunnel-through-iap
+gcloud compute ssh <worker> --zone <zone> --tunnel-through-iap
+```
+
+7. A Cloud Billing budget on the project with email alerts at 50, 90 and
+   100 percent: visibility, not a cap. The hard cap on internet egress is
+   the doorman's own monthly quota, 100 GB, described in its README.
+
+Your validator's address for step 8 is `https://<doorman static ip>:3000`.
+The `PORT` lines of both servers stay 3000 and 3200: the doorman forwards
+to them over the internal IP, and the worker's firewall admits nothing
+else.
 
 ## 4. Cloud KMS
 
