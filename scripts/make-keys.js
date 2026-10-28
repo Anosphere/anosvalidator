@@ -78,7 +78,7 @@ chmodSync(envPath, 0o644);
 console.log(`Validator ${id}, public key ${publicKeyHex}`);
 console.log('');
 console.log(`Wrote ${keyFilePath} (mode 0600, never shown) and ${envPath}.`);
-console.log('Next (docs/operator-guide.md, steps 7 to 9): the database, then, once this public key');
+console.log('Next (the operator guide, steps 7 to 9): the database, then, once this public key');
 console.log('is in network/testnet.registry.json and pulled, the unit:');
 console.log('');
 console.log('  sudo -u postgres sh scripts/setup-db.sh');

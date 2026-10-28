@@ -12,9 +12,9 @@ machine against five databases in one PostgreSQL.
 
 ## Getting started
 
-On the VM, as the user `anos`, in `/opt/anos/anossoftware`;
-`docs/operator-guide.md` is the whole install, both servers, in the order
-of the visit:
+On the VM, as the user `anos`, in `/opt/anos/anossoftware`; the operator
+guide, `guides/operator-guide.md`, kept beside the repos in the testnet folder, is
+the whole install, both servers, in the order of the visit:
 
 ```bash
 npm ci
@@ -1009,7 +1009,6 @@ db/
 docs/
   schemas.md             the specification of assisted accounts, stakes, the fund and escrow
   build-plan.md          how it was built, step by step
-  operator-guide.md      the install on a worker VM, both servers, in the order of the visit
 scripts/
   setup-db.sh            role, database and schema, from network/testnet.env and the machine file
   reset-db.sh            drop that database and set it up again
@@ -1025,8 +1024,9 @@ deploy/
 
 ## PostgreSQL on the Compute Engine VM
 
-The install, both servers on one Debian 13 worker VM, is
-`docs/operator-guide.md`: the VM and its packages, Cloud KMS, the user
+The install, both servers on one Debian 13 worker VM, is the operator
+guide, `guides/operator-guide.md`, kept beside the repos in the testnet folder:
+the VM and its packages, Cloud KMS, the user
 `anos` and the two clones under `/opt/anos`, `make-keys` in each repo, the
 databases, the registry row and the systemd units, in the order of the
 onboarding visit.

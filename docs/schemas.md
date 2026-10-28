@@ -993,7 +993,8 @@ on each JavaScript file written or edited: the first boot on the validator
   own packages, Node 24 from NodeSource, service user `anos` with both
   repos under `/opt/anos`, no external IP: a doorman holds the static IP
   and terminates TLS, so row 1's `url` is `https://<doorman static ip>:3000`.
-  The doorman is a separate plan; `docs/operator-guide.md` covers the
+  The doorman is a separate plan; the operator guide (since moved to
+  `guides/operator-guide.md` beside the repos) covers the
   worker VM and defers the network section to it. Cloud KMS is the
   keyholder's and lives in each operator's own project and region; no
   region appears in code or config.
@@ -1004,7 +1005,8 @@ New: `src/crypto/key-file.js`, `src/validators/registry.service.js`,
 `src/validators/registry.queries.js`, `src/util/version.js`,
 `scripts/make-keys.js`, `scripts/show-key.js`, `network/testnet.env`,
 `network/testnet.registry.json`, `deploy/anos-validator.service`,
-`docs/operator-guide.md`, `.example.env` (renamed from
+`docs/operator-guide.md` (since moved to `guides/operator-guide.md` beside
+the repos), `.example.env` (renamed from
 `.env-validator.example` and reduced to the three machine lines).
 
 Changed: `src/config/env.js`, `src/validators/validators.signing.js`,
