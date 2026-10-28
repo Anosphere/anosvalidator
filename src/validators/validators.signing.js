@@ -1,6 +1,7 @@
 import { createPrivateKey } from 'node:crypto';
 import { env } from '../config/env.js';
 import { canonicalize } from '../crypto/canonical.js';
+import { derivePublicKey, readKeyFile } from '../crypto/key-file.js';
 import {
   ECDSA_P256,
   decodeSignature,
@@ -16,17 +17,30 @@ import {
  * validator's P-256 key: `signature.key` is that signature (64-byte r || s,
  * hex). Validators have no post-quantum key; only accounts do.
  *
- * This validator's private key comes from its env file (PKCS#8 DER, hex) and
- * is loaded once here, so a key that does not parse fails at boot.
+ * This validator's private key comes from its key file (KEY_FILE in .env;
+ * JSON { privateKey } as PKCS#8 DER hex, written by scripts/make-keys.js)
+ * and is loaded once here, through src/crypto/key-file.js, so a missing,
+ * open or unparsable key file fails at boot. The public key is derived from
+ * it, never configured: ownPublicKey is the 33-byte compressed point the
+ * registry row must carry (registry.service.js) and /health answers,
+ * ownPublicKeyHex the same as hex, for the boot line.
  */
+
+const keyFile = readKeyFile(env.validator.keyFile, { privateKey: null });
 
 function loadPrivateKey(hex) {
   return createPrivateKey({ key: Buffer.from(hex, 'hex'), format: 'der', type: 'pkcs8' });
 }
 
 const OWN_KEYS = Object.freeze({
-  key: loadPrivateKey(env.validator.privateKey),
+  key: loadPrivateKey(keyFile.privateKey),
 });
+
+/** This validator's public key, the 33-byte compressed P-256 point, as a Buffer. */
+export const ownPublicKey = derivePublicKey(keyFile.privateKey);
+
+/** The same as 66 lowercase hex characters: the registry's and /health's form. */
+export const ownPublicKeyHex = ownPublicKey.toString('hex');
 
 function messageBytes(payload) {
   return Buffer.from(canonicalize(payload), 'utf8');

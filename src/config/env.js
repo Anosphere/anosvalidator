@@ -2,11 +2,24 @@
  * Reads and validates environment variables once at startup.
  * Everything else imports `env` from here instead of touching process.env,
  * so a missing or malformed variable fails at boot rather than mid-request.
+ *
+ * Two files are loaded, in this order: network/testnet.env, committed, with
+ * every value that is the same on every VM of the network, then .env, the
+ * machine file scripts/make-keys.js writes (the id, the database password,
+ * the key file), which wins where both name a variable:
+ *   node --env-file=network/testnet.env --env-file=.env src/server.js
  */
+
+/** The placeholder the shared file ships with for an address that does not exist yet. */
+const FILL_IN = '<fill in>';
+
 function required(name) {
   const value = process.env[name];
   if (!value) {
     throw new Error(`Missing required environment variable: ${name}`);
+  }
+  if (value === FILL_IN) {
+    throw new Error(`${name} is still "${FILL_IN}": fill it in network/testnet.env or .env`);
   }
   return value;
 }
@@ -45,20 +58,14 @@ function requiredAnos(name) {
 }
 
 /**
- * A required variable holding lowercase hex. When `bytes` is given, the value
- * must decode to exactly that many bytes; otherwise any non-empty length goes.
+ * A required comma-separated list (the masterpod's parser, without a
+ * default): items trimmed, empty ones dropped, at least one.
  */
-function requiredHex(name, bytes) {
+function requiredList(name) {
   const value = required(name);
-  if (!/^(?:[0-9a-f]{2})+$/.test(value)) {
-    throw new Error(`${name} must be lowercase hex with an even number of digits`);
-  }
-  if (bytes !== undefined && value.length !== bytes * 2) {
-    throw new Error(
-      `${name} must be ${bytes} bytes (${bytes * 2} hex digits), got ${value.length / 2}`,
-    );
-  }
-  return value;
+  const items = value.split(',').map((item) => item.trim()).filter((item) => item !== '');
+  if (items.length === 0) throw new Error(`${name} must list at least one item, got "${value}"`);
+  return Object.freeze(items);
 }
 
 export const env = Object.freeze({
@@ -66,7 +73,7 @@ export const env = Object.freeze({
   port: Number(process.env.PORT) || 3000,
 
   // Variable names follow libpq (PGHOST, PGUSER, ...), so psql and other
-  // PostgreSQL tools read the same env file without any translation.
+  // PostgreSQL tools read the same env files without any translation.
   db: Object.freeze({
     host: process.env.PGHOST ?? '127.0.0.1',
     port: Number(process.env.PGPORT) || 5432,
@@ -75,16 +82,15 @@ export const env = Object.freeze({
     password: required('PGPASSWORD'),
   }),
 
-  // This validator's identity, from its .env-validatorN file. `id` is its row
-  // in the validators table. Keys stay as the hex strings they arrive in;
-  // src/crypto turns them into key objects where they are used. The public
-  // key has a fixed size (a 33-byte compressed P-256 point). The private key
-  // is PKCS#8 DER, whose length depends on the encoding, so only the hex
-  // itself is checked.
+  // This validator's identity, from .env. `id` is its row in the validators
+  // table. `keyFile` is where its P-256 private key is, the file
+  // scripts/make-keys.js wrote (JSON, mode 0600), relative to the repo root
+  // or absolute; src/crypto/key-file.js checks and reads it, and
+  // validators/validators.signing.js derives the public key from it at
+  // boot. No key passes through the environment.
   validator: Object.freeze({
     id: requiredInteger('VALIDATOR_ID'),
-    publicKey: requiredHex('PUBLIC_KEY', 33),
-    privateKey: requiredHex('PRIVATE_KEY'),
+    keyFile: process.env.KEY_FILE || './validator.key',
   }),
 
   // Time locks on guarded and vault accounts, in minutes
@@ -125,10 +131,14 @@ export const env = Object.freeze({
     minutes: requiredInteger('GUARDIAN_VOTE_MINUTES'),
   }),
 
+  // The wallet's origins, a comma-separated list: the CORS allow-list
+  // (src/app.js). Required; in network/testnet.env.
+  webOrigins: requiredList('WEB_ORIGIN'),
+
   // Where the masterpod's /get-anos-account is (src/masterpod/
   // masterpod.client.js): the binding check a create-account submission
-  // must pass. Optional; the local masterpod by default.
-  masterpodUrl: (process.env.MASTERPOD_URL ?? 'http://localhost:3100').replace(/\/+$/, ''),
+  // must pass. Required; in network/testnet.env. A trailing slash is dropped.
+  masterpodUrl: required('MASTERPOD_URL').replace(/\/+$/, ''),
 
   // How far a signed account-level request's timestamp may be from the
   // server clock, each way (src/auth/). Nonces are kept twice this long.

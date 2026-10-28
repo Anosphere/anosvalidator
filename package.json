@@ -6,10 +6,12 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node --env-file=.env-validator$VALIDATOR src/server.js",
-    "dev": "node --watch --env-file=.env-validator$VALIDATOR src/server.js",
+    "start": "node --env-file=network/testnet.env --env-file=.env src/server.js",
+    "dev": "node --watch --env-file=network/testnet.env --env-file=.env src/server.js",
     "db:setup": "sh scripts/setup-db.sh",
-    "db:reset": "sh scripts/reset-db.sh"
+    "db:reset": "sh scripts/reset-db.sh",
+    "make-keys": "node scripts/make-keys.js",
+    "show-key": "node scripts/show-key.js"
   },
   "engines": {
     "node": ">=22"

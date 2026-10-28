@@ -1,6 +1,5 @@
 node_modules/
-.env
-.env-validator*
-!.env-validator.example
+.env*
+*.key
 .DS_Store
 npm-debug.log*

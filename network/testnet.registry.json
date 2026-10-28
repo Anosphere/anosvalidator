@@ -1,0 +1,6 @@
+{
+  "firstLeader": 1,
+  "validators": [
+    { "id": 1, "publicKey": "<fill in>", "url": "https://<doorman static ip>:3000", "active": true }
+  ]
+}

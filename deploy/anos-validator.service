@@ -1,0 +1,17 @@
+[Unit]
+Description=anos validator
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+User=anos
+WorkingDirectory=/opt/anos/anossoftware
+ExecStart=/usr/bin/node --env-file=network/testnet.env --env-file=.env src/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

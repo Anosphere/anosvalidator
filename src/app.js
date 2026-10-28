@@ -1,5 +1,6 @@
 import express from 'express';
-import cors from 'cors'
+import cors from 'cors';
+import { env } from './config/env.js';
 import { accountsRouter } from './accounts/accounts.router.js';
 import { assistedTransfersRouter } from './assisted-transfers/assisted-transfers.router.js';
 import { escrowRouter } from './escrow/escrow.router.js';
@@ -20,7 +21,7 @@ export function createApp() {
   const app = express();
 
   app.disable('x-powered-by');
-  app.use(cors({ origin: 'http://localhost:4200' }))
+  app.use(cors({ origin: env.webOrigins }));
   // A create-account submission is about 60 KB; a transaction approval
   // receipt wraps one, and a proof of acceptance will carry several.
   app.use(express.json({ limit: '1mb' }));

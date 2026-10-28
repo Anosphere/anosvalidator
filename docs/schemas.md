@@ -707,6 +707,10 @@ need no edit:
 | `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked (the binding check) |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`                   | the window of a signed account-level request, each way; nonces live twice this long |
 
+Since the testnet build (2026-10-27) these live in two files, the committed
+`network/testnet.env` and the machine file `.env`, and `MASTERPOD_URL` is
+required: section 14.
+
 ## 11. Notes from the build (2026-10-23)
 
 What the build settled that the sections above leave open, and the one
@@ -898,3 +902,183 @@ chosen and is recorded here; nothing above was changed.
   are unchanged, for attestors and non-attestors alike.
 - **No schema change**: `stakes.attestor_stake` and the holding tables
   were in place. Nothing was applied live.
+
+## 14. Testnet readiness (2026-10-27)
+
+Built 2026-10-27 as the first half of testnet build 1, straight from
+`~/Desktop/Z-TestNet/forclaude/testnet-build-1-code-ready.md` (FINAL,
+decided in its planning chat); the keyholder is the second half, in its own
+repo. `~/Desktop/Z-TestNet` is the testnet tree: fresh repos, one network,
+no local development. Nothing about the protocol, the tables, the routes
+that carry traffic or the wallet changed. No check ran but `node --check`
+on each JavaScript file written or edited: the first boot on the validator
+1 VM is the test.
+
+### 14.1 The decisions, as they apply to this repo
+
+- **Two env files per start.** `network/testnet.env`, committed, holds
+  every value that is the same on every VM, each line with a comment;
+  `.env`, git-ignored, holds what differs per machine: `VALIDATOR_ID`,
+  `PGPASSWORD`, `KEY_FILE`. `npm start`, `npm run dev` and the unit run
+  `node --env-file=network/testnet.env --env-file=.env src/server.js`; Node
+  applies later files over earlier ones (Node 24.22.0, checked in the
+  planning chat: two flags work, the later wins, a missing file aborts the
+  start). No `VALIDATOR` start variable: the id is a line in `.env`.
+- **Testnet dials.** `GUARDED_LOCK_MINUTES=10`, `VAULT_LOCK_MINUTES=20`,
+  `LOCK_OFFSET_MINUTES=5`, `GUARDIAN_VOTE_MINUTES=60`; the stake minimums
+  and the other vote settings at the production values of the README
+  table. `PORT=3000`, `PGUSER=anossoftware`, `PGDATABASE=anos`.
+- **`<fill in>`.** `MASTERPOD_URL` and `WEB_ORIGIN` ship as `<fill in>`;
+  the user fills them once the Hetzner load balancers have DNS names (the
+  masterpod's for the first, the wallet's for the second). `required()` in
+  `env.js` refuses the literal with `X is still "<fill in>": fill it in
+  network/testnet.env or .env`; every other required helper goes through
+  it, so the check covers every required variable and ignores variables
+  nobody reads. A server refuses to start until then, by design.
+- **The key file.** `KEY_FILE` names it (default `./validator.key`), JSON
+  `{ "privateKey": "<P-256 PKCS#8 DER hex>" }`, mode 0600, written once with
+  the exclusive-create flag. `src/crypto/key-file.js` `readKeyFile` refuses
+  a file that is missing, not a regular file, unreadable, or has any group
+  or other bit set, naming the path and the mode; `derivePublicKey` is
+  `createPublicKey` of the private key, exported as SPKI DER, the 26-byte
+  prefix cut, the 65-byte point compressed with `ECDH.convertKey`.
+  `PUBLIC_KEY` and `PRIVATE_KEY` left the env; `validators.signing.js`
+  loads the key file once at import and exports `ownPublicKey` (33-byte
+  Buffer) and `ownPublicKeyHex`.
+- **make-keys and show-key.** `npm run make-keys -- --id <N>
+  [--key-file <path>]`: both existence checks before any write, then the
+  key file (`wx`, 0600) and `.env` (`wx`, 0644 so `sudo -u postgres` can
+  read it; tightening it to 0600 is testnet-month work), exactly three
+  lines. Prints `Validator <N>, public key <hex>` and the next commands.
+  `npm run show-key [-- <path>]` prints the derived public key and starts
+  nothing. A private key is never printed anywhere.
+- **The registry file.** `network/testnet.registry.json`,
+  `{ firstLeader, validators: [{ id, publicKey, url, active }] }`, starting
+  with row 1 alone, filled by the user after make-keys has run on the VM.
+  Applied at boot, after genesis and before listening, by
+  `src/validators/registry.service.js` with its SQL in
+  `registry.queries.js` (`validators.queries.js` untouched), by the five
+  rules: upsert every row of the file (`is_leader` untouched); set every
+  row not in the file inactive, the row staying; make `firstLeader` leader
+  when no row is; this validator's own row must be in the file, active,
+  with the derived key, checked against the file before the transaction;
+  the hash, SHA-256 of the canonical JSON of all rows ordered by id as
+  `{ id, publicKey, url, active }`, leader excluded. Shape checks name the
+  row and the field, and the server exits 1. `db/validators.sql` is gone
+  and `setup-db.sh` no longer applies a registry.
+- **Leader rules unchanged.** `firstLeader` 1 from the first commit; every
+  validator makes 1 leader when its table has no leader; nothing moves
+  until the first transaction. Adding a validator after traffic and
+  replacing a dead leader are testnet-month work.
+- **Health.** `GET /health` answers `{ status, uptime, db, validator: { id,
+  publicKey }, version: { commit, tag }, registry: { hash, active } }`.
+  `src/util/version.js` runs `git rev-parse --short HEAD` and
+  `git describe --tags --exact-match` once at boot, each `null` when git or
+  the repo is absent or the command fails; no tag is the normal case until
+  `testnet-1` exists.
+- **CORS from env.** `WEB_ORIGIN` is a required comma-separated list,
+  parsed as the masterpod's `optionalList` does but without a default;
+  `src/app.js` passes the frozen array to `cors`. `MASTERPOD_URL` is
+  required too, keeping the trailing-slash strip. The dev defaults
+  `http://localhost:4200` and `http://localhost:3100` left the code.
+- **Boot log.** `Validator <id>, public key <hex>` first (`src/server.js`
+  imports `validators.signing.js` before anything else), the PostgreSQL
+  and genesis lines, `Registry <16 hex>, <n> active`, then listening.
+- **The unit.** `deploy/anos-validator.service`, identical on every VM:
+  user `anos`, `/opt/anos/anossoftware`, `/usr/bin/node` (NodeSource on
+  the VM), `Restart=on-failure` every 5 s, `NoNewPrivileges`,
+  `ProtectSystem=strict` (the repo is read-only, and the server writes
+  nothing), `PrivateTmp`.
+- **The VM.** Debian 13 (unattended upgrades), PostgreSQL 17 from Debian's
+  own packages, Node 24 from NodeSource, service user `anos` with both
+  repos under `/opt/anos`, no external IP: a doorman holds the static IP
+  and terminates TLS, so row 1's `url` is `https://<doorman static ip>:3000`.
+  The doorman is a separate plan; `docs/operator-guide.md` covers the
+  worker VM and defers the network section to it. Cloud KMS is the
+  keyholder's and lives in each operator's own project and region; no
+  region appears in code or config.
+
+### 14.2 Files and variables
+
+New: `src/crypto/key-file.js`, `src/validators/registry.service.js`,
+`src/validators/registry.queries.js`, `src/util/version.js`,
+`scripts/make-keys.js`, `scripts/show-key.js`, `network/testnet.env`,
+`network/testnet.registry.json`, `deploy/anos-validator.service`,
+`docs/operator-guide.md`, `.example.env` (renamed from
+`.env-validator.example` and reduced to the three machine lines).
+
+Changed: `src/config/env.js`, `src/validators/validators.signing.js`,
+`src/server.js`, `src/app.js`, `src/health/health.router.js`,
+`src/health/health.service.js`, `scripts/setup-db.sh`,
+`scripts/reset-db.sh`, `package.json`, `.gitignore` (`.env*` and `*.key`),
+`README.md`, this file.
+
+Deleted: `db/validators.sql`.
+
+| Variable | Where | Value |
+| -------- | ----- | ----- |
+| `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE` | shared | `127.0.0.1`, `5432`, `anossoftware`, `anos` |
+| `PORT` | shared | `3000` |
+| `GUARDED_LOCK_MINUTES`, `VAULT_LOCK_MINUTES`, `LOCK_OFFSET_MINUTES` | shared | `10`, `20`, `5` |
+| the six `STAKE_MIN_*_ANOS` | shared | `10`, `1000`, `1000`, `1000`, `50000`, `500000` |
+| `GUARDIAN_VOTE_ANOS`, `GUARDIAN_VOTE_PERCENT`, `GUARDIAN_VOTE_MINUTES` | shared | `1000`, `70`, `60` |
+| `MASTERPOD_URL`, `WEB_ORIGIN` | shared | `<fill in>` |
+| `TIMESTAMP_WINDOW_SECONDS` | shared | `120` |
+| `VALIDATOR_ID`, `PGPASSWORD`, `KEY_FILE` | machine (`.env`, from make-keys) | the id, 32 hex characters, `./validator.key` |
+
+Gone: `PUBLIC_KEY`, `PRIVATE_KEY`, the `VALIDATOR` start variable, the
+`.env-validatorN` files.
+
+### 14.3 Notes from the build
+
+Where the plan was silent, the simplest thing was chosen and is recorded
+here; nothing in 14.1 was changed.
+
+- **`<fill in>` is double-quoted in the env files**
+  (`MASTERPOD_URL="<fill in>"`). `scripts/setup-db.sh` and `reset-db.sh`
+  source `network/testnet.env` and `.env` with `sh`, where a bare
+  `<fill in>` is a redirection. Node's `--env-file` strips single, double
+  or backtick quotes, so `env.js` still sees the literal `<fill in>` and
+  refuses it. The values may be filled with or without quotes.
+- **`requiredHex` left `env.js`**: its only uses were `PUBLIC_KEY` and
+  `PRIVATE_KEY`. The hex check lives in `key-file.js` now.
+- **Paths are resolved against the repo root**, not the working directory:
+  `key-file.js`, `registry.service.js` and `version.js` locate the repo
+  from `import.meta.url`, and `make-keys.js` writes `.env` and a relative
+  `--key-file` there. `npm` and the unit run in the repo root anyway, so
+  `KEY_FILE=./validator.key` reads the same either way.
+- **`.env` is chmod-ed to 0644 after the write**, so an operator's umask
+  cannot leave it unreadable to postgres. The key file is created 0600
+  under `wx` and never chmod-ed: a umask can only narrow that, and anything
+  narrower still passes the server's check.
+- **`.example.env` carries comments** although make-keys writes `.env` as
+  exactly three bare lines; the example explains, the real file does not.
+- **`show-key` prints the bare hex**, one line and nothing else, so it can
+  be copied or piped.
+- **make-keys prints the unit install as its second next command** although
+  the registry row (operator guide step 8) comes between the database and
+  the unit; the printed text says so.
+- **Registry messages** are prefixed `network/testnet.registry.json:` and
+  name the row by position and id, for example `row 1 (id 1): publicKey is
+  still "<fill in>": fill it in network/testnet.registry.json`; the own-row
+  messages name the id and, for a key mismatch, both keys. `server.js`
+  prints them as `Registry failed: <message>`. An unreadable or malformed
+  file is `could not be read: <reason>`.
+- **Rule 2 touches only active rows** (`UPDATE ... WHERE active AND NOT
+  (id = ANY($1))`), so a row already inactive keeps its `updated_at`.
+- **The hash** is `sha256(canonicalize(rows))` over the rows as
+  `registry.queries.js` `findAllRows` returns them: `id` an integer,
+  `publicKey` from `encode(public_key, 'hex')`, `url`, `active`; the keys
+  sorted by `canonicalize`. The count beside it is the active rows of the
+  table, which after the apply are exactly the file's active rows.
+- **`version.js`** runs git with `cwd` the repo root and stderr ignored; a
+  non-zero exit, a missing binary or empty output is `null`.
+- **Health** composes the fixed facts in `health.service.js` `identity()`
+  and the router spreads them into the answer, so the service stays the one
+  place that knows the shape.
+- **`validators.queries.js`** still says in its comment that the table is
+  "seeded from db/validators.sql"; the plan says not to touch the file, so
+  the comment stays stale until a later change there.
+- **`node --check`** passed on the twelve JavaScript files written or
+  edited. Nothing booted, no database was touched, no scratch file was
+  written.

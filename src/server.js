@@ -1,7 +1,14 @@
+import { ownPublicKeyHex } from './validators/validators.signing.js';
 import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { closePool, query } from './db/pool.js';
 import { runGenesis } from './genesis/genesis.service.js';
+import { applyRegistry } from './validators/registry.service.js';
+
+// Who this is, first. The key file was loaded by the import of
+// validators.signing.js, the first import above, so a missing or open key
+// file has already stopped the boot by now, before any connection is made.
+console.log(`Validator ${env.validator.id}, public key ${ownPublicKeyHex}`);
 
 // Verify the database connection before accepting traffic, so a bad
 // configuration fails loudly at boot instead of on the first request.
@@ -24,6 +31,18 @@ try {
   console.log(written ? 'Genesis accounts written' : 'Genesis accounts in place');
 } catch (err) {
   console.error('Genesis failed:', err.message);
+  process.exit(1);
+}
+
+// The registry (src/validators/registry.service.js): network/testnet.registry.json
+// applied to the validators table, this validator's own row checked against
+// its key. A file that does not pass, or an own row that does not match,
+// stops the boot.
+try {
+  const { hash, active } = await applyRegistry();
+  console.log(`Registry ${hash.slice(0, 16)}, ${active} active`);
+} catch (err) {
+  console.error('Registry failed:', err.message);
   process.exit(1);
 }
 

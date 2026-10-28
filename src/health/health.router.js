@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { checkDatabase } from './health.service.js';
+import { checkDatabase, identity } from './health.service.js';
 
 export const healthRouter = Router();
 
@@ -11,5 +11,6 @@ healthRouter.get('/', async (req, res) => {
     status: healthy ? 'ok' : 'degraded',
     uptime: process.uptime(),
     db,
+    ...identity(),
   });
 });

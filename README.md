@@ -12,97 +12,143 @@ machine against five databases in one PostgreSQL.
 
 ## Getting started
 
+On the VM, as the user `anos`, in `/opt/anos/anossoftware`;
+`docs/operator-guide.md` is the whole install, both servers, in the order
+of the visit:
+
 ```bash
-npm install
-cp .env-validator.example .env-validator1   # fill it in; repeat for 2 to 5
-npm run db:setup                            # role, databases, tables, validator registry
-VALIDATOR=1 npm start                       # one terminal per validator
+npm ci
+npm run make-keys -- --id <N>            # validator.key (mode 0600) and .env; prints the public key
+sudo -u postgres sh scripts/setup-db.sh  # role, database, tables
+npm start                                # loads network/testnet.env, then .env
 ```
 
-Then open <http://localhost:3001>.
+Between the keys and the start, the printed public key and the doorman's
+address go into row `<N>` of `network/testnet.registry.json`, committed and
+pulled: a validator whose own row is missing refuses to start. Then
+`curl http://127.0.0.1:3000/health` on the VM.
 
 ## Scripts
 
-| Command                   | Description                                                                 |
-| ------------------------- | --------------------------------------------------------------------------- |
-| `VALIDATOR=N npm start`   | Run validator N (loads `.env-validatorN`)                                   |
-| `VALIDATOR=N npm run dev` | Same, restarting on file changes                                            |
-| `npm run db:setup`        | Create the role, every validator's database, its tables and the validator registry (idempotent). Pass an env file to do just one. |
-| `npm run db:reset`        | Drop those databases and run setup again. Local data is lost; use after a schema change. |
+| Command                         | Description                                                                 |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| `npm start`                     | Run this validator: `node --env-file=network/testnet.env --env-file=.env src/server.js` |
+| `npm run dev`                   | Same, restarting on file changes                                            |
+| `npm run make-keys -- --id <N>` | Once, on the VM: a fresh P-256 key into `validator.key` (JSON, mode 0600, never shown) and `.env` with the id, a random database password and the key file's path. Refuses to run when either file exists. Prints the public key. `--key-file <path>` puts the key elsewhere. |
+| `npm run show-key`              | Print the public key derived from `validator.key` (or `-- <path>`) and start nothing |
+| `npm run db:setup`              | Create the role, the database and its tables (idempotent). Loads `network/testnet.env` then `.env`; pass a machine file to use another. On the VM: `sudo -u postgres sh scripts/setup-db.sh`. |
+| `npm run db:reset`              | Drop that database and run setup again. Everything in it is lost.          |
 
 ## Configuration
 
-Each validator has one env file, `.env-validatorN`, holding everything that
-process needs. `npm start` loads it with `node --env-file`, and
-`src/config/env.js` reads the variables once at boot.
+Two env files, loaded in this order by `npm start` and by the systemd unit
+(`node --env-file=network/testnet.env --env-file=.env src/server.js`); where
+both name a variable the later file wins. `src/config/env.js` reads them
+once at boot.
 
-| Variable                   | Default     | Description                                                   |
-| -------------------------- | ----------- | ------------------------------------------------------------- |
-| `PORT`                     | `3000`      | Port the server listens on (3001 to 3005 locally)             |
-| `PGHOST`                   | `127.0.0.1` | PostgreSQL host                                               |
-| `PGPORT`                   | `5432`      | PostgreSQL port                                               |
-| `PGDATABASE`               | required    | Database name (`anos1` to `anos5` locally, `anos` on a VM)    |
-| `PGUSER`                   | required    | Application role                                              |
-| `PGPASSWORD`               | required    | Application role's password                                   |
-| `VALIDATOR_ID`             | required    | 1 to 5; this validator's row in the `validators` table        |
-| `PUBLIC_KEY`               | required    | P-256 public key, 33-byte compressed point, lowercase hex     |
-| `PRIVATE_KEY`              | required    | P-256 private key, PKCS#8 DER, lowercase hex                  |
-| `GUARDED_LOCK_MINUTES`     | required    | Time lock on a guarded account, in minutes: a week (10080) in production, 1 locally |
-| `VAULT_LOCK_MINUTES`       | required    | Time lock on a vault account, in minutes: a month (43200) in production, 2 locally |
-| `LOCK_OFFSET_MINUTES`      | required    | How much more than its lock a guarded or vault transfer may be dated ahead, and how far a fund proposal's `createdAt` may be from the validator's clock: 10 in production, 1 locally |
-| `STAKE_MIN_DAO_VOTE_ANOS`  | required    | Least `transferToFund` for `daoVote`, in whole anos: 10       |
-| `STAKE_MIN_MODERATOR_ANOS` | required    | For `moderator`: 1000                                         |
-| `STAKE_MIN_ATTESTOR_ANOS`  | required    | For `attestor`: 1000; also the stake an attestor or arbitrator must hold |
-| `STAKE_MIN_GUARDIAN_ANOS`  | required    | For `guardian`: 1000                                          |
-| `STAKE_MIN_VALIDATOR_ANOS` | required    | For `validator`: 50000                                        |
-| `STAKE_MIN_MASTER_POD_ANOS`| required    | For `masterPod`: 500000                                       |
-| `GUARDIAN_VOTE_ANOS`       | required    | Guardian stake behind one vote on a fund proposal, in whole anos: 1000 |
-| `GUARDIAN_VOTE_PERCENT`    | required    | Share of the votes cast a proposal needs to pass: 70          |
-| `GUARDIAN_VOTE_MINUTES`    | required    | How long a proposal is open for votes: a week (10080) in production, 1 locally |
-| `MASTERPOD_URL`            | `http://localhost:3100` | The masterpod, asked `/get-anos-account` for every create-account submission (the binding check) |
-| `TIMESTAMP_WINDOW_SECONDS` | `120`       | Allowed clock difference on a signed account-level request, each way; nonces are kept twice this long |
+- `network/testnet.env`, committed: every value that is the same on every
+  VM of the testnet. No secrets. Each line has a comment.
+- `.env`, git-ignored: what differs per machine, three lines, written by
+  `npm run make-keys -- --id <N>`. `.example.env` shows them.
 
-`env.js` checks all of them at boot: the `PG*` and `PORT` values as before,
-`VALIDATOR_ID`, the three lock settings and the nine stake and vote settings
-as positive integers, and each key as lowercase hex of the right length. The
-last two are optional: the env files need no edit for the local setup. The
-amounts in anos are converted to millionths once, as BigInt, under
+Shared values, in `network/testnet.env`:
+
+| Variable                   | Testnet        | Description                                                   |
+| -------------------------- | -------------- | ------------------------------------------------------------- |
+| `PGHOST`                   | `127.0.0.1`    | PostgreSQL host, the VM itself                                |
+| `PGPORT`                   | `5432`         | PostgreSQL port                                               |
+| `PGUSER`                   | `anossoftware` | Application role                                              |
+| `PGDATABASE`               | `anos`         | Database name                                                 |
+| `PORT`                     | `3000`         | Port the server listens on, behind the doorman                |
+| `GUARDED_LOCK_MINUTES`     | `10`           | Time lock on a guarded account, in minutes (a week, 10080, in production) |
+| `VAULT_LOCK_MINUTES`       | `20`           | Time lock on a vault account, in minutes (a month, 43200, in production) |
+| `LOCK_OFFSET_MINUTES`      | `5`            | How much more than its lock a guarded or vault transfer may be dated ahead, and how far a fund proposal's `createdAt` may be from the validator's clock (10 in production) |
+| `STAKE_MIN_DAO_VOTE_ANOS`  | `10`           | Least `transferToFund` for `daoVote`, in whole anos           |
+| `STAKE_MIN_MODERATOR_ANOS` | `1000`         | For `moderator`                                               |
+| `STAKE_MIN_ATTESTOR_ANOS`  | `1000`         | For `attestor`; also the stake an attestor or arbitrator must hold |
+| `STAKE_MIN_GUARDIAN_ANOS`  | `1000`         | For `guardian`                                                |
+| `STAKE_MIN_VALIDATOR_ANOS` | `50000`        | For `validator`                                               |
+| `STAKE_MIN_MASTER_POD_ANOS`| `500000`       | For `masterPod`                                               |
+| `GUARDIAN_VOTE_ANOS`       | `1000`         | Guardian stake behind one vote on a fund proposal, in whole anos |
+| `GUARDIAN_VOTE_PERCENT`    | `70`           | Share of the votes cast a proposal needs to pass              |
+| `GUARDIAN_VOTE_MINUTES`    | `60`           | How long a proposal is open for votes (a week, 10080, in production) |
+| `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) |
+| `WEB_ORIGIN`               | `<fill in>`    | The wallet's origin for CORS, scheme, host and port, no path; a comma-separated list when there is more than one |
+| `TIMESTAMP_WINDOW_SECONDS` | `120`          | Allowed clock difference on a signed account-level request, each way; nonces are kept twice this long |
+
+Machine values, in `.env`:
+
+| Variable       | Description                                                                 |
+| -------------- | --------------------------------------------------------------------------- |
+| `VALIDATOR_ID` | This validator's id: its row in the `validators` table and in `network/testnet.registry.json` |
+| `PGPASSWORD`   | The application role's password, 32 hex characters from make-keys          |
+| `KEY_FILE`     | The key file, relative to the repo root or absolute; `./validator.key` when the line is absent. JSON `{ "privateKey" }` (P-256, PKCS#8 DER, lowercase hex), mode 0600: the server refuses a file that is missing, not a regular file, unreadable, or readable by group or other, naming the path and the mode. The public key is derived from it at boot, never configured. |
+
+`env.js` checks all of them at boot: `VALIDATOR_ID`, the three lock
+settings and the nine stake and vote settings as positive integers,
+`WEB_ORIGIN` as a list with at least one item, the `PG*` values and
+`MASTERPOD_URL` as present. A value still `<fill in>` is refused by name:
+`MASTERPOD_URL is still "<fill in>": fill it in network/testnet.env or
+.env`. `PORT`, `PGHOST`, `PGPORT` and `TIMESTAMP_WINDOW_SECONDS` keep their
+defaults in the code, though the shared file names them too. The amounts in
+anos are converted to millionths once, as BigInt, under
 `env.stakes.minimums` and `env.guardianVote.anosPerVote`. A bad value stops
-the process with a message naming the variable. The keys are kept as hex
-strings under `env.validator`.
+the process with a message naming the variable.
 
-Because the names follow libpq, `psql` connects to a validator's database
-with no arguments once its file is loaded:
+The `<fill in>` values are double-quoted in the file because
+`scripts/setup-db.sh` sources it with `sh`, which would read a bare `<` as
+a redirection; Node strips the quotes.
 
-```bash
-set -a && source .env-validator1 && set +a && psql
-```
-
-## Running five validators
-
-Each validator is one process with its own file, `.env-validator1` to
-`.env-validator5` (git-ignored). They listen on 3001 to 3005 and use
-databases `anos1` to `anos5`, all in the one local PostgreSQL under the same
-role. Start each in its own terminal:
+Because the names follow libpq, `psql` connects to the validator's database
+with no arguments once both files are loaded:
 
 ```bash
-VALIDATOR=1 npm start
+set -a && . network/testnet.env && . .env && set +a && psql
 ```
 
-Public keys use the same formats as the web app's account keys, so the same
-verification code serves both. Every validator knows every other one through
-the `validators` table in its own database, not through its env file: the
-same rows are seeded into all five databases from `db/validators.sql`.
+## Running
+
+One VM is one validator: one process, started by `npm start` or by the
+systemd unit `deploy/anos-validator.service`, which runs the same command
+as the user `anos` in `/opt/anos/anossoftware` and restarts it five seconds
+after a failure. The boot log, in order:
+
+```
+Validator <id>, public key <66 hex>
+Connected to PostgreSQL 17.x at 127.0.0.1:5432/anos
+Genesis accounts written                 (or: Genesis accounts in place)
+Registry <16 hex>, <n> active
+Validator <id> listening on http://localhost:3000
+```
+
+A configuration error stops the process with a message naming the
+variable, the key file or the registry row; under systemd it is retried
+every five seconds, and `journalctl -fu anos-validator` shows the reason
+each time.
+
+Every validator knows every other one through the `validators` table in
+its own database, filled from `network/testnet.registry.json` at boot (see
+Database) and read fresh on every call. Public keys use the same format as
+the web app's account keys, so the same verification code serves both.
 
 ## Database
 
 The whole schema is one file, `db/schema.sql`: the tables, the
 `set_updated_at()` trigger function, the triggers and the column comments.
-`db/validators.sql` seeds the validator registry. `npm run db:setup` applies
-both to every validator's database and is safe to re-run: it adds the tables
+`npm run db:setup` applies it and is safe to re-run: it adds the tables
 that are missing and replaces the functions and triggers, but it never
-alters a table that already exists. After changing an existing table
-locally, run `npm run db:reset` to drop the databases and build them again.
+alters a table that already exists. After changing an existing table, run
+`npm run db:reset` to drop the database and build it again.
+
+The validator registry is not part of the schema:
+`network/testnet.registry.json`, committed, is applied by the server at
+boot (`src/validators/registry.service.js`), after genesis and before
+listening, in one transaction: every row of the file upserted
+(`public_key`, `url`, `active`; `is_leader` untouched), every row not in
+the file set inactive, `firstLeader` made leader when no row is, this
+validator's own row checked against its key file, and the registry hash, a
+SHA-256 over the canonical JSON of the rows ordered by id without the
+leader flag, computed for `/health`.
 
 Tables:
 
@@ -131,8 +177,10 @@ Tables:
   `escrow_transfers` or `fund_proposals`, with the whole row and its child
   rows as one JSON record.
 - `validators`: the registry of validators, this one included: `id`,
-  `public_key`, `url` and `active`. Rows are never deleted; a validator that
-  leaves is set `active = false` so its old signatures can still be verified.
+  `public_key`, `url` and `active`, filled from
+  `network/testnet.registry.json` at boot. Rows are never deleted; a
+  validator that leaves is set `active = false` so its old signatures can
+  still be verified.
 - `nonces`: the replay cache of signed account-level requests (the reads),
   the keyholder's table as it is: `nonce` and `expires_at`, swept by the
   next insert. Added after the others were in use, so `npm run db:setup`
@@ -878,13 +926,14 @@ feature like `health` may keep its handler inline in the router.
 ```
 src/
   app.js                 builds the app: middleware, feature routers, 404, errors
-  server.js              verifies the DB, runs genesis, starts HTTP, handles graceful shutdown
-  config/env.js          reads and validates environment variables once
+  server.js              prints who this is, verifies the DB, runs genesis, applies the registry, starts HTTP, handles graceful shutdown
+  config/env.js          reads and validates the two env files once (network/testnet.env, then .env)
   db/pool.js             shared pg connection pool
   middleware/            cross-cutting middleware, one per file
   util/is-object.js      the one helper the shape checks share
   util/submission-response.js  how a handler logs and answers a submission (202 / 400)
   util/result.js         ok / refuse / answer, the shape the account level and the reads use (the keyholder's)
+  util/version.js        the commit and tag git reports, read once at boot, for /health
   auth/                  the account level: require-account.js, signed-request.js, common-checks.js, nonces.queries.js;
                          the attestor gate on top of it: require-attestor.js
   masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check
@@ -895,6 +944,7 @@ src/
   crypto/canonical.js    canonical JSON (canonicalize package) and its hash
   crypto/bytes.js        hex / base64 decoding with byte-length checks
   crypto/signatures.js   ECDSA P-256 signing and verification, ML-DSA-87 verification
+  crypto/key-file.js     reads and checks the key file (mode 0600, JSON hex); derives the public key
   accounts/              feature: accounts (create-account)
     account-keys.js      the eight account keys, in order, with algorithms
     account-types.js     the four account types a submission may ask for
@@ -944,46 +994,39 @@ src/
   validators/            feature: the validator registry and validator-to-validator messages
     validators.queries.js  active peers; one validator with its keys; the leader
     validators.client.js   POST one message to each peer, in parallel
-    validators.signing.js  sign a payload with own key; verify one with a peer's
+    validators.signing.js  loads the key file; own public key; sign a payload with own key; verify one with a peer's
+    registry.service.js    applies network/testnet.registry.json at boot: the shape checks, the five rules, the hash
+    registry.queries.js    the apply's SQL
     validators.messages.js build and sign each message type; send calls, check answers
     validators.service.js  receive and check each message type; the leader round
     validators.handlers.js HTTP in and out
     validators.router.js   the validator-to-validator endpoints
-  health/                feature: liveness + database check
+  health/                feature: GET /health: status, database round trip, id, public key, commit, tag, registry hash
     health.router.js
     health.service.js
 db/
   schema.sql             the whole schema, built from nothing
-  validators.sql         the validator registry rows
 docs/
   schemas.md             the specification of assisted accounts, stakes, the fund and escrow
   build-plan.md          how it was built, step by step
+  operator-guide.md      the install on a worker VM, both servers, in the order of the visit
 scripts/
-  setup-db.sh            role, databases, schema and registry for each env file
-  reset-db.sh            drop those databases and set them up again
+  setup-db.sh            role, database and schema, from network/testnet.env and the machine file
+  reset-db.sh            drop that database and set it up again
   find-psql.sh           locates psql for the other two scripts
+  make-keys.js           once, on the VM: the key file and .env; prints the public key
+  show-key.js            the public key derived from the key file; starts nothing
+network/
+  testnet.env            every value that is the same on every VM, committed
+  testnet.registry.json  the registry, one row per validator, applied at boot
+deploy/
+  anos-validator.service the systemd unit, identical on every VM
 ```
 
 ## PostgreSQL on the Compute Engine VM
 
-The VM runs PostgreSQL from the Debian/Ubuntu packages (or the official PGDG
-repository for the newest major version). Its defaults already match what this
-app expects: it listens on `127.0.0.1:5432`, the `postgres` OS user is a
-superuser over the unix socket, and TCP connections require a password
-(`scram-sha-256`).
-
-One VM is one validator, so it has one env file, named after its id:
-
-```bash
-sudo apt install postgresql
-cp .env-validator.example .env-validator1   # PGDATABASE=anos, a strong PGPASSWORD, this VM's keys
-sudo -u postgres sh scripts/setup-db.sh .env-validator1
-VALIDATOR=1 npm start
-```
-
-`db/validators.sql` ships with the local development keys and `127.0.0.1`
-urls. A testnet needs its own copy of that file with the real validators'
-public keys and hosts before `db:setup` runs there.
-
-Locally, Homebrew's PostgreSQL uses `trust` auth on localhost, so the password
-is not checked there. The connection settings are otherwise identical.
+The install, both servers on one Debian 13 worker VM, is
+`docs/operator-guide.md`: the VM and its packages, Cloud KMS, the user
+`anos` and the two clones under `/opt/anos`, `make-keys` in each repo, the
+databases, the registry row and the systemd units, in the order of the
+onboarding visit.
