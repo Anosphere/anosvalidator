@@ -1015,6 +1015,7 @@ scripts/
   find-psql.sh           locates psql for the other two scripts
   make-keys.js           once, on the VM: the key file and .env; prints the public key
   show-key.js            the public key derived from the key file; starts nothing
+  bootstrap-worker.sh    the worker VM: both servers, operator guide steps 4 to 10, and every update (as root)
 network/
   testnet.env            every value that is the same on every VM, committed
   testnet.registry.json  the registry, one row per validator, applied at boot
@@ -1029,4 +1030,11 @@ guide, `guides/operator-guide.md`, kept beside the repos in the testnet folder:
 the VM and its packages, Cloud KMS, the user
 `anos` and the two clones under `/opt/anos`, `make-keys` in each repo, the
 databases, the registry row and the systemd units, in the order of the
-onboarding visit.
+onboarding visit. `scripts/bootstrap-worker.sh`, run on the worker over SSH
+with the line below, does steps 4, 6, 7, 8 and 10 of the guide and every
+update, both servers, and is run again with nothing after the script name
+once the registry row is in:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Anosphere/anosvalidator/main/scripts/bootstrap-worker.sh && sudo sh bootstrap-worker.sh --id <N> --home-x25519 <64 hex> --home-mlkem <3136 hex> --signing-key <66 hex>
+```
