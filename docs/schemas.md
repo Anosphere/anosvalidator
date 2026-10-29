@@ -1084,3 +1084,169 @@ here; nothing in 14.1 was changed.
 - **`node --check`** passed on the twelve JavaScript files written or
   edited. Nothing booted, no database was touched, no scratch file was
   written.
+
+## 15. Bootstrap build 1 (2026-10-29)
+
+Built 2026-10-29 straight from
+`~/Desktop/Z-TestNet/forclaude/bootstrap-build-1-code-ready.md` (FINAL,
+decided in its planning chat): one script per machine for onboarding a
+validator, replacing the paste-by-paste walkthrough of the operator guide
+with one pasted line per machine. This repo holds the worker's script;
+doormansoftware holds the Cloud Shell and doorman scripts (its
+`docs/schemas.md`, section 2) and the record of what the three share. The
+operator guide, `guides/operator-guide.md` beside the repos, was rewritten
+in two parts: Part A, the visit as it runs with the scripts, and Part B,
+the same work by hand, the fallback. Nothing about the server, the
+protocol, the registry, the unit, the env files, make-keys, show-key or
+the database scripts changed. No check ran but `sh -n` on the script:
+validator 5's onboarding visit is the first run and the test.
+
+### 15.1 The decisions, as they apply to the worker script
+
+- **One re-runnable script for the worker.** `scripts/bootstrap-worker.sh`,
+  run as root over SSH after the doorman line (the worker's internet goes
+  through the doorman), does the guide's steps 4, 6, 7 and 8 on the first
+  run and stops after printing the validator's public key line, `done
+  through step 8: waiting for registry row <N>`; once the row is merged,
+  the same line again does steps 9 and 10; later runs do step 11. Each
+  point does what is still missing and answers `already` for what is
+  done. No separate update command; the same pasted line downloads the
+  script from `main` with `curl -fsSLO` and runs it with `sudo sh`.
+- **Arguments.** `--id` and the three keyholder GUI values,
+  `--home-x25519` (64 lowercase hex), `--home-mlkem` (3136),
+  `--signing-key` (66, starting `02` or `03`, the one value for both
+  `KEYHOLDER_PUBLIC_KEY` lines), named flags parsed by a `while` and a
+  `case`, each checked for shape before anything happens; lowercase only,
+  since the keyholder's `env.js` accepts only lowercase hex. `--id` is
+  required until `/opt/anos/anossoftware/.env` exists; given, it must equal
+  `VALIDATOR_ID` there and `KEYHOLDER_ID` in the keyholder's `.env`; absent,
+  it is read from `VALIDATOR_ID`. The GUI flags are optional on every run:
+  given, each is written where its line is still `"<fill in>"` and must
+  equal the line where it is filled; absent while a line is unfilled, the
+  keyholder waits and the done line says so. So every later run is the
+  line with nothing after the script name, and nobody keeps the
+  3136-character value around.
+- **What the script works out itself.** From the metadata server: the
+  VM's name (must be `worker`), that it has no external IP, the project
+  id, the zone (the region is the zone without its last `-x`) and the
+  service account's scopes. `KMS_KEY_NAME` is assembled as
+  `projects/<project id>/locations/<region>/keyRings/anos-testnet/cryptoKeys/keyholder-<N>`,
+  so the key is always the one in the VM's own region, the one the Cloud
+  Shell script made.
+- **Log and screen.** `/var/log/anos-bootstrap.log`, mode 0600, every
+  command's output, each run under `=== bootstrap-worker.sh <UTC time>
+  <arguments> ===`; the screen gets one line per guide point and a final
+  line, `done ...` or `failed at step <number> (<name>): see <log>` after
+  the last five log lines; an argument failure is `failed at the argument
+  check: <reason>`.
+- **Service users.** `sudo -iu anos bash -c '...'` for the clones, `npm
+  ci`, `make-keys` and the pulls, as the guide; `sudo -u anos` for
+  show-key, the `sed` on the keyholder's `.env` and git's `rev-parse` and
+  `diff`; `sudo -u postgres sh <script>` for the three database scripts.
+- **Nothing private.** The script reads `VALIDATOR_ID`, `KEYHOLDER_ID` and
+  the five fillable lines, each with `sed -n` on the one line, never by
+  printing a file; `PGPASSWORD` lines are never read; the key files are
+  read only by show-key, as `anos`, which prints the public key; make-keys
+  prints public values only, into the log.
+
+### 15.2 Files
+
+New: `scripts/bootstrap-worker.sh`. Changed: `README.md` ("PostgreSQL on
+the Compute Engine VM" gained the worker line; "Project layout" lists the
+script), this file. Outside the repo: the guide, doormansoftware's two
+scripts, README and record, keyholdersoftware's README (one sentence).
+
+Step lines, in order: `4.1 look` (Debian 13 required; the clock, the
+internet through the doorman, which must answer 200, and the
+cloud-platform scope, which must be present), `4.2 packages` (node 24,
+psql 17, postgresql active, git; NodeSource's setup script for node),
+`6.2 install` (user `anos`, `/opt/anos` 755 on every run, each repo cloned
+where missing, `npm ci` where `node_modules` is missing), `7.2 keys` (each
+repo's make-keys when its key file and `.env` are both missing; then the
+public key from show-key, printed on every run), `7.3 keyholder .env` (the
+five lines, written where still `<fill in>` and the value is known,
+compared where filled; the signing key on both `KEYHOLDER_PUBLIC_KEY`
+lines), `8.2 databases` (the guide's three scripts when the look of 8.1
+misses a database or a role), `9.1 pull` (for each repo that existed
+before the run, `git pull --ff-only`, `npm ci` when the lock file changed),
+`9.1 registry row <N>` (`present, <url>`, or `absent`, which ends the run
+waiting), `10.2 validator` (both unit files placed when missing or
+different, enabled and started when not active, restarted when its repo's
+HEAD moved, printed as `11.3`; then up to thirty seconds for 3000 to
+answer 200 and the boot lines), `10.3 keyholder` (the same when all five
+lines are filled, up to ninety seconds for 3200; else `waiting for the
+three GUI values`). Done lines: `done through step 8: waiting for registry
+row <N>` after `Give us this line for the registry: Validator <N>, public
+key <66 hex>` and `Once the row is on GitHub, run this same command again;
+no arguments are needed.`; `done: validator <N> and keyholder <N> up;
+registry <16 hex>, <n> active`; `done: validator <N> up, registry <16
+hex>, <n> active; the keyholder waits for the three GUI values`; `done:
+nothing to do; validator <N> on registry <16 hex>, <n> active; keyholder
+active`.
+
+### 15.3 Notes from the build
+
+Where the plan was silent, the simplest thing was chosen and is recorded
+here; nothing in 15.1 was changed.
+
+- **Journal reads are scoped to the unit's current systemd invocation**
+  (`journalctl _SYSTEMD_INVOCATION_ID=<id>`), so a boot line of an earlier
+  run is never read as this one's. A validator up for weeks may have its
+  boot lines rotated out of the journal: then `Validator <N>, public key`
+  and `Registry <16 hex>, <n> active` are taken from its health answer,
+  parsed by node from the JSON, and the line says so; a keyholder that
+  answers 200 passed its KMS self-test, so a missing `KMS ok` line is
+  reported as `KMS ok at boot (the line is no longer in the journal)`.
+- **Boot errors are caught while waiting.** Each second of the wait for
+  200, the unit's journal is read for `Registry failed`, `Genesis failed`,
+  `Could not connect`, `KMS self-test failed` or `Error:` (an `env.js`
+  refusal surfaces as Node's uncaught error, naming the `.env` line), and
+  the first such line fails the step at once, so a keyholder with a wrong
+  value does not wait the ninety seconds. The timeout message quotes the
+  last such line of the unit's recent journal.
+- **A `db/` change in the 9.1 pull runs the three database scripts
+  again**, right after the pull, printed as a second `8.2 databases` line:
+  the pull comes after 8.2 in the guide's order, so the scripts cannot
+  know of it at 8.2. They are idempotent.
+- **A registry row that is present but inactive fails at 9.1** (`registry
+  row <N> is inactive`); the plan named only absent and another key.
+- **The unit files are placed with `install -m 0644` when `cmp -s`
+  differs** and `daemon-reload` runs only then; a changed unit alone
+  restarts nothing, since a restart needs the repo's HEAD to have moved
+  in this run, which a unit change always comes with.
+- **4.2 fails when `postgresql` is not active after the install**, with
+  `systemctl status postgresql` named; the database scripts at 8.2 would
+  otherwise fail with a worse message. "Installed" for git is
+  `dpkg-query`; node is `node -v` starting `v24`; psql is `psql --version`
+  starting `17.`.
+- **NodeSource's setup script is downloaded to a temporary file and then
+  run** instead of piped into bash, as in the doorman script, and `node
+  -v` is checked afterwards. The temporary directory, which also holds the
+  health answers for parsing, is removed by the EXIT trap.
+- **4.1 writes its four values to the log before the checks**, so a failed
+  check still shows what was found; the scope is read from the metadata
+  server's `instance/service-accounts/default/scopes`, one scope per line.
+- **The key files are looked for at `validator.key` and `keyholder.key`**
+  in each repo root, make-keys' defaults; `KEY_FILE` is not among the
+  lines the script reads. make-keys runs whenever the two files of a repo
+  do not both exist, so when only one exists its own refusal is the
+  failure, as the plan says.
+- **show-key's output is checked for the shape of a public key** before
+  it is printed or compared with the registry row.
+- **7.3 reports per line** (`KMS_KEY_NAME written; home x25519 written,
+  home mlkem written, signing key 1 written, signing key 2 written`), with
+  `all five lines already filled` when nothing was to do and `(give
+  --home-x25519, --home-mlkem, --signing-key)` appended while a GUI line
+  is unfilled. Both `"<fill in>"` (as make-keys writes it) and a bare
+  `<fill in>` count as unfilled. The `sed -i` runs as `anos`, so the file
+  keeps its owner and mode.
+- **A GUI value that is given and differs from its filled line** is an
+  argument failure that prints both values (public keys); a shape
+  failure prints the length given rather than a 3136-character value.
+- **`/opt/anos` is chmod-ed 755 on every run**, as the plan says, and
+  `id anos` decides the user.
+- **Which done line:** the keyholder-waits line when a GUI line is
+  unfilled; nothing to do when no point of steps 4 to 8 did work, neither
+  HEAD moved and both units were active; else the both-up line.
+- **The worker script exports `DEBIAN_FRONTEND` only**; root's `HOME` does
+  not matter here (acme.sh is the doorman's).
