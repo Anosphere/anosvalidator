@@ -2,6 +2,7 @@
   "firstLeader": 1,
   "validators": [
     { "id": 1, "publicKey": "021c35350f8ee1654cf737e26509ce0b70a0079425227e002435e9dcc6fc2f35c4", "url": "https://35.237.125.139:3000", "active": true },
-    { "id": 2, "publicKey": "0229ee18f3b71e30d2d7090db7b0a1df7fcb4832443b65f78755df9153561a0add", "url": "https://8.229.28.4:3000", "active": true }
+    { "id": 2, "publicKey": "0229ee18f3b71e30d2d7090db7b0a1df7fcb4832443b65f78755df9153561a0add", "url": "https://8.229.28.4:3000", "active": true },
+    { "id": 3, "publicKey": "03faf925a2e13c7db9753ef4756d82e40c9f3d8d419d7b8ac319e86e28456ca368", "url": "https://35.224.15.68:3000", "active": true }
   ]
 }
