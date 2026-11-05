@@ -230,6 +230,7 @@ multi-word URL segments.
 | POST   | `/escrow-signature` | The seller's success, the buyer's cancel, either side's dispute or an arbitrator's verdict on an escrow, by `payload.type`, answered the same way |
 | POST   | `/get-account`    | Account level (next section). The signer's `type`, `balance` (millionths, a decimal string), `latestTransactionId` and `createdAt`: `200`, else `400` or `401` + reason |
 | POST   | `/list-transactions` | Account level. The signer's garlic chain links, newest first, paged with `beforePosition` and `limit`, and its pending transaction: `200`, else `400` or `401` + reason |
+| POST   | `/list-escrows`   | Account level. The signer's open escrow trades, as seller or buyer, newest first, each with its `stage`: `200 { escrows }`, else `400` or `401` + reason |
 | POST   | `/list-assisted-transfers` | Attestor level (account level plus attestor stake). The assisted transfers waiting for attestors on this validator, newest first: `200 { transfers }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/list-disputed-escrows` | Attestor level. The escrows in dispute that no verdict has decided on this validator, newest first: `200 { escrows }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/transaction-approval` | Validator to validator. `200` + a transaction approved receipt once the transaction checks out and is stored, else `400` + reason |
@@ -278,7 +279,7 @@ by `key1` (64 bytes r||s over the SHA-256), `mldsa` by `postQuantumKey1`
 6. the handler gets the account id as `req.account` and `payload.body` as
    `req.body`.
 
-The two routes answer the signer's own account only:
+The three routes answer the signer's own account only:
 
 - `POST /get-account`, body `{}`: `200 { accountId, type, balance,
   latestTransactionId, createdAt }`. `balance` is millionths as a decimal
@@ -295,6 +296,17 @@ The two routes answer the signer's own account only:
   approved }`. The other holding tables are not listed; a guarded or vault
   transfer shows up when it lands. Bad values are `400 invalid
   beforePosition` and `400 invalid limit`.
+- `POST /list-escrows`, body `{}` (added 2026-11-05, `docs/schemas.md`
+  section 16): `200 { escrows }`, every `escrow_transfers` row where
+  `account_id` (the seller) or `account_id_to` (the buyer) is the signer,
+  newest first, at most 200, each `{ transactionId, accountId, accountIdTo,
+  amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ]
+  }`. Open trades only: nothing from `logs` or `archives`. `stage` is one
+  of `waiting` (not every validator has accepted the trade), `held`
+  (nothing signed on it), `releasing` (the seller's success on it),
+  `cancelling` (the buyer's cancel on it) or `disputed` (a dispute on it);
+  `disputedBy` the signer of the dispute or `null`; `verdicts` the escrow's
+  arbitrations in arbitrator order, without the arbitrator's id.
 
 Refusals are logged `failed: <reason>` like every other route.
 
@@ -937,8 +949,8 @@ src/
   auth/                  the account level: require-account.js, signed-request.js, common-checks.js, nonces.queries.js;
                          the attestor gate on top of it: require-attestor.js
   masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check
-  reads/                 feature: the two signed reads (get-account, list-transactions) and the two attestor reads
-                         (list-assisted-transfers, list-disputed-escrows)
+  reads/                 feature: the three signed reads (get-account, list-transactions, list-escrows) and the two
+                         attestor reads (list-assisted-transfers, list-disputed-escrows)
     reads.router.js, reads.handlers.js, reads.service.js, reads.queries.js
   crypto/hash.js         SHA-256, digest decoding and constant-time comparison
   crypto/canonical.js    canonical JSON (canonicalize package) and its hash
