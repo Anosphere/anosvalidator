@@ -585,6 +585,7 @@ replay`; the new `nonces` table, the keyholder's).
 | ------ | -------------------- | ------- |
 | POST   | `/get-account`       | `200 { accountId, type, balance: millionths as a decimal string, latestTransactionId: hex \| null, createdAt }`; `latestTransactionId` is the link with the highest `position` whose `account_id` is the signer |
 | POST   | `/list-transactions` | body `{ beforePosition?, limit? (default 50, at most 200) }`; `200 { transactions: [ { transactionId, position, type, accountId, accountIdTo, amount, createdAt } ], pending: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, approved } ] }`, the links where the signer sent or received, `position` descending, and its pending row (at most one) read from `og_transaction.payload` |
+| POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
 
 `/create-account` gained a fifth check after uniqueness, on the receiving
 validator only: the masterpod is asked `POST /get-anos-account { accountId }`
@@ -1250,3 +1251,98 @@ here; nothing in 15.1 was changed.
   HEAD moved and both units were active; else the both-up line.
 - **The worker script exports `DEBIAN_FRONTEND` only**; root's `HOME` does
   not matter here (acme.sh is the doorman's).
+
+## 16. The escrow read (2026-11-05)
+
+Decided 2026-11-05 in the wallet's escrow trades planning chat; the wallet
+spec (`~/Desktop/Z-TestNet/web_app/docs/schemas.md`, section 5.4) carries
+the same lines. The wallet showed nothing of an escrow while it waited: the
+reads of section 8 list the chain and the pending row only, and every
+follow-up needed the transaction id pasted from the one-time `202`. One
+more read at the account level answers the signer's open escrow trades,
+both sides, so the wallet can list them and act on each. Nothing about the
+escrow rules, the follow-ups or the leader round changed.
+
+### 16.1 The route
+
+Account level (section 8, `src/auth/require-account.js`): the same
+envelope and the same six checks as `/get-account`; no stake. It joins
+`src/reads/` beside the other reads.
+
+| Method | Path | Answers |
+| ------ | ---- | ------- |
+| POST | `/list-escrows` | body `{}`; `200 { escrows: [ { transactionId, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }` |
+
+Every `escrow_transfers` row where `account_id` (the seller) or
+`account_id_to` (the buyer) is the signer, newest first by `created_at`,
+at most 200 rows (`MAX_LIMIT`, the cap `/list-transactions` has). The cap
+is a guard, not paging: a seller holds one open escrow at a time (one held
+transaction per account) and a buyer one per seller trading with it. Open
+trades only: nothing from `logs`, which may be purged (section 7), or
+`archives`. A released escrow is on the chain under the same
+`transaction_id`, so `/list-transactions` shows it to both sides for good;
+a cancelled one leaves no trace a wallet reads.
+
+`transactionId`, `accountId`, `accountIdTo`, `amount` and `createdAt` as
+the attestor reads answer them (13.2, `heldTransferOf`). `disputedBy` is
+`dispute_signature.payload.accountId`, or `null` while there is no
+dispute. `verdicts` are the escrow's `escrow_arbitrations` rows in
+`arbitrator_account_id` order, each `verdict` (`success` or `cancel`) and
+`approved` as stored, without the arbitrator's id: a party learns how many
+verdicts there are and what they say, never which attestor said what. The
+body is not read. Refusals are the account level's, logged `failed:
+<reason>` like every other route.
+
+### 16.2 The stage
+
+`stage` names where the trade is. The validator decides it from the row's
+columns, so the word is made beside the rules that read the same columns
+(5.5, 5.6 and 6), and a change to those rules has to change this table.
+The first line that matches wins:
+
+| `stage` | The row | What it means |
+| ------- | ------- | ------------- |
+| `waiting` | `approved` false | not every validator has accepted the trade yet; no follow-up is accepted on it (5.1) |
+| `disputed` | `dispute_signature IS NOT NULL` | a dispute is on it; only verdicts move it now, and two approved verdicts that agree close it (5.6) |
+| `cancelling` | `cancel_signature IS NOT NULL` | the buyer's cancel is on it; once approved, the row moves to `logs` (5.5) |
+| `releasing` | `success_signature IS NOT NULL` | the seller's success is on it; the next leader round writes it (section 6) |
+| `held` | none of the above | accepted and untouched: the seller may send `escrowSuccess`, the buyer `escrowCancel`, either `escrowDispute` |
+
+A slot is only filled on an approved row (a follow-up on an unapproved
+transaction is refused, 5.1), and each slot blocks the other two (5.5), so
+at most one line past the first can match; the order is a definition, not
+a race. "Being written after a dispute" is `disputed` with two approved
+`success` verdicts; it lasts one round. A wallet that meets a `stage` it
+does not know treats the trade as open and offers no action, so a sixth
+stage added here cannot make it do the wrong thing.
+
+### 16.3 Notes from the build
+
+Built 2026-11-05 straight from 16.1 and 16.2. Files: `src/reads/
+reads.queries.js` (`findOpenEscrowsFor(accountId, limit)`: the row, three
+`IS NOT NULL` booleans for the slots, `dispute_signature` for who disputed,
+and `verdicts` built in SQL as 13.3's query builds them, without the
+`encode` of the arbitrator), `reads.service.js` (`ESCROW_STAGES`,
+`listEscrows(accountId)` on `heldTransferOf`, `stageOf(row)` in the order
+of 16.2's table), `reads.handlers.js`, `reads.router.js` (behind
+`requireAccount`), `app.js` (the comment), the table of section 8, and
+the README (the endpoints table, the account-level reads, the folder
+list). No schema change: every column read was in place.
+
+Checks run: `node --check` on the five source files, and the query's SQL
+run by psql against the local `anos1` inside one transaction that inserted
+two throwaway escrows (one in dispute with an approved `success` and an
+unapproved `cancel` verdict, one held) and was rolled back: the buyer of
+the first and seller of the second got both rows with the right booleans,
+`disputedBy` and `verdicts`; a stranger got none; the live tables were
+empty before and after. Not run: no validator was booted (this copy has no
+rig, and the user runs the servers) and the live validators were not
+touched; the wallet (its step 2) is the first caller.
+
+Rollout: read only, so a validator with the route and one without agree on
+everything else; the wallet reads from one validator (`DEFAULT_VALIDATOR`),
+which pulls first, the rest at the next pull round (operator guide, the
+`anos-validator` pull line). The doorman's validator door passes only the
+paths in its table (doormansoftware `src/doors/validator.routes.js`,
+`signedReadCheck` for the signed reads); `/list-escrows` has to be added
+there, and that doorman restarted, before a wallet can reach the route.

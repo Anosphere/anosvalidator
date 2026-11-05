@@ -4,14 +4,16 @@ import {
   findAccountSummary,
   findAssistedWaitingForAttestors,
   findLatestTransactionId,
+  findOpenEscrowsFor,
   findPendingFor,
   findTransactions,
   findUndecidedDisputedEscrows,
 } from './reads.queries.js';
 
 /**
- * The reads feature (wallet spec 5.4): the two things an account may read
- * about itself, nothing about anyone else. The caller is the verified
+ * The reads feature (wallet spec 5.4): the three things an account may read
+ * about itself (its account, its transactions, its open escrow trades),
+ * nothing about anyone else. The caller is the verified
  * signer, req.account from src/auth/require-account.js; the body is the
  * route's own object. Each function returns ok(status, body) or
  * refuse(status, reason) (util/result.js), so the handlers only log and
@@ -20,9 +22,23 @@ import {
 
 const BAD_SHAPE = 'bad request shape';
 
-/** /list-transactions: the default and the most rows one call answers. */
+/** /list-transactions: the default and the most rows one call answers; /list-escrows answers at most MAX_LIMIT too. */
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+
+/**
+ * The stages of an open escrow trade, as /list-escrows names them (spec
+ * 16.2): waiting until every validator accepted the trade; held when
+ * nothing is signed on it; releasing with the seller's success on it;
+ * cancelling with the buyer's cancel on it; disputed with a dispute on it.
+ */
+export const ESCROW_STAGES = Object.freeze({
+  WAITING: 'waiting',
+  HELD: 'held',
+  RELEASING: 'releasing',
+  CANCELLING: 'cancelling',
+  DISPUTED: 'disputed',
+});
 
 const hex = (buffer) => (buffer === null || buffer === undefined ? null : buffer.toString('hex'));
 
@@ -86,6 +102,43 @@ function pendingOf(accountId, row) {
     createdAt: typeof payload.createdAt === 'string' ? payload.createdAt : row.created_at.toISOString(),
     approved: row.approved,
   };
+}
+
+/**
+ * POST /list-escrows (spec 16). Body { }. escrows: the escrow_transfers
+ * rows where the signer is the seller (account_id) or the buyer
+ * (account_id_to), newest first, at most MAX_LIMIT: the open trades only,
+ * nothing from logs or archives. The transfer fields as the attestor reads
+ * answer them; stage from stageOf; disputedBy is
+ * dispute_signature.payload.accountId or null; verdicts the escrow's
+ * arbitrations in arbitrator order as { verdict, approved }, no arbitrator
+ * ids.
+ */
+export async function listEscrows(accountId) {
+  const rows = await findOpenEscrowsFor(accountId, MAX_LIMIT);
+  const escrows = rows.map((row) => ({
+    ...heldTransferOf(row),
+    stage: stageOf(row),
+    disputedBy: isObject(row.dispute_signature?.payload) ? stringOrNull(row.dispute_signature.payload.accountId) : null,
+    verdicts: row.verdicts,
+  }));
+  return ok(200, { escrows });
+}
+
+/**
+ * Where an open escrow trade is, from its row (spec 16.2), the first line
+ * that matches: not approved is waiting; then the slot that holds an object
+ * names the stage, dispute before cancel before success; an approved row
+ * with every slot empty is held. A slot is only filled on an approved row
+ * and each slot blocks the other two (5.5), so at most one of the three
+ * ever holds an object; the order is a definition, not a race.
+ */
+function stageOf(row) {
+  if (!row.approved) return ESCROW_STAGES.WAITING;
+  if (row.has_dispute) return ESCROW_STAGES.DISPUTED;
+  if (row.has_cancel) return ESCROW_STAGES.CANCELLING;
+  if (row.has_success) return ESCROW_STAGES.RELEASING;
+  return ESCROW_STAGES.HELD;
 }
 
 /**

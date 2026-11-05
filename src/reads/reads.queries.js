@@ -110,3 +110,33 @@ export async function findUndecidedDisputedEscrows() {
   );
   return rows;
 }
+
+/**
+ * The open escrow trades where this account is the seller (account_id) or
+ * the buyer (account_id_to) (spec 16.1): every escrow_transfers row either
+ * way, newest first by created_at, at most `limit` rows. Each row:
+ * transaction_id, og_transaction, approved, created_at, dispute_signature,
+ * three booleans saying which slot holds an object (has_success, has_cancel,
+ * has_dispute), and verdicts, the escrow's escrow_arbitrations rows in
+ * arbitrator_account_id order as a JSON array of { verdict, approved },
+ * empty when it has none. No arbitrator ids: a party learns what the
+ * verdicts say, never which attestor said what.
+ */
+export async function findOpenEscrowsFor(accountId, limit) {
+  const { rows } = await query(
+    `SELECT e.transaction_id, e.og_transaction, e.approved, e.created_at, e.dispute_signature,
+            e.success_signature IS NOT NULL AS has_success,
+            e.cancel_signature IS NOT NULL AS has_cancel,
+            e.dispute_signature IS NOT NULL AS has_dispute,
+            COALESCE((SELECT json_agg(json_build_object('verdict', a.verdict, 'approved', a.approved)
+                                      ORDER BY a.arbitrator_account_id)
+                      FROM escrow_arbitrations a
+                      WHERE a.transaction_id = e.transaction_id), '[]'::json) AS verdicts
+     FROM escrow_transfers e
+     WHERE e.account_id = $1 OR e.account_id_to = $1
+     ORDER BY e.created_at DESC
+     LIMIT $2`,
+    [accountId, limit],
+  );
+  return rows;
+}
