@@ -11,6 +11,7 @@
     { "id": 8, "publicKey": "03e5973727968d89312881043fceeb705e6e8f3d13aee248bfb56c84c3875d2a3d", "url": "https://34.77.166.178:3000", "active": true },
     { "id": 9, "publicKey": "030be291031dc39a1668b031f1e5a18ff32269375776da5f5641bbb778ac49aacb", "url": "https://34.7.2.0:3000", "active": true },
     { "id": 10, "publicKey": "039751f4a5511271a458d6057b19c3b0686052b50b7d743f7ba11fe124872c9817", "url": "https://34.24.100.147:3000", "active": true },
-    { "id": 11, "publicKey": "0347cdcbd8f98b19fed7ea6428f25ec8bf48003d7db7380f621e8032cc63d9ae0a", "url": "https://34.70.243.196:3000", "active": true }
+    { "id": 11, "publicKey": "0347cdcbd8f98b19fed7ea6428f25ec8bf48003d7db7380f621e8032cc63d9ae0a", "url": "https://34.70.243.196:3000", "active": true },
+    { "id": 12, "publicKey": "03696eded72eab3972b0cf0c59d521a91715e728903d73aef2eb654820c0f5c27c", "url": "https://34.6.221.211:3000", "active": true }
   ]
 }
