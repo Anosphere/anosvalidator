@@ -229,9 +229,10 @@ multi-word URL segments.
 | POST   | `/guardian-vote`  | A guardian's vote on a fund proposal, answered the same way |
 | POST   | `/escrow-signature` | The seller's success, the buyer's cancel, either side's dispute or an arbitrator's verdict on an escrow, by `payload.type`, answered the same way |
 | POST   | `/get-account`    | Account level (next section). The signer's `type`, `balance` (millionths, a decimal string), `latestTransactionId` and `createdAt`: `200`, else `400` or `401` + reason |
-| POST   | `/list-transactions` | Account level. The signer's garlic chain links, newest first, paged with `beforePosition` and `limit`, and its pending transaction: `200`, else `400` or `401` + reason |
+| POST   | `/list-transactions` | Account level. The signer's garlic chain links, newest first, paged with `beforePosition` and `limit`, cut to a date range with `from` and `to`, and its pending transaction: `200`, else `400` or `401` + reason |
 | POST   | `/list-escrows`   | Account level. The signer's open escrow trades, as seller or buyer, newest first, each with its `stage`: `200 { escrows }`, else `400` or `401` + reason |
 | POST   | `/get-assisted-transfer` | Account level. The signer's own held assisted transfer, with its `stage` and the number of attestations on it, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
+| POST   | `/get-locked-transfer` | Account level. The signer's own locked transfer, a guarded or vault transfer waiting out its time lock, with its `unlocksAt` and its `stage`, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
 | POST   | `/list-assisted-transfers` | Attestor level (account level plus attestor stake). The assisted transfers waiting for attestors on this validator, newest first: `200 { transfers }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/list-disputed-escrows` | Attestor level. The escrows in dispute that no verdict has decided on this validator, newest first: `200 { escrows }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/transaction-approval` | Validator to validator. `200` + a transaction approved receipt once the transaction checks out and is stored, else `400` + reason |
@@ -280,23 +281,28 @@ by `key1` (64 bytes r||s over the SHA-256), `mldsa` by `postQuantumKey1`
 6. the handler gets the account id as `req.account` and `payload.body` as
    `req.body`.
 
-The four routes answer the signer's own account only:
+The five routes answer the signer's own account only:
 
 - `POST /get-account`, body `{}`: `200 { accountId, type, balance,
   latestTransactionId, createdAt }`. `balance` is millionths as a decimal
   string; `latestTransactionId` is the `transaction_id` of the garlic chain
   link with the highest `position` whose `account_id` is the signer, what the
   next transfer names as `previousTransactionId`, or `null`.
-- `POST /list-transactions`, body `{ beforePosition?, limit? }` (`limit` 1
-  to 200, default 50): `200 { transactions, pending }`. `transactions` are
-  the links where `account_id` or `account_id_to` is the signer, `position`
-  descending, below `beforePosition` when given, each `{ transactionId,
-  position, type, accountId, accountIdTo, amount, createdAt }`. `pending` is
-  the signer's pending row, at most one, read from `og_transaction.payload`:
+- `POST /list-transactions`, body `{ beforePosition?, limit?, from?, to? }`
+  (`limit` 1 to 200, default 50; `from` and `to` ISO 8601 strings, added
+  2026-11-06, `docs/schemas.md` section 18.3): `200 { transactions,
+  pending }`. `transactions` are the links where `account_id` or
+  `account_id_to` is the signer, `position` descending, below
+  `beforePosition` when given, with `created_at` at or after `from` and
+  before `to` when given (either alone works; `to` is the first moment
+  after the range), each `{ transactionId, position, type, accountId,
+  accountIdTo, amount, createdAt }`. `pending` is the signer's pending row,
+  at most one, read from `og_transaction.payload`, not cut by the dates:
   `{ transactionId, type, accountId, accountIdTo, amount, createdAt,
   approved }`. The other holding tables are not listed; a guarded or vault
   transfer shows up when it lands. Bad values are `400 invalid
-  beforePosition` and `400 invalid limit`.
+  beforePosition`, `400 invalid limit`, `400 invalid from` and `400 invalid
+  to`.
 - `POST /list-escrows`, body `{}` (added 2026-11-05, `docs/schemas.md`
   section 16): `200 { escrows }`, every `escrow_transfers` row where
   `account_id` (the seller) or `account_id_to` (the buyer) is the signer,
@@ -319,6 +325,18 @@ The four routes answer the signer's own account only:
   two approved attestations), `writing` (both attestations approved; the
   next round writes it) or `cancelling` (the sender's cancel on it);
   `attestations` counts the attestation slots holding an object, 0, 1 or 2.
+- `POST /get-locked-transfer`, body `{}` (added 2026-11-06,
+  `docs/schemas.md` section 18): `200 { transfer }`, the signer's own
+  locked transfer, the `locked_transactions` row whose `account_id` is the
+  signer (there is at most one), a guarded or vault transfer waiting out
+  its time lock, `{ transactionId, accountId, accountIdTo, amount,
+  createdAt, unlocksAt, stage }`, or `null` when there is none. The held
+  transfer only: nothing from `logs` or `archives`; a written transfer is
+  in the signer's transactions. `unlocksAt` is the moment the transfer may
+  be written; `stage` is one of `waiting` (not every validator has accepted
+  the transfer), `locked` (waiting out its lock) or `due` (unlocked; the
+  next leader round writes it). Nothing can be done with a locked transfer
+  meanwhile: no follow-up exists for it.
 
 Refusals are logged `failed: <reason>` like every other route.
 
@@ -961,7 +979,7 @@ src/
   auth/                  the account level: require-account.js, signed-request.js, common-checks.js, nonces.queries.js;
                          the attestor gate on top of it: require-attestor.js
   masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check
-  reads/                 feature: the four signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer)
+  reads/                 feature: the five signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer, get-locked-transfer)
                          and the two attestor reads (list-assisted-transfers, list-disputed-escrows)
     reads.router.js, reads.handlers.js, reads.service.js, reads.queries.js
   crypto/hash.js         SHA-256, digest decoding and constant-time comparison

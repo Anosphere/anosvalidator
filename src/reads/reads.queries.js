@@ -37,19 +37,23 @@ export async function findLatestTransactionId(accountId) {
 
 /**
  * The garlic chain links where account_id or account_id_to is this account,
- * position descending, below `beforePosition` when it is not null, at most
- * `limit` rows. Each row: transaction_id, position, type, account_id,
- * account_id_to, amount, created_at, as the columns are.
+ * position descending, below `beforePosition` when it is not null, with
+ * created_at at or after `from` and before `to` when each is not null
+ * (Date objects or null; either alone works), at most `limit` rows. Each
+ * row: transaction_id, position, type, account_id, account_id_to, amount,
+ * created_at, as the columns are.
  */
-export async function findTransactions(accountId, beforePosition, limit) {
+export async function findTransactions(accountId, beforePosition, limit, from, to) {
   const { rows } = await query(
     `SELECT transaction_id, position, type, account_id, account_id_to, amount, created_at
      FROM garlic_chain
      WHERE (account_id = $1 OR account_id_to = $1)
        AND ($2::bigint IS NULL OR position < $2::bigint)
+       AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)
+       AND ($5::timestamptz IS NULL OR created_at < $5::timestamptz)
      ORDER BY position DESC
      LIMIT $3`,
-    [accountId, beforePosition, limit],
+    [accountId, beforePosition, limit, from, to],
   );
   return rows;
 }
@@ -158,6 +162,26 @@ export async function findAssistedFor(accountId) {
             attestation_1_approved, attestation_2_approved,
             cancellation IS NOT NULL AS has_cancellation
      FROM assisted_transfers
+     WHERE account_id = $1`,
+    [accountId],
+  );
+  return rows.length === 0 ? null : rows[0];
+}
+
+/**
+ * The account's locked transfer (spec 18.1): the locked_transactions row
+ * whose account_id is this account, a guarded or vault transfer waiting
+ * out its time lock, or null when there is none (there is at most one:
+ * account_id is UNIQUE there). The row: transaction_id, og_transaction,
+ * approved, future_date, created_at, as the columns are, and due, whether
+ * future_date has passed by the database's clock, the one findDueIds
+ * (section 6) reads.
+ */
+export async function findLockedFor(accountId) {
+  const { rows } = await query(
+    `SELECT transaction_id, og_transaction, approved, future_date, created_at,
+            future_date <= now() AS due
+     FROM locked_transactions
      WHERE account_id = $1`,
     [accountId],
   );

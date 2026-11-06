@@ -5,6 +5,7 @@ import {
   findAssistedFor,
   findAssistedWaitingForAttestors,
   findLatestTransactionId,
+  findLockedFor,
   findOpenEscrowsFor,
   findPendingFor,
   findTransactions,
@@ -12,13 +13,13 @@ import {
 } from './reads.queries.js';
 
 /**
- * The reads feature (wallet spec 5.4): the four things an account may read
+ * The reads feature (wallet spec 5.4): the five things an account may read
  * about itself (its account, its transactions, its open escrow trades, its
- * held assisted transfer), nothing about anyone else. The caller is the verified
- * signer, req.account from src/auth/require-account.js; the body is the
- * route's own object. Each function returns ok(status, body) or
- * refuse(status, reason) (util/result.js), so the handlers only log and
- * answer.
+ * held assisted transfer, its locked transfer), nothing about anyone else.
+ * The caller is the verified signer, req.account from
+ * src/auth/require-account.js; the body is the route's own object. Each
+ * function returns ok(status, body) or refuse(status, reason)
+ * (util/result.js), so the handlers only log and answer.
  */
 
 const BAD_SHAPE = 'bad request shape';
@@ -55,6 +56,19 @@ export const ASSISTED_STAGES = Object.freeze({
   CANCELLING: 'cancelling',
 });
 
+/**
+ * The stages of a locked transfer, a guarded or vault account's transfer
+ * waiting out its time lock, as /get-locked-transfer names them (spec
+ * 18.2): waiting until every validator accepted the transfer; locked
+ * while its unlock moment is ahead; due once that moment has passed,
+ * until the next leader round writes it.
+ */
+export const LOCKED_STAGES = Object.freeze({
+  WAITING: 'waiting',
+  LOCKED: 'locked',
+  DUE: 'due',
+});
+
 const hex = (buffer) => (buffer === null || buffer === undefined ? null : buffer.toString('hex'));
 
 /**
@@ -76,11 +90,13 @@ export async function getAccount(accountId) {
 
 /**
  * POST /list-transactions. Body { beforePosition?: integer, limit?: integer
- * (default 50, at most 200) }. transactions: the garlic chain links where
- * the signer sent or received, position descending, below beforePosition
- * when given, limit rows. pending: the signer's pending row, read from
- * og_transaction.payload, an array of at most one. The other holding
- * tables are not listed.
+ * (default 50, at most 200), from?: ISO 8601, to?: ISO 8601 }.
+ * transactions: the garlic chain links where the signer sent or received,
+ * position descending, below beforePosition when given, with created_at at
+ * or after from and before to when given (either alone works; to is the
+ * first moment after the range), limit rows. pending: the signer's pending
+ * row, read from og_transaction.payload, an array of at most one; the dates
+ * do not cut it. The other holding tables are not listed.
  */
 export async function listTransactions(accountId, body) {
   if (!isObject(body)) return refuse(400, BAD_SHAPE);
@@ -90,8 +106,12 @@ export async function listTransactions(accountId, body) {
   }
   const limit = body.limit === undefined ? DEFAULT_LIMIT : body.limit;
   if (!(Number.isInteger(limit) && limit >= 1 && limit <= MAX_LIMIT)) return refuse(400, 'invalid limit');
+  if (body.from !== undefined && !(typeof body.from === 'string' && !Number.isNaN(Date.parse(body.from)))) return refuse(400, 'invalid from');
+  if (body.to !== undefined && !(typeof body.to === 'string' && !Number.isNaN(Date.parse(body.to)))) return refuse(400, 'invalid to');
+  const from = body.from === undefined ? null : new Date(body.from);
+  const to = body.to === undefined ? null : new Date(body.to);
 
-  const [links, pendingRow] = await Promise.all([findTransactions(accountId, beforePosition, limit), findPendingFor(accountId)]);
+  const [links, pendingRow] = await Promise.all([findTransactions(accountId, beforePosition, limit, from, to), findPendingFor(accountId)]);
   const transactions = links.map((row) => ({
     transactionId: hex(row.transaction_id),
     position: Number(row.position),
@@ -191,6 +211,41 @@ function assistedStageOf(row) {
   if (row.has_cancellation) return ASSISTED_STAGES.CANCELLING;
   if (row.attestation_1_approved && row.attestation_2_approved) return ASSISTED_STAGES.WRITING;
   return ASSISTED_STAGES.ATTESTING;
+}
+
+/**
+ * POST /get-locked-transfer (spec 18). Body { }. transfer: the signer's
+ * locked transfer, the locked_transactions row whose account_id is the
+ * signer (there is at most one), a guarded or vault transfer waiting out
+ * its time lock, or null when there is none: the held transfer only,
+ * nothing from logs or archives. The transfer fields as the other
+ * held-transfer reads answer them (heldTransferOf); unlocksAt the row's
+ * future_date, the moment the transfer may be written; stage from
+ * lockedStageOf.
+ */
+export async function getLockedTransfer(accountId) {
+  const row = await findLockedFor(accountId);
+  if (row === null) return ok(200, { transfer: null });
+  const transfer = {
+    ...heldTransferOf(row),
+    unlocksAt: row.future_date.toISOString(),
+    stage: lockedStageOf(row),
+  };
+  return ok(200, { transfer });
+}
+
+/**
+ * Where a locked transfer is, from its row (spec 18.2), the first line
+ * that matches: not approved is waiting; approved with its unlock moment
+ * ahead is locked; approved with that moment passed is due, until the next
+ * leader round writes it. row.due is decided by the database's clock, the
+ * one findDueIds (section 6) reads, so the wallet and the ready list
+ * agree.
+ */
+function lockedStageOf(row) {
+  if (!row.approved) return LOCKED_STAGES.WAITING;
+  if (!row.due) return LOCKED_STAGES.LOCKED;
+  return LOCKED_STAGES.DUE;
 }
 
 /**
