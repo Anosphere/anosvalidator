@@ -584,9 +584,10 @@ replay`; the new `nonces` table, the keyholder's).
 | Method | Path                 | Answers |
 | ------ | -------------------- | ------- |
 | POST   | `/get-account`       | `200 { accountId, type, balance: millionths as a decimal string, latestTransactionId: hex \| null, createdAt }`; `latestTransactionId` is the link with the highest `position` whose `account_id` is the signer |
-| POST   | `/list-transactions` | body `{ beforePosition?, limit? (default 50, at most 200) }`; `200 { transactions: [ { transactionId, position, type, accountId, accountIdTo, amount, createdAt } ], pending: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, approved } ] }`, the links where the signer sent or received, `position` descending, and its pending row (at most one) read from `og_transaction.payload` |
+| POST   | `/list-transactions` | body `{ beforePosition?, limit? (default 50, at most 200), from?, to? (ISO 8601; added 2026-11-06, section 18.3) }`; `200 { transactions: [ { transactionId, position, type, accountId, accountIdTo, amount, createdAt } ], pending: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, approved } ] }`, the links where the signer sent or received, `position` descending, with `createdAt` at or after `from` and before `to` when given, and its pending row (at most one) read from `og_transaction.payload`, not cut by the dates |
 | POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
 | POST   | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, stage, attestations } \| null }`, the signer's own held assisted transfer, the `assisted_transfers` row whose `account_id` is the signer (at most one), or `null` when there is none (added 2026-11-06, section 17) |
+| POST   | `/get-locked-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, unlocksAt, stage } \| null }`, the signer's own locked transfer, the `locked_transactions` row whose `account_id` is the signer (at most one), a guarded or vault transfer waiting out its time lock, or `null` when there is none (added 2026-11-06, section 18) |
 
 `/create-account` gained a fifth check after uniqueness, on the receiving
 validator only: the masterpod is asked `POST /get-anos-account { accountId }`
@@ -1452,3 +1453,135 @@ door passes only the paths in its table (doormansoftware
 `src/doors/validator.routes.js`, `signedReadCheck` for the signed reads);
 `/get-assisted-transfer` is added there in the same step, and that
 doorman restarted, before a wallet can reach the route.
+
+## 18. The locked transfer read and the date filter (2026-11-06)
+
+Decided 2026-11-06 in the wallet's home page planning chat
+(`~/Desktop/Z-TestNet/forclaude/wallet-home-plan-1.md`); the wallet spec
+(`~/Desktop/Z-TestNet/web_app/docs/schemas.md`, section 5.4) carries the
+same lines. The wallet is getting a balance card that says what is
+available beside each balance, so it has to count what is spoken for:
+the pending row, the open escrow trades and the held assisted transfer
+have reads (sections 8, 16 and 17), but a guarded or vault account's
+transfer waiting in `locked_transactions` had none, and those anos would
+have gone uncounted for a week, or a month, in production. The wallet is
+also getting a transaction history with a date range, and
+`/list-transactions` could only page back from the newest row. Two
+changes to the reads feature, nothing else: a fifth read at the account
+level answers the signer's own locked transfer, and `/list-transactions`
+takes an optional date range. No table changes, no follow-up, no round.
+
+### 18.1 The route
+
+Account level (section 8, `src/auth/require-account.js`): the same
+envelope and the same six checks as `/get-account`; no stake. It joins
+`src/reads/` beside the other reads.
+
+| Method | Path | Answers |
+| ------ | ---- | ------- |
+| POST | `/get-locked-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, unlocksAt, stage } \| null }` |
+
+`transfer` is the `locked_transactions` row whose `account_id` is the
+signer, or `null` when there is none. There is at most one: `account_id`
+is UNIQUE there, and a transfer is refused while the account has anything
+held (one held transaction per account). A guarded or vault transfer sits
+there from the moment the validator accepts it until the first leader
+round after its unlock moment writes it; nothing can be done with it
+meanwhile, since no follow-up exists for a locked transfer. Sender only:
+the receiver sees it in the history when it lands. The held transfer
+only: a written transfer is on the chain under the same `transaction_id`,
+and the row is deleted when written (section 6), so nothing comes from
+`logs` or `archives`.
+
+`transactionId`, `accountId`, `accountIdTo`, `amount` and `createdAt` as
+the other held-transfer reads answer them (13.2, 16.1 and 17.1,
+`heldTransferOf`, from `og_transaction.payload`). `unlocksAt` is the
+row's `future_date` as ISO 8601: the moment the transfer may be written.
+`stage` from 18.2. The body is not read. Refusals are the account
+level's, logged `failed: <reason>` like every other route.
+
+### 18.2 The stage
+
+`stage` names where the transfer is. The validator decides it from the
+row, beside the rule that reads the same columns (`findDueIds`, section
+6), and a change to that rule has to change this table. Nothing new goes
+into the database: the rules below are a table of words in this document
+only. The first line that matches wins:
+
+| `stage` | The row | What it means |
+| ------- | ------- | ------------- |
+| `waiting` | `approved` false | not every validator has accepted the transfer yet |
+| `locked` | `approved`, `future_date > now()` | waiting out its lock; the first leader round after `unlocksAt` writes it |
+| `due` | `approved`, `future_date <= now()` | unlocked; the next leader round writes it (a round starts with the next transaction of any kind) |
+
+`now()` is the database's clock, the same one `findDueIds` reads, so the
+wallet and the ready list agree. A wallet that meets a `stage` it does
+not know treats the transfer as held.
+
+### 18.3 The date filter
+
+The body of `/list-transactions` (section 8) gains `from?` and `to?`,
+each an ISO 8601 string. `transactions` then holds only the links with
+`created_at >= from` and `created_at < to`; either alone works. `to` is
+the first moment after the range: the wallet sends the start of the day
+after the last day picked. `beforePosition` and `limit` work as before,
+within the range. `pending` is not filtered. A value that is not a string
+`Date.parse` accepts (a number, `NaN` after parsing): `400 invalid from`
+or `400 invalid to`.
+
+### 18.4 Notes from the build
+
+Built 2026-11-06 straight from 18.1 to 18.3. Files: `src/reads/
+reads.queries.js` (`findTransactions` takes `from` and `to`, Date objects
+or null, as two more `IS NULL OR` lines before `ORDER BY`;
+`findLockedFor(accountId)`, appended after `findAssistedFor`: the row
+with `future_date <= now()` as `due`, or null), `reads.service.js`
+(`from` and `to` checked after `limit` and passed as Dates;
+`LOCKED_STAGES`; `getLockedTransfer(accountId)` on `heldTransferOf` plus
+`unlocksAt` and `stage`; `lockedStageOf(row)` in the order of 18.2's
+table, `row.due` for the clock, next to `assistedStageOf`),
+`reads.handlers.js`, `reads.router.js` (behind `requireAccount`, after
+`/get-assisted-transfer`), `app.js` (the comment), the table of section
+8, and the README (the endpoints table, the account-level reads, the
+folder list). No schema change: every column read was in place.
+
+Checks run: `node --check` on the five source files, and the two
+queries' SQL run by psql against the local `anos1` inside transactions
+that were rolled back. The locked query, with one throwaway
+`locked_transactions` row (approved, `future_date` an hour ahead, a
+payload with the four fields): the sender got the row with `due` false;
+the receiver, a stranger to the query, got none; the live table was
+empty before and after. The transactions query, for the local account
+with the most chain rows (seven): with a window from a day ago to now it
+answered no rows, since the local chain's newest row is from 2026-10-26;
+with nulls it answered all seven; with a window from the account's
+oldest row up to its newest, every one of the six rows answered lay
+inside the window and the newest, at the `to` moment, was left out;
+`from` alone at that moment answered the one row, `to` alone the six.
+The live tables were unchanged throughout. Not run: no validator was
+booted (this copy has no rig, and the user runs the servers) and the
+live validators were not touched; the wallet (its steps 2 and 4) is the
+first caller.
+
+Readings where the plan left a detail open: a `from` or `to` of `null`
+is refused as `invalid from` or `invalid to`, since only an absent field
+means not given (the plan's words), where `beforePosition` lets an
+explicit `null` through as not given; the comment on `findTransactions`
+says the two values are Date objects or null; the service's header
+comment and the router's were rewrapped to fit the new words in; the
+transactions query was run once more with a window drawn from the
+account's own rows, so the filter was seen admitting rows and not only
+answering none.
+
+Rollout: read only, so a validator with the changes and one without
+agree on everything else; the wallet reads from one validator
+(`DEFAULT_VALIDATOR`), which pulls first, the rest at the next pull round
+(operator guide, the `anos-validator` pull line). The doorman's validator
+door passes only the paths in its table (doormansoftware
+`src/doors/validator.routes.js`, `signedReadCheck` for the signed reads);
+`/get-locked-transfer` is added there in the same step, and that doorman
+restarted, before a wallet can reach the route. `/list-transactions`
+needs nothing at the door: `from` and `to` travel inside the signed
+envelope it already passes. A wallet against a validator without the
+change gets every row, the dates ignored; against a doorman without the
+line, the locked read is answered 404.
