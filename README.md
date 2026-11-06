@@ -231,6 +231,7 @@ multi-word URL segments.
 | POST   | `/get-account`    | Account level (next section). The signer's `type`, `balance` (millionths, a decimal string), `latestTransactionId` and `createdAt`: `200`, else `400` or `401` + reason |
 | POST   | `/list-transactions` | Account level. The signer's garlic chain links, newest first, paged with `beforePosition` and `limit`, and its pending transaction: `200`, else `400` or `401` + reason |
 | POST   | `/list-escrows`   | Account level. The signer's open escrow trades, as seller or buyer, newest first, each with its `stage`: `200 { escrows }`, else `400` or `401` + reason |
+| POST   | `/get-assisted-transfer` | Account level. The signer's own held assisted transfer, with its `stage` and the number of attestations on it, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
 | POST   | `/list-assisted-transfers` | Attestor level (account level plus attestor stake). The assisted transfers waiting for attestors on this validator, newest first: `200 { transfers }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/list-disputed-escrows` | Attestor level. The escrows in dispute that no verdict has decided on this validator, newest first: `200 { escrows }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/transaction-approval` | Validator to validator. `200` + a transaction approved receipt once the transaction checks out and is stored, else `400` + reason |
@@ -279,7 +280,7 @@ by `key1` (64 bytes r||s over the SHA-256), `mldsa` by `postQuantumKey1`
 6. the handler gets the account id as `req.account` and `payload.body` as
    `req.body`.
 
-The three routes answer the signer's own account only:
+The four routes answer the signer's own account only:
 
 - `POST /get-account`, body `{}`: `200 { accountId, type, balance,
   latestTransactionId, createdAt }`. `balance` is millionths as a decimal
@@ -307,6 +308,17 @@ The three routes answer the signer's own account only:
   `cancelling` (the buyer's cancel on it) or `disputed` (a dispute on it);
   `disputedBy` the signer of the dispute or `null`; `verdicts` the escrow's
   arbitrations in arbitrator order, without the arbitrator's id.
+- `POST /get-assisted-transfer`, body `{}` (added 2026-11-06,
+  `docs/schemas.md` section 17): `200 { transfer }`, the signer's own held
+  assisted transfer, the `assisted_transfers` row whose `account_id` is the
+  signer (there is at most one), `{ transactionId, accountId, accountIdTo,
+  amount, createdAt, stage, attestations }`, or `null` when there is none.
+  The held transfer only: nothing from `logs` or `archives`; a written
+  transfer is in the signer's transactions. `stage` is one of `waiting`
+  (not every validator has accepted the transfer), `attesting` (waiting for
+  two approved attestations), `writing` (both attestations approved; the
+  next round writes it) or `cancelling` (the sender's cancel on it);
+  `attestations` counts the attestation slots holding an object, 0, 1 or 2.
 
 Refusals are logged `failed: <reason>` like every other route.
 
@@ -949,8 +961,8 @@ src/
   auth/                  the account level: require-account.js, signed-request.js, common-checks.js, nonces.queries.js;
                          the attestor gate on top of it: require-attestor.js
   masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check
-  reads/                 feature: the three signed reads (get-account, list-transactions, list-escrows) and the two
-                         attestor reads (list-assisted-transfers, list-disputed-escrows)
+  reads/                 feature: the four signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer)
+                         and the two attestor reads (list-assisted-transfers, list-disputed-escrows)
     reads.router.js, reads.handlers.js, reads.service.js, reads.queries.js
   crypto/hash.js         SHA-256, digest decoding and constant-time comparison
   crypto/canonical.js    canonical JSON (canonicalize package) and its hash

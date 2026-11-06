@@ -586,6 +586,7 @@ replay`; the new `nonces` table, the keyholder's).
 | POST   | `/get-account`       | `200 { accountId, type, balance: millionths as a decimal string, latestTransactionId: hex \| null, createdAt }`; `latestTransactionId` is the link with the highest `position` whose `account_id` is the signer |
 | POST   | `/list-transactions` | body `{ beforePosition?, limit? (default 50, at most 200) }`; `200 { transactions: [ { transactionId, position, type, accountId, accountIdTo, amount, createdAt } ], pending: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, approved } ] }`, the links where the signer sent or received, `position` descending, and its pending row (at most one) read from `og_transaction.payload` |
 | POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
+| POST   | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, stage, attestations } \| null }`, the signer's own held assisted transfer, the `assisted_transfers` row whose `account_id` is the signer (at most one), or `null` when there is none (added 2026-11-06, section 17) |
 
 `/create-account` gained a fifth check after uniqueness, on the receiving
 validator only: the masterpod is asked `POST /get-anos-account { accountId }`
@@ -1346,3 +1347,108 @@ which pulls first, the rest at the next pull round (operator guide, the
 paths in its table (doormansoftware `src/doors/validator.routes.js`,
 `signedReadCheck` for the signed reads); `/list-escrows` has to be added
 there, and that doorman restarted, before a wallet can reach the route.
+
+## 17. The assisted transfer read (2026-11-06)
+
+Decided 2026-11-06 in the wallet's assisted transfer planning chat; the
+wallet spec (`~/Desktop/Z-TestNet/web_app/docs/schemas.md`, section 5.4)
+carries the same lines. The wallet showed nothing of an assisted transfer
+while it waited in `assisted_transfers`: the reads of section 8 list the
+chain, the pending row and the open escrow trades, and the sender's cancel
+needed the transaction id pasted from the one-time `202`. One more read at
+the account level answers the signer's own held assisted transfer, so the
+wallet can show it, follow its stage and cancel it from a page of its own.
+Nothing about the assisted transfer rules, the follow-ups or the leader
+round changed.
+
+### 17.1 The route
+
+Account level (section 8, `src/auth/require-account.js`): the same
+envelope and the same six checks as `/get-account`; no stake. It joins
+`src/reads/` beside the other reads.
+
+| Method | Path | Answers |
+| ------ | ---- | ------- |
+| POST | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, stage, attestations } \| null }` |
+
+`transfer` is the `assisted_transfers` row whose `account_id` is the
+signer, or `null` when there is none. There is at most one: `account_id`
+is UNIQUE there, and a transfer is refused while the account has anything
+held (one held transaction per account). Sender only: the receiver can do
+nothing with the transfer and sees it in the history when it lands. The
+held transfer only: nothing from `logs`, which may be purged (section 7),
+or `archives`. A written transfer is on the chain under the same
+`transaction_id`, so `/list-transactions` shows it for good; a cancelled
+one leaves no trace a wallet reads.
+
+`transactionId`, `accountId`, `accountIdTo`, `amount` and `createdAt` as
+the other held-transfer reads answer them (13.2 and 16.1,
+`heldTransferOf`, from `og_transaction.payload`). `attestations` counts
+the attestation slots holding an object, 0, 1 or 2; the attestations
+reach the validator together, posted by the deciding attestor's app, so
+the count is nearly always 0 or 2. The body is not read. Refusals are the
+account level's, logged `failed: <reason>` like every other route.
+
+### 17.2 The stage
+
+`stage` names where the transfer is. The validator decides it from the
+row's columns, so the word is made beside the rules that read the same
+columns (5.2, 5.3 and section 6), and a change to those rules has to
+change this table. Nothing new goes into the database: the rules below
+are a table of words in this document only. The first line that matches
+wins:
+
+| `stage` | The row | What it means |
+| ------- | ------- | ------------- |
+| `waiting` | `approved` false | not every validator has accepted the transfer yet; no follow-up is accepted on it (5.1) |
+| `cancelling` | `cancellation IS NOT NULL` | the sender's cancel is on it; once approved, the row moves to `logs` (5.3) |
+| `writing` | `attestation_1_approved` and `attestation_2_approved` | both attestations accepted by every validator; the next leader round writes it (section 6); the sender may still cancel until then (5.3) |
+| `attesting` | none of the above | accepted, waiting for two approved attestations; the sender may cancel |
+
+A cancel is accepted until the transfer is written, even when both
+attestations are approved (5.3), and a cancellation present keeps the row
+off the ready list (section 6), so `cancelling` is decided before
+`writing`: a row with both attestations approved and a cancellation on it
+is being cancelled, not written. A wallet that meets a `stage` it does
+not know treats the transfer as held and offers no action, so a fifth
+stage added here cannot make it do the wrong thing.
+
+### 17.3 Notes from the build
+
+Built 2026-11-06 straight from 17.1 and 17.2. Files: `src/reads/
+reads.queries.js` (`findAssistedFor(accountId)`: the row, two `IS NOT
+NULL` booleans for the attestation slots, the two approved flags as the
+columns are, and one boolean for the cancellation slot; the row or null),
+`reads.service.js` (`ASSISTED_STAGES`, `getAssistedTransfer(accountId)`
+on `heldTransferOf` with `attestations` the two booleans counted,
+`assistedStageOf(row)` in the order of 17.2's table, next to `stageOf`),
+`reads.handlers.js`, `reads.router.js` (behind `requireAccount`, after
+`/list-escrows`), `app.js` (the comment), the table of section 8, and
+the README (the endpoints table, the account-level reads, the folder
+list). No schema change: every column read was in place.
+
+Checks run: `node --check` on the five source files, and the query's SQL
+run by psql against the local `anos1` inside one transaction that
+inserted one throwaway assisted transfer (approved, one attestation
+present, no cancellation) and was rolled back: the sender got the row
+with `has_attestation_1` true, `has_attestation_2` false, both approved
+flags false and `has_cancellation` false; the receiver, a stranger to the
+query, got none; the live table was empty before and after. Not run: no
+validator was booted (this copy has no rig, and the user runs the
+servers) and the live validators were not touched; the wallet (its step
+2) is the first caller.
+
+Readings where the plan left a detail open: `findAssistedFor` is appended
+at the end of `reads.queries.js`, after `findOpenEscrowsFor`, as the
+escrow read was; the README's sentence above the account-level list says
+four routes now, since it counts the bullets under it; the router's
+comment was rewrapped to fit the new path in.
+
+Rollout: read only, so a validator with the route and one without agree
+on everything else; the wallet reads from one validator
+(`DEFAULT_VALIDATOR`), which pulls first, the rest at the next pull round
+(operator guide, the `anos-validator` pull line). The doorman's validator
+door passes only the paths in its table (doormansoftware
+`src/doors/validator.routes.js`, `signedReadCheck` for the signed reads);
+`/get-assisted-transfer` is added there in the same step, and that
+doorman restarted, before a wallet can reach the route.

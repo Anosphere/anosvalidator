@@ -140,3 +140,26 @@ export async function findOpenEscrowsFor(accountId, limit) {
   );
   return rows;
 }
+
+/**
+ * The account's held assisted transfer (spec 17.1): the assisted_transfers
+ * row whose account_id is this account, or null when there is none (there
+ * is at most one: account_id is UNIQUE there). The row: transaction_id,
+ * og_transaction, approved, created_at, two booleans saying which
+ * attestation slot holds an object (has_attestation_1, has_attestation_2),
+ * attestation_1_approved and attestation_2_approved as the columns are, and
+ * has_cancellation, whether the cancellation slot holds an object.
+ */
+export async function findAssistedFor(accountId) {
+  const { rows } = await query(
+    `SELECT transaction_id, og_transaction, approved, created_at,
+            attestation_1 IS NOT NULL AS has_attestation_1,
+            attestation_2 IS NOT NULL AS has_attestation_2,
+            attestation_1_approved, attestation_2_approved,
+            cancellation IS NOT NULL AS has_cancellation
+     FROM assisted_transfers
+     WHERE account_id = $1`,
+    [accountId],
+  );
+  return rows.length === 0 ? null : rows[0];
+}

@@ -37,7 +37,7 @@ export function createApp() {
   app.use(fundRouter); // owns /transfer-to-fund, /fund-proposal and /guardian-vote
   app.use(assistedTransfersRouter); // owns /attestation and /assisted-transfer-cancel
   app.use(escrowRouter); // owns /escrow-signature
-  app.use(readsRouter); // the account level: /get-account, /list-transactions and /list-escrows; the attestor reads: /list-assisted-transfers and /list-disputed-escrows
+  app.use(readsRouter); // the account level: /get-account, /list-transactions, /list-escrows and /get-assisted-transfer; the attestor reads: /list-assisted-transfers and /list-disputed-escrows
   app.use(validatorsRouter); // validator-to-validator messages: /transaction-approval
 
   // Order matters: these must come after every router.

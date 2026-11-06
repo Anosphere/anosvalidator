@@ -2,6 +2,7 @@ import { isObject } from '../util/is-object.js';
 import { ok, refuse } from '../util/result.js';
 import {
   findAccountSummary,
+  findAssistedFor,
   findAssistedWaitingForAttestors,
   findLatestTransactionId,
   findOpenEscrowsFor,
@@ -11,9 +12,9 @@ import {
 } from './reads.queries.js';
 
 /**
- * The reads feature (wallet spec 5.4): the three things an account may read
- * about itself (its account, its transactions, its open escrow trades),
- * nothing about anyone else. The caller is the verified
+ * The reads feature (wallet spec 5.4): the four things an account may read
+ * about itself (its account, its transactions, its open escrow trades, its
+ * held assisted transfer), nothing about anyone else. The caller is the verified
  * signer, req.account from src/auth/require-account.js; the body is the
  * route's own object. Each function returns ok(status, body) or
  * refuse(status, reason) (util/result.js), so the handlers only log and
@@ -38,6 +39,20 @@ export const ESCROW_STAGES = Object.freeze({
   RELEASING: 'releasing',
   CANCELLING: 'cancelling',
   DISPUTED: 'disputed',
+});
+
+/**
+ * The stages of a held assisted transfer, as /get-assisted-transfer names
+ * them (spec 17.2): waiting until every validator accepted the transfer;
+ * attesting while it waits for two approved attestations; writing with
+ * both attestations approved, until the next leader round writes it;
+ * cancelling with the sender's cancel on it.
+ */
+export const ASSISTED_STAGES = Object.freeze({
+  WAITING: 'waiting',
+  ATTESTING: 'attesting',
+  WRITING: 'writing',
+  CANCELLING: 'cancelling',
 });
 
 const hex = (buffer) => (buffer === null || buffer === undefined ? null : buffer.toString('hex'));
@@ -139,6 +154,43 @@ function stageOf(row) {
   if (row.has_cancel) return ESCROW_STAGES.CANCELLING;
   if (row.has_success) return ESCROW_STAGES.RELEASING;
   return ESCROW_STAGES.HELD;
+}
+
+/**
+ * POST /get-assisted-transfer (spec 17). Body { }. transfer: the signer's
+ * held assisted transfer, the assisted_transfers row whose account_id is
+ * the signer (there is at most one), or null when there is none: the held
+ * transfer only, nothing from logs or archives. The transfer fields as the
+ * other held-transfer reads answer them (heldTransferOf); stage from
+ * assistedStageOf; attestations the number of attestation slots holding
+ * an object, 0, 1 or 2.
+ */
+export async function getAssistedTransfer(accountId) {
+  const row = await findAssistedFor(accountId);
+  if (row === null) return ok(200, { transfer: null });
+  const transfer = {
+    ...heldTransferOf(row),
+    stage: assistedStageOf(row),
+    attestations: [row.has_attestation_1, row.has_attestation_2].filter(Boolean).length,
+  };
+  return ok(200, { transfer });
+}
+
+/**
+ * Where a held assisted transfer is, from its row (spec 17.2), the first
+ * line that matches: not approved is waiting; a cancellation present is
+ * cancelling; both attestations approved is writing; else attesting,
+ * accepted and waiting for two approved attestations. A cancel is accepted
+ * until the transfer is written, even with both attestations approved, and
+ * a cancellation present keeps the row off the ready list (5.3, section
+ * 6), so cancelling is decided before writing; the order is a definition,
+ * as stageOf's is.
+ */
+function assistedStageOf(row) {
+  if (!row.approved) return ASSISTED_STAGES.WAITING;
+  if (row.has_cancellation) return ASSISTED_STAGES.CANCELLING;
+  if (row.attestation_1_approved && row.attestation_2_approved) return ASSISTED_STAGES.WRITING;
+  return ASSISTED_STAGES.ATTESTING;
 }
 
 /**

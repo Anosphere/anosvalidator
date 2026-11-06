@@ -1,5 +1,5 @@
 import { answer } from '../util/result.js';
-import { getAccount, listAssistedTransfers, listDisputedEscrows, listEscrows, listTransactions } from './reads.service.js';
+import { getAccount, getAssistedTransfer, listAssistedTransfers, listDisputedEscrows, listEscrows, listTransactions } from './reads.service.js';
 
 /**
  * Route handlers for the reads feature. HTTP in and out only: the caller is
@@ -21,6 +21,11 @@ export async function listTransactionsHandler(req, res) {
 /** POST /list-escrows */
 export async function listEscrowsHandler(req, res) {
   answer(res, await listEscrows(req.account));
+}
+
+/** POST /get-assisted-transfer */
+export async function getAssistedTransferHandler(req, res) {
+  answer(res, await getAssistedTransfer(req.account));
 }
 
 /** POST /list-assisted-transfers */
