@@ -9,6 +9,7 @@ import {
   deactivateMissing,
   findAllRows,
   findHasLeader,
+  findHasRows,
   setLeaderOn,
   upsertValidator,
 } from './registry.queries.js';
@@ -30,7 +31,12 @@ import { ownPublicKeyHex } from './validators.signing.js';
  *
  * Applying it, in one database transaction:
  *   1. every row in the file is upserted: public_key, url and active from
- *      the file, is_leader untouched;
+ *      the file, is_leader untouched; ignored, the "not counted right now"
+ *      flag the votes set (src/votes/), starts true on a row that enters
+ *      membership while the table already has rows (a row new to the
+ *      table, or one going from inactive to active), false on a row of the
+ *      first apply into an empty table, and is left alone otherwise
+ *      (registry.queries.js upsertValidator);
  *   2. every row in the table that is not in the file is set inactive; the
  *      row stays, so what that validator signed still verifies;
  *   3. if no row in the table is leader and the file names a firstLeader,
@@ -43,10 +49,10 @@ import { ownPublicKeyHex } from './validators.signing.js';
  *   5. the registry hash is the SHA-256 of the canonical JSON (RFC 8785,
  *      src/crypto/canonical.js) of every row in the table after the apply,
  *      ordered by id, each { id, publicKey, url, active } with the key as
- *      lowercase hex and the leader flag left out, so two validators with
- *      the same file agree whoever leads. It is kept here with the count of
- *      active rows for /health; the boot log shows its first 16 hex
- *      characters.
+ *      lowercase hex and the leader and ignored flags left out, so two
+ *      validators with the same file agree whoever leads and whoever is
+ *      ignored. It is kept here with the count of active rows for /health;
+ *      the boot log shows its first 16 hex characters.
  *
  * The per-call reads (validators.queries.js) are untouched: they still read
  * the table fresh on every call.
@@ -148,8 +154,9 @@ export async function applyRegistry() {
   let all;
   try {
     await client.query('BEGIN');
+    const hadRows = await findHasRows(client);
     for (const row of rows) {
-      await upsertValidator(client, { ...row, publicKey: Buffer.from(row.publicKey, 'hex') });
+      await upsertValidator(client, { ...row, publicKey: Buffer.from(row.publicKey, 'hex') }, hadRows);
     }
     await deactivateMissing(client, rows.map((row) => row.id));
     if (firstLeader !== null && !(await findHasLeader(client))) {

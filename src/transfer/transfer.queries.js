@@ -1,4 +1,4 @@
-import { query } from '../db/pool.js';
+import { pool, query } from '../db/pool.js';
 
 /**
  * SQL for the transfer feature. Ids are Buffers of 32 raw bytes, matching the
@@ -10,10 +10,12 @@ import { query } from '../db/pool.js';
  * signed with, as Buffers of raw bytes (null where the account has none),
  * its balance and its type. current_balance is a BIGINT, which pg hands over
  * as a decimal string so nothing is lost; the service compares it as a
- * BigInt. Returns null when there is no account with this id.
+ * BigInt. Returns null when there is no account with this id. Reads on
+ * `client` when one is given (the replay of a chain chunk, inside its
+ * transaction) and through the pool otherwise.
  */
-export async function findAccount(accountId) {
-  const { rows } = await query(
+export async function findAccount(accountId, client = pool) {
+  const { rows } = await client.query(
     `SELECT public_key1, public_key_pq1, public_key2, public_key_pq2,
             alt_wallet_pk, alt_wallet_pk_pq, current_balance, type
      FROM accounts WHERE account_id = $1`,

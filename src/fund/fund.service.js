@@ -20,6 +20,7 @@ import { guardianWeight } from '../stakes/stakes.service.js';
 import { findAccount, findExisting, findLatestTransactionId } from '../transfer/transfer.queries.js';
 import { isObject } from '../util/is-object.js';
 import { sendProofOfAcceptance, sendTransactionApproval } from '../validators/validators.messages.js';
+import { settleNoAnswers } from '../votes/votes.messages.js';
 import { FUND_ACCOUNT_ID } from './fund-account.js';
 import { findClosedProposals, findExistingAccounts, findProposalConflicts } from './fund.queries.js';
 
@@ -76,52 +77,32 @@ const HELD_CONFLICTS = [
  * rule; createdAt is not checked; the uniqueness checks cover the five
  * holding tables and the chain.
  *
+ * The shape, signature and id parts (the shape; the ids and the amount;
+ * accountIdTo the fund and stakeFor a purpose; the sender exists; the
+ * signatures; transactionId) are checkTransferToFundSignaturesAndIds,
+ * lifted out for the replay of a chain chunk
+ * (src/garlic-chain/replay.service.js), which runs them and nothing else;
+ * the minimum, the account's type and the rest follow here.
+ *
  * Returns { ok: true, accountId, transactionId, accountIdTo, heldIn } with
  * the ids as 32-byte Buffers and heldIn 'pending', the shape every verify
  * function gives, or { ok: false, reason }. Storing is receiveTransferToFund's job.
  */
 export async function verifyTransferToFund(body) {
-  const problem = checkTransferToFundShape(body);
-  if (problem) return { ok: false, reason: problem };
+  const checked = await checkTransferToFundSignaturesAndIds(body);
+  if (!checked.ok) return checked;
 
-  const { payload, signatures } = body;
+  const { payload } = body;
+  const { accountId, accountIdTo, amount, account, transactionId } = checked;
 
-  // 1. Ids and amount.
-  const accountId = decodeDigest(payload.accountId);
-  if (!accountId) return { ok: false, reason: 'payload.accountId is not a SHA-256 digest' };
-  const accountIdTo = decodeDigest(payload.accountIdTo);
-  if (!accountIdTo) return { ok: false, reason: 'payload.accountIdTo is not a SHA-256 digest' };
-  if (!decodeDigest(payload.previousTransactionId)) {
-    return { ok: false, reason: 'payload.previousTransactionId is not a SHA-256 digest' };
-  }
-  const amount = parseAmount(payload.amount);
-  if (amount === null) return { ok: false, reason: `payload.amount ${AMOUNT_RULE}` };
-
-  // 1b. The fund, the purpose and its minimum.
-  if (!accountIdTo.equals(FUND_ACCOUNT_ID)) return { ok: false, reason: 'payload.accountIdTo is not the fund' };
-  if (!isPurpose(payload.stakeFor)) {
-    return { ok: false, reason: `payload.stakeFor must be one of ${PURPOSE_NAMES.join(', ')}` };
-  }
+  // 1c. The purpose's minimum.
   if (amount < minimumFor(payload.stakeFor)) {
     return { ok: false, reason: `payload.amount is less than the minimum stake for ${payload.stakeFor}` };
   }
 
-  // 2. The sending account, a spending account.
-  const account = await findAccount(accountId);
-  if (!account) return { ok: false, reason: 'no account with this accountId' };
+  // 2b. The sending account is a spending account.
   if (account.type !== SPENDING) {
     return { ok: false, reason: `${TRANSFER_TO_FUND} can only be sent from a ${SPENDING} account` };
-  }
-
-  // 3. Signatures.
-  const message = Buffer.from(canonicalize(payload), 'utf8');
-  const badSignatures = verifyAccountSignatures(account, signatures, message, ANY_TWO_PAIRS);
-  if (badSignatures) return { ok: false, reason: badSignatures };
-
-  // 4. transactionId: the hash of the payload without itself.
-  const transactionId = unsignedHash(payload);
-  if (!digestMatches(payload.transactionId, transactionId)) {
-    return { ok: false, reason: 'payload.transactionId is not the SHA-256 of the canonical payload without transactionId' };
   }
 
   // 5. previousTransactionId.
@@ -145,6 +126,56 @@ export async function verifyTransferToFund(body) {
   }
 
   return { ok: true, accountId, transactionId, accountIdTo, heldIn: PENDING };
+}
+
+/**
+ * The shape, signature and id checks of a transferToFund: the shape; the
+ * ids and the amount; accountIdTo is the fund and stakeFor a purpose (not
+ * the minimum); the sending account exists, read on `client` when one is
+ * given (the replay of a chain chunk, inside its transaction) and through
+ * the pool otherwise; the signatures, any two pairs; transactionId.
+ * Returns { ok: true, accountId, accountIdTo, amount (BigInt), account,
+ * transactionId } with the ids as 32-byte Buffers, or { ok: false, reason }.
+ */
+export async function checkTransferToFundSignaturesAndIds(body, { client } = {}) {
+  const problem = checkTransferToFundShape(body);
+  if (problem) return { ok: false, reason: problem };
+
+  const { payload, signatures } = body;
+
+  // 1. Ids and amount.
+  const accountId = decodeDigest(payload.accountId);
+  if (!accountId) return { ok: false, reason: 'payload.accountId is not a SHA-256 digest' };
+  const accountIdTo = decodeDigest(payload.accountIdTo);
+  if (!accountIdTo) return { ok: false, reason: 'payload.accountIdTo is not a SHA-256 digest' };
+  if (!decodeDigest(payload.previousTransactionId)) {
+    return { ok: false, reason: 'payload.previousTransactionId is not a SHA-256 digest' };
+  }
+  const amount = parseAmount(payload.amount);
+  if (amount === null) return { ok: false, reason: `payload.amount ${AMOUNT_RULE}` };
+
+  // 1b. The fund and the purpose.
+  if (!accountIdTo.equals(FUND_ACCOUNT_ID)) return { ok: false, reason: 'payload.accountIdTo is not the fund' };
+  if (!isPurpose(payload.stakeFor)) {
+    return { ok: false, reason: `payload.stakeFor must be one of ${PURPOSE_NAMES.join(', ')}` };
+  }
+
+  // 2a. The sending account exists.
+  const account = await findAccount(accountId, client);
+  if (!account) return { ok: false, reason: 'no account with this accountId' };
+
+  // 3. Signatures.
+  const message = Buffer.from(canonicalize(payload), 'utf8');
+  const badSignatures = verifyAccountSignatures(account, signatures, message, ANY_TWO_PAIRS);
+  if (badSignatures) return { ok: false, reason: badSignatures };
+
+  // 4. transactionId: the hash of the payload without itself.
+  const transactionId = unsignedHash(payload);
+  if (!digestMatches(payload.transactionId, transactionId)) {
+    return { ok: false, reason: 'payload.transactionId is not the SHA-256 of the canonical payload without transactionId' };
+  }
+
+  return { ok: true, accountId, accountIdTo, amount, account, transactionId };
 }
 
 /**
@@ -201,16 +232,19 @@ export async function writeTransferToFund(client, { transactionId, accountId, og
  * batch order, and one open proposal at a time plus the unique transactionId
  * already rule out replay and reordering.
  *
- * The checks, in order: the shape; accountId is the fund; createdAt is
- * within LOCK_OFFSET_MINUTES of now, either way, because the voting window
- * is counted from it; the proposer's account exists and has at least one
- * guardian vote (stakes.service.js guardianWeight); the signatures;
- * transactionId; each payout's recipient is an existing account other than
- * the fund, its amount a positive integer, its stakeFor, when present, a
- * purpose; for each recipient and purpose, the recipient's stake for the
- * purpose covers the sum of the payouts returning it; the sum of all
- * amounts is within the fund's balance; the uniqueness checks, which for
- * the fund mean no open proposal.
+ * The checks, in the order they run: the shape; accountId is the fund; the
+ * proposer's account exists; the signatures; transactionId; each payout's
+ * recipient decodes and is not the fund, its amount is a positive integer,
+ * its stakeFor, when present, a purpose (all of it
+ * checkFundProposalSignaturesAndIds, lifted out for the replay of a chain
+ * chunk, src/garlic-chain/replay.service.js, which runs it and nothing
+ * else); then createdAt is within LOCK_OFFSET_MINUTES of now, either way,
+ * because the voting window is counted from it; the proposer has at least
+ * one guardian vote (stakes.service.js guardianWeight); each recipient is
+ * an existing account; for each recipient and purpose, the recipient's
+ * stake for the purpose covers the sum of the payouts returning it; the
+ * sum of all amounts is within the fund's balance; the uniqueness checks,
+ * which for the fund mean no open proposal.
  *
  * Returns { ok: true, accountId, transactionId, heldIn, voteClosesAt,
  * proposerWeight }: the fund's id and the proposal's as 32-byte Buffers,
@@ -220,52 +254,23 @@ export async function writeTransferToFund(client, { transactionId, accountId, og
  * receiveFundProposal's job.
  */
 export async function verifyFundProposal(body) {
-  const problem = checkProposalShape(body);
-  if (problem) return { ok: false, reason: problem };
+  const checked = await checkFundProposalSignaturesAndIds(body);
+  if (!checked.ok) return checked;
 
-  const { payload, signatures } = body;
+  const { payload } = body;
+  const { guardianId, transactionId, payouts } = checked;
 
-  // 1. The fund, the proposer's id, and the date.
-  const accountId = decodeDigest(payload.accountId);
-  if (!accountId) return { ok: false, reason: 'payload.accountId is not a SHA-256 digest' };
-  if (!accountId.equals(FUND_ACCOUNT_ID)) return { ok: false, reason: 'payload.accountId is not the fund' };
-  const guardianId = decodeDigest(payload.guardianId);
-  if (!guardianId) return { ok: false, reason: 'payload.guardianId is not a SHA-256 digest' };
+  // 1b. The date.
   const createdAt = Date.parse(payload.createdAt);
   if (!(Math.abs(createdAt - Date.now()) <= env.locks.offsetMinutes * MS_PER_MINUTE)) {
     return { ok: false, reason: `payload.createdAt must be within ${env.locks.offsetMinutes} minutes of now` };
   }
 
-  // 2. The proposer: an account with at least one guardian vote.
-  const proposer = await findAccount(guardianId);
-  if (!proposer) return { ok: false, reason: 'no account with this guardianId' };
+  // 2b. The proposer has at least one guardian vote.
   const proposerWeight = guardianWeight(await findStake(guardianId));
   if (proposerWeight < 1) return { ok: false, reason: 'the proposer has no guardian vote' };
 
-  // 3. Signatures.
-  const message = Buffer.from(canonicalize(payload), 'utf8');
-  const badSignatures = verifyAccountSignatures(proposer, signatures, message, ANY_TWO_PAIRS);
-  if (badSignatures) return { ok: false, reason: badSignatures };
-
-  // 4. transactionId: the hash of the payload without itself.
-  const transactionId = unsignedHash(payload);
-  if (!digestMatches(payload.transactionId, transactionId)) {
-    return { ok: false, reason: 'payload.transactionId is not the SHA-256 of the canonical payload without transactionId' };
-  }
-
-  // 5. Each payout: recipient, amount, purpose.
-  const payouts = [];
-  for (const [i, payout] of payload.payouts.entries()) {
-    const recipient = decodeDigest(payout.accountIdTo);
-    if (!recipient) return { ok: false, reason: `payload.payouts[${i}].accountIdTo is not a SHA-256 digest` };
-    if (recipient.equals(FUND_ACCOUNT_ID)) return { ok: false, reason: `payload.payouts[${i}].accountIdTo is the fund` };
-    const amount = parseAmount(payout.amount);
-    if (amount === null) return { ok: false, reason: `payload.payouts[${i}].amount ${AMOUNT_RULE}` };
-    if (payout.stakeFor !== undefined && !isPurpose(payout.stakeFor)) {
-      return { ok: false, reason: `payload.payouts[${i}].stakeFor must be one of ${PURPOSE_NAMES.join(', ')}` };
-    }
-    payouts.push({ index: i, recipient, amount, stakeFor: payout.stakeFor });
-  }
+  // 5b. Each recipient exists.
   const recipients = new Map(payouts.map(({ recipient }) => [recipient.toString('hex'), recipient]));
   const found = new Set((await findExistingAccounts([...recipients.values()])).map((id) => id.toString('hex')));
   for (const { index, recipient } of payouts) {
@@ -315,6 +320,64 @@ export async function verifyFundProposal(body) {
     voteClosesAt: new Date(createdAt + env.guardianVote.minutes * MS_PER_MINUTE),
     proposerWeight,
   };
+}
+
+/**
+ * The shape, signature and id checks of a fundProposal: the shape;
+ * accountId is the fund; guardianId decodes; the proposer's account
+ * exists, read on `client` when one is given (the replay of a chain chunk,
+ * inside its transaction) and through the pool otherwise; the signatures,
+ * any two pairs, against its keys; transactionId; each payout's recipient
+ * decodes and is not the fund, its amount is a positive integer, its
+ * stakeFor, when present, a purpose. No clock, no stake, no lookup of the
+ * recipients, no balance, no holding table. Returns { ok: true, accountId
+ * (the fund's), guardianId, proposer, transactionId, payouts: [ { index,
+ * recipient, amount (BigInt), stakeFor } ] } with the ids as 32-byte
+ * Buffers, or { ok: false, reason }.
+ */
+export async function checkFundProposalSignaturesAndIds(body, { client } = {}) {
+  const problem = checkProposalShape(body);
+  if (problem) return { ok: false, reason: problem };
+
+  const { payload, signatures } = body;
+
+  // 1. The fund and the proposer's id.
+  const accountId = decodeDigest(payload.accountId);
+  if (!accountId) return { ok: false, reason: 'payload.accountId is not a SHA-256 digest' };
+  if (!accountId.equals(FUND_ACCOUNT_ID)) return { ok: false, reason: 'payload.accountId is not the fund' };
+  const guardianId = decodeDigest(payload.guardianId);
+  if (!guardianId) return { ok: false, reason: 'payload.guardianId is not a SHA-256 digest' };
+
+  // 2a. The proposer's account exists.
+  const proposer = await findAccount(guardianId, client);
+  if (!proposer) return { ok: false, reason: 'no account with this guardianId' };
+
+  // 3. Signatures.
+  const message = Buffer.from(canonicalize(payload), 'utf8');
+  const badSignatures = verifyAccountSignatures(proposer, signatures, message, ANY_TWO_PAIRS);
+  if (badSignatures) return { ok: false, reason: badSignatures };
+
+  // 4. transactionId: the hash of the payload without itself.
+  const transactionId = unsignedHash(payload);
+  if (!digestMatches(payload.transactionId, transactionId)) {
+    return { ok: false, reason: 'payload.transactionId is not the SHA-256 of the canonical payload without transactionId' };
+  }
+
+  // 5a. Each payout: recipient, amount, purpose.
+  const payouts = [];
+  for (const [i, payout] of payload.payouts.entries()) {
+    const recipient = decodeDigest(payout.accountIdTo);
+    if (!recipient) return { ok: false, reason: `payload.payouts[${i}].accountIdTo is not a SHA-256 digest` };
+    if (recipient.equals(FUND_ACCOUNT_ID)) return { ok: false, reason: `payload.payouts[${i}].accountIdTo is the fund` };
+    const amount = parseAmount(payout.amount);
+    if (amount === null) return { ok: false, reason: `payload.payouts[${i}].amount ${AMOUNT_RULE}` };
+    if (payout.stakeFor !== undefined && !isPurpose(payout.stakeFor)) {
+      return { ok: false, reason: `payload.payouts[${i}].stakeFor must be one of ${PURPOSE_NAMES.join(', ')}` };
+    }
+    payouts.push({ index: i, recipient, amount, stakeFor: payout.stakeFor });
+  }
+
+  return { ok: true, accountId, guardianId, proposer, transactionId, payouts };
 }
 
 /**
@@ -454,13 +517,18 @@ async function receiveTransaction(body, verify) {
     return { ok: false, reason: table.conflictReasons[stored.conflict] };
   }
 
-  const approvals = await sendTransactionApproval({ transaction: body, transactionId });
+  // No answer from a peer: the report, the wait, the one re-send
+  // (src/votes/votes.messages.js settleNoAnswers); a refusal is a refusal.
+  const approvals = await settleNoAnswers(
+    await sendTransactionApproval({ transaction: body, transactionId }),
+    (peers) => sendTransactionApproval({ transaction: body, transactionId, peers }),
+  );
   const outcome = { ok: true, transactionId: body.payload.transactionId, approvals };
   if (!approvals.every((approval) => approval.approved)) {
     return { ...outcome, approved: false };
   }
 
-  // Every validator approved: our own row first, then tell them all.
+  // Every counted validator approved: our own row first, then tell them all.
   await table.markApproved(transactionId);
   const proof = await sendProofOfAcceptance({
     transactionId: body.payload.transactionId,

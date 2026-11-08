@@ -12,6 +12,7 @@ import { HELD_TABLES, findHeld } from '../held-transactions/held-transactions.js
 import { findStake } from '../stakes/stakes.queries.js';
 import { findAccount } from '../transfer/transfer.queries.js';
 import { isObject } from '../util/is-object.js';
+import { settleNoAnswers } from '../votes/votes.messages.js';
 import {
   ATTACHMENT_APPROVAL,
   PROOF_OF_ATTACHMENT_ACCEPTANCE,
@@ -22,7 +23,8 @@ import {
   sendAttachmentApproval,
   sendProofOfAttachmentAcceptance,
 } from '../validators/validators.messages.js';
-import { findActiveValidator, findActiveValidators } from '../validators/validators.queries.js';
+import { findCountedValidators } from '../validators/validators.queries.js';
+import { findCountedSender } from '../validators/validators.service.js';
 import { verifyPayloadSignature } from '../validators/validators.signing.js';
 
 /**
@@ -92,7 +94,12 @@ export async function receiveAttachment(body, kinds) {
   const stored = await kind.store(transactionId, body, context);
   if (!stored.stored) return { ok: false, reason: stored.reason };
 
-  const approvals = await sendAttachmentApproval({ attachment: body, transactionId, attachmentId });
+  // No answer from a peer: the report, the wait, the one re-send
+  // (src/votes/votes.messages.js settleNoAnswers); a refusal is a refusal.
+  const approvals = await settleNoAnswers(
+    await sendAttachmentApproval({ attachment: body, transactionId, attachmentId }),
+    (peers) => sendAttachmentApproval({ attachment: body, transactionId, attachmentId, peers }),
+  );
   const outcome = { ok: true, transactionId: body.payload.transactionId, approvals };
   if (!approvals.every((approval) => approval.approved)) {
     return { ...outcome, approved: false };
@@ -115,9 +122,14 @@ export async function receiveAttachment(body, kinds) {
  * of receiveAttachment, mirroring validators.service.js
  * receiveTransactionApproval. Checks, in order:
  *   1. the shape of the message;
- *   2. originatingValidator is an active validator in this validator's own
- *      registry, and the signature verifies against that row's key;
+ *   2. originatingValidator is a counted validator in this validator's own
+ *      registry (validators.service.js findCountedSender), and the
+ *      signature verifies against that row's key;
  *   3. attachmentId is the hash of the embedded follow-up's payload;
+ *   3b. the same approval twice: a follow-up with this attachmentId is
+ *      already stored for this transaction (locateAttachment). Then the
+ *      approved receipt is answered again, as the first time, instead of
+ *      "already present";
  *   4. the embedded follow-up passes every check the originating validator
  *      ran (verifyAttachment, any of the seven kinds), against this
  *      validator's own database, and transactionId is the one it names;
@@ -132,16 +144,28 @@ export async function receiveAttachmentApproval(body) {
   const { payload, signature } = body;
 
   // 2. Who sent it, and did they really.
-  const sender = await findActiveValidator(payload.originatingValidator);
-  if (!sender) {
-    return { ok: false, reason: `originatingValidator ${payload.originatingValidator} is not an active validator` };
-  }
-  const badSignature = verifyPayloadSignature(payload, signature, sender);
+  const sender = await findCountedSender(payload.originatingValidator, 'originatingValidator');
+  if (sender.reason) return { ok: false, reason: sender.reason };
+  const badSignature = verifyPayloadSignature(payload, signature, sender.validator);
   if (badSignature) return { ok: false, reason: badSignature };
 
   // 3. The id is the hash of what it carries.
   if (!digestMatches(payload.attachmentId, canonicalHash(payload.attachment.payload))) {
     return { ok: false, reason: 'payload.attachmentId is not the hash of payload.attachment.payload' };
+  }
+
+  // 3b. The same approval twice answers the same receipt.
+  const transactionId = decodeDigest(payload.transactionId);
+  const attachmentId = decodeDigest(payload.attachmentId);
+  if (transactionId && attachmentId && (await locateAttachment(transactionId, attachmentId))) {
+    return {
+      ok: true,
+      receipt: buildAttachmentApproved({
+        transactionId: payload.transactionId,
+        attachmentId: payload.attachmentId,
+        validatorTo: payload.originatingValidator,
+      }),
+    };
   }
 
   // 4. The follow-up itself, same checks as the originating validator.
@@ -170,18 +194,20 @@ export async function receiveAttachmentApproval(body) {
  * mirroring validators.service.js receiveProofOfAcceptance. Checks, in
  * order:
  *   1. the shape of the proof;
- *   2. originatingValidator is an active validator here, and the signature
+ *   2. originatingValidator is a counted validator here, and the signature
  *      verifies against that row's key;
  *   3. this validator holds this attachment for this transaction
- *      (locateAttachment), not yet approved;
+ *      (locateAttachment), approved or not;
  *   4. every receipt is an attachment approved receipt genuinely signed by
- *      an active validator other than the originating one, addressed to the
+ *      a counted validator other than the originating one, addressed to the
  *      originating validator, for this transaction and attachment, with no
  *      validator twice;
- *   5. there is a receipt from every active validator other than the
+ *   5. there is a receipt from every counted validator other than the
  *      originating one.
  * The registry is read once, up front. If all of it holds, the attachment
- * is marked approved here and the kind's effect applied.
+ * is marked approved here and the kind's effect applied; an attachment
+ * approved already (the same proof twice) gets neither again, and the
+ * accepted receipt is answered either way.
  *
  * Returns { ok: true, receipt } with the signed attachment accepted receipt
  * to answer with, or { ok: false, reason }.
@@ -193,22 +219,22 @@ export async function receiveProofOfAttachmentAcceptance(body) {
   const { payload, signature } = body;
 
   // 2. Who sent it, and did they really.
-  const validators = await findActiveValidators();
+  const validators = await findCountedValidators();
   const sender = validators.get(payload.originatingValidator);
   if (!sender) {
-    return { ok: false, reason: `originatingValidator ${payload.originatingValidator} is not an active validator` };
+    const known = await findCountedSender(payload.originatingValidator, 'originatingValidator');
+    return { ok: false, reason: known.reason ?? `validator ${payload.originatingValidator} is ignored` };
   }
   const badSignature = verifyPayloadSignature(payload, signature, sender);
   if (badSignature) return { ok: false, reason: badSignature };
 
-  // 3. An attachment we hold and have not approved yet.
+  // 3. An attachment we hold.
   const transactionId = decodeDigest(payload.transactionId);
   if (!transactionId) return { ok: false, reason: 'payload.transactionId is not a SHA-256 digest' };
   const attachmentId = decodeDigest(payload.attachmentId);
   if (!attachmentId) return { ok: false, reason: 'payload.attachmentId is not a SHA-256 digest' };
   const located = await locateAttachment(transactionId, attachmentId);
   if (!located) return { ok: false, reason: 'no held attachment with this attachmentId for this transactionId' };
-  if (located.approved) return { ok: false, reason: 'this attachment is already approved' };
 
   // 4. Each receipt, and who it is from.
   const seen = new Set();
@@ -218,7 +244,7 @@ export async function receiveProofOfAttachmentAcceptance(body) {
 
     const from = validators.get(receipt.payload.validatorFrom);
     if (!from) {
-      return { ok: false, reason: `receipts[${i}]: validatorFrom ${receipt.payload.validatorFrom} is not an active validator` };
+      return { ok: false, reason: `receipts[${i}]: validatorFrom ${receipt.payload.validatorFrom} is not a counted validator` };
     }
     if (from.id === payload.originatingValidator) {
       return { ok: false, reason: `receipts[${i}]: a receipt from the originating validator itself` };
@@ -243,11 +269,14 @@ export async function receiveProofOfAttachmentAcceptance(body) {
     return { ok: false, reason: `no receipt from validator${missing.length > 1 ? 's' : ''} ${missing.join(', ')}` };
   }
 
-  // Approved here, then the kind's effect. The mark is false only if another
-  // request got here first.
-  const marked = await located.kind.markApproved(transactionId, located.ref);
-  if (!marked) return { ok: false, reason: 'this attachment is already approved' };
-  await located.kind.onAccepted(transactionId, located.ref);
+  // Approved here, then the kind's effect, unless it was approved already
+  // (the same proof twice): then neither, and the receipt alone. The mark
+  // is false only if another request got here first, and that one applies
+  // the effect.
+  if (!located.approved) {
+    const marked = await located.kind.markApproved(transactionId, located.ref);
+    if (marked) await located.kind.onAccepted(transactionId, located.ref);
+  }
 
   return {
     ok: true,
@@ -260,16 +289,53 @@ export async function receiveProofOfAttachmentAcceptance(body) {
 }
 
 /**
- * The checks every follow-up gets, in order: the shape, common and the
- * kind's own; the ids decode; the held row exists in the kind's table and
- * is approved here; the signer's account exists and its stake qualifies,
- * when the kind requires stake; the signatures, any two pairs, against that
- * account's keys; the kind's own checks against the row. Returns
+ * The checks every follow-up gets, in the order they run: the shape,
+ * common and the kind's own, the ids and the signer's account and
+ * signatures (checkAttachmentSignatures, lifted out for the held rows a
+ * joiner pulls, held-transactions/held-rows.service.js, which runs it and
+ * nothing else); then the held row exists in the kind's table and is
+ * approved here; the signer's stake qualifies, when the kind requires
+ * stake; the kind's own checks against the row. Returns
  * { ok: true, kind, transactionId, attachmentId, context } with the ids as
  * 32-byte Buffers and the context ({ row, signerId, stake }) the kind's
  * store takes, or { ok: false, reason }.
  */
 async function verifyAttachment(body, kinds) {
+  const checked = await checkAttachmentSignatures(body, kinds);
+  if (!checked.ok) return checked;
+  const { kind, transactionId, signerId, signer } = checked;
+  const { payload } = body;
+
+  // The held transaction, approved here.
+  const row = await HELD_TABLES[kind.table].find(transactionId);
+  if (!row) return { ok: false, reason: `no ${kind.table} transaction with this transactionId` };
+  if (!row.approved) return { ok: false, reason: 'this transaction is not approved yet' };
+
+  // The signer's stake, when the kind needs one.
+  let stake = null;
+  if (kind.requiredStake) {
+    stake = await findStake(signerId);
+    const badStake = kind.requiredStake(stake);
+    if (badStake) return { ok: false, reason: badStake };
+  }
+
+  // The kind's own checks.
+  const context = { row, signerId, stake };
+  const own = await kind.verify(payload, context);
+  if (own) return { ok: false, reason: own };
+
+  return { ok: true, kind, transactionId, attachmentId: canonicalHash(payload), context };
+}
+
+/**
+ * The shape and signature checks of a follow-up, nothing against the held
+ * row: the shape, common and the kind's own (`kinds` the kinds allowed);
+ * the ids decode; the signer's account exists; the signatures, any two
+ * pairs, against that account's keys. Returns { ok: true, kind,
+ * transactionId, signerId, signer } with the ids as 32-byte Buffers and
+ * the signer's account row, or { ok: false, reason }.
+ */
+export async function checkAttachmentSignatures(body, kinds) {
   const shape = checkAttachmentShape(body, kinds);
   if (shape.reason) return { ok: false, reason: shape.reason };
 
@@ -280,32 +346,14 @@ async function verifyAttachment(body, kinds) {
   const signerId = decodeDigest(payload[kind.signerField]);
   if (!signerId) return { ok: false, reason: `payload.${kind.signerField} is not a SHA-256 digest` };
 
-  // The held transaction, approved here.
-  const row = await HELD_TABLES[kind.table].find(transactionId);
-  if (!row) return { ok: false, reason: `no ${kind.table} transaction with this transactionId` };
-  if (!row.approved) return { ok: false, reason: 'this transaction is not approved yet' };
-
-  // The signer, and its stake when the kind needs one.
   const signer = await findAccount(signerId);
   if (!signer) return { ok: false, reason: `no account with this ${kind.signerField}` };
-  let stake = null;
-  if (kind.requiredStake) {
-    stake = await findStake(signerId);
-    const badStake = kind.requiredStake(stake);
-    if (badStake) return { ok: false, reason: badStake };
-  }
 
-  // The signatures.
   const message = Buffer.from(canonicalize(payload), 'utf8');
   const badSignatures = verifyAccountSignatures(signer, signatures, message, ANY_TWO_PAIRS);
   if (badSignatures) return { ok: false, reason: badSignatures };
 
-  // The kind's own checks.
-  const context = { row, signerId, stake };
-  const own = await kind.verify(payload, context);
-  if (own) return { ok: false, reason: own };
-
-  return { ok: true, kind, transactionId, attachmentId: canonicalHash(payload), context };
+  return { ok: true, kind, transactionId, signerId, signer };
 }
 
 /**

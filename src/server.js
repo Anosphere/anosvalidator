@@ -3,6 +3,7 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { closePool, query } from './db/pool.js';
 import { runGenesis } from './genesis/genesis.service.js';
+import { startJoinLoop } from './validators/join.service.js';
 import { applyRegistry } from './validators/registry.service.js';
 
 // Who this is, first. The key file was loaded by the import of
@@ -50,6 +51,9 @@ const app = createApp();
 
 const server = app.listen(env.port, () => {
   console.log(`Validator ${env.validator.id} listening on http://localhost:${env.port}`);
+  // Every boot asks to join (src/validators/join.service.js): in the
+  // background, serving meanwhile, never stopping the process.
+  startJoinLoop();
 });
 
 let shuttingDown = false;

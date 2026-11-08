@@ -1,5 +1,6 @@
 import { ACCOUNT_CREATION, verifyCreateAccount, writeApproved } from '../accounts/accounts.service.js';
 import { env } from '../config/env.js';
+import { canonicalize } from '../crypto/canonical.js';
 import { decodeDigest, digestMatches } from '../crypto/hash.js';
 import { findReadyAssistedIds } from '../assisted-transfers/assisted-transfers.queries.js';
 import { findReadyEscrowIds } from '../escrow/escrow.queries.js';
@@ -15,6 +16,8 @@ import { findDueIds } from '../locked-transactions/locked-transactions.queries.j
 import { findApprovedIds } from '../pending/pending.queries.js';
 import { isTransferType, verifyAnosTransfer } from '../transfer/transfer.service.js';
 import { isObject } from '../util/is-object.js';
+import { IGNORE } from '../votes/votes.messages.js';
+import { drainReports, runVote } from '../votes/votes.service.js';
 import {
   APPROVED_PENDING_LIST,
   FINAL_DECLARATION,
@@ -32,22 +35,54 @@ import {
   sendOfficialList,
   sendReadyAnnouncement,
 } from './validators.messages.js';
-import { findActiveValidator, findActiveValidators, findIsLeader, setLeader } from './validators.queries.js';
+import {
+  findActiveValidator,
+  findCountedPeers,
+  findCountedValidator,
+  findCountedValidators,
+  findIsLeader,
+  findNextCounted,
+  setLeader,
+} from './validators.queries.js';
 import { verifyPayloadSignature } from './validators.signing.js';
 
 /**
  * The receiving side of validator-to-validator messages. The shapes are
  * documented where each message is built, in validators.messages.js.
+ *
+ * Every message is accepted from a counted validator only (active and not
+ * ignored, validators.queries.js); one from an ignored validator is refused
+ * with `validator N is ignored`. The same message twice gets the same
+ * answer: an exact repeat of an approval or a proof answers the receipt it
+ * answered the first time (docs/schemas.md section 19).
  */
+
+/**
+ * The counted validator with id `id`, for a message that names its sender
+ * in `field`: { validator } when the row is active and not ignored, else
+ * { reason } (`<field> N is not an active validator`, or `validator N is
+ * ignored`). attachments.service.js uses it for the two attachment messages.
+ */
+export async function findCountedSender(id, field) {
+  const validator = await findActiveValidator(id);
+  if (!validator) return { reason: `${field} ${id} is not an active validator` };
+  if (validator.ignored) return { reason: `validator ${id} is ignored` };
+  return { validator };
+}
 
 /**
  * Handles a transaction approval receipt from another validator. Checks, in
  * order:
  *   1. the shape of the receipt;
- *   2. originatingValidator is an active validator in this validator's own
- *      registry, and the signature verifies against that row's key. Keys
- *      inside the message are never used, so a message can only pass as
- *      validator N by being signed with N's private key;
+ *   2. originatingValidator is a counted validator in this validator's own
+ *      registry (findCountedSender), and the signature verifies against
+ *      that row's key. Keys inside the message are never used, so a message
+ *      can only pass as validator N by being signed with N's private key;
+ *   2b. the same approval twice: a holding table already holds this
+ *      transactionId with an og_transaction equal to the one carried
+ *      (canonical JSON of both). Then the approved receipt is answered
+ *      again, as the first time, instead of "already pending"; a row with
+ *      this id from another submission is refused by check 3 as before;
  *   3. the embedded transaction passes exactly the checks the originating
  *      validator ran, picked by its transactionType (verifyTransaction,
  *      against this validator's own database);
@@ -67,12 +102,21 @@ export async function receiveTransactionApproval(body) {
   const { payload, signature } = body;
 
   // 2. Who sent it, and did they really.
-  const sender = await findActiveValidator(payload.originatingValidator);
-  if (!sender) {
-    return { ok: false, reason: `originatingValidator ${payload.originatingValidator} is not an active validator` };
-  }
-  const badSignature = verifyPayloadSignature(payload, signature, sender);
+  const sender = await findCountedSender(payload.originatingValidator, 'originatingValidator');
+  if (sender.reason) return { ok: false, reason: sender.reason };
+  const badSignature = verifyPayloadSignature(payload, signature, sender.validator);
   if (badSignature) return { ok: false, reason: badSignature };
+
+  // 2b. The same approval twice answers the same receipt.
+  if (await findRepeatedApproval(payload)) {
+    return {
+      ok: true,
+      receipt: buildTransactionApproved({
+        transactionId: payload.transactionId,
+        validatorTo: payload.originatingValidator,
+      }),
+    };
+  }
 
   // 3. The transaction itself, same checks as the originating validator.
   const transaction = await verifyTransaction(payload.transaction);
@@ -98,6 +142,19 @@ export async function receiveTransactionApproval(body) {
       validatorTo: payload.originatingValidator,
     }),
   };
+}
+
+/**
+ * Whether a holding table already holds the transaction an approval carries,
+ * stored from the same submission: the row with payload.transactionId
+ * (held-transactions.js findHeld) whose og_transaction is
+ * payload.transaction, compared as canonical JSON.
+ */
+async function findRepeatedApproval(payload) {
+  const transactionId = decodeDigest(payload.transactionId);
+  if (!transactionId) return false;
+  const held = await findHeld(transactionId);
+  return held !== null && canonicalize(held.ogTransaction) === canonicalize(payload.transaction);
 }
 
 /**
@@ -132,18 +189,20 @@ async function verifyTransaction(transaction) {
  * Handles a proof of transaction acceptance from the originating validator.
  * Checks, in order:
  *   1. the shape of the proof;
- *   2. originatingValidator is an active validator here, and the signature
+ *   2. originatingValidator is a counted validator here, and the signature
  *      verifies against that row's key;
  *   3. this validator holds the transaction, in one of the five holding
- *      tables (held-transactions.js findHeld), not yet approved;
- *   4. every receipt is a transaction approved receipt genuinely signed by an
- *      active validator other than the originating one, addressed to the
+ *      tables (held-transactions.js findHeld), approved or not;
+ *   4. every receipt is a transaction approved receipt genuinely signed by a
+ *      counted validator other than the originating one, addressed to the
  *      originating validator, for this transaction, with no validator twice;
- *   5. there is a receipt from every active validator other than the
+ *   5. there is a receipt from every counted validator other than the
  *      originating one.
  * The registry is read once, up front; 2, 4 and 5 all work from that one
  * snapshot. If all of it holds, this validator's row, in whichever table
- * holds the transaction, is marked approved.
+ * holds the transaction, is marked approved; a row approved already (the
+ * same proof twice) leaves the mark false, which is no refusal, and the
+ * accepted receipt is answered either way.
  *
  * Returns { ok: true, receipt } with the signed transaction accepted receipt
  * to answer with (validators.messages.js), or { ok: false, reason }.
@@ -155,21 +214,20 @@ export async function receiveProofOfAcceptance(body) {
   const { payload, signature } = body;
 
   // 2. Who sent it, and did they really.
-  const validators = await findActiveValidators();
+  const validators = await findCountedValidators();
   const sender = validators.get(payload.originatingValidator);
   if (!sender) {
-    return { ok: false, reason: `originatingValidator ${payload.originatingValidator} is not an active validator` };
+    const known = await findCountedSender(payload.originatingValidator, 'originatingValidator');
+    return { ok: false, reason: known.reason ?? `validator ${payload.originatingValidator} is ignored` };
   }
   const badSignature = verifyPayloadSignature(payload, signature, sender);
   if (badSignature) return { ok: false, reason: badSignature };
 
-  // 3. A transaction we know and have not approved yet, in whichever
-  // holding table has it.
+  // 3. A transaction we know, in whichever holding table has it.
   const transactionId = decodeDigest(payload.transactionId);
   if (!transactionId) return { ok: false, reason: 'payload.transactionId is not a SHA-256 digest' };
   const held = await findHeld(transactionId);
   if (!held) return { ok: false, reason: 'no held transaction with this transactionId' };
-  if (held.approved) return { ok: false, reason: 'this transaction is already approved' };
 
   // 4. Each receipt, and who it is from.
   const seen = new Set();
@@ -179,7 +237,7 @@ export async function receiveProofOfAcceptance(body) {
 
     const from = validators.get(receipt.payload.validatorFrom);
     if (!from) {
-      return { ok: false, reason: `receipts[${i}]: validatorFrom ${receipt.payload.validatorFrom} is not an active validator` };
+      return { ok: false, reason: `receipts[${i}]: validatorFrom ${receipt.payload.validatorFrom} is not a counted validator` };
     }
     if (from.id === payload.originatingValidator) {
       return { ok: false, reason: `receipts[${i}]: a receipt from the originating validator itself` };
@@ -199,12 +257,10 @@ export async function receiveProofOfAcceptance(body) {
     return { ok: false, reason: `no receipt from validator${missing.length > 1 ? 's' : ''} ${missing.join(', ')}` };
   }
 
-  // Approved, in the table that holds it. The mark is false only if another
-  // request got here first.
-  const marked = await HELD_TABLES[held.table].markApproved(transactionId);
-  if (!marked) {
-    return { ok: false, reason: 'this transaction is already approved' };
-  }
+  // Approved, in the table that holds it. The mark is false when the row
+  // was approved already, by this proof's first arrival or by another
+  // request that got here first: no refusal, the receipt is the same.
+  await HELD_TABLES[held.table].markApproved(transactionId);
   return {
     ok: true,
     receipt: buildTransactionAccepted({
@@ -276,85 +332,166 @@ async function findReadyIds() {
   ].sort();
 }
 
-/** True while this validator is in the middle of a round (runLeader). */
-let leading = false;
+/**
+ * True while this validator is in a busy section: a round (runLeader), a
+ * vote it starts (src/votes/votes.service.js startVote) or a join it leads
+ * (join.service.js). The three never overlap: whoever finds the flag taken
+ * returns at once, or queues its report. Whoever ends a busy section
+ * drains the report queue (votes.service.js drainReports) and then calls
+ * runLeader; runLeader itself drains the queue after its round.
+ */
+let busy = false;
+
+/** Takes the busy flag: true when it was free and is now held, false when a round, a vote or a join holds it. */
+export function takeBusy() {
+  if (busy) return false;
+  busy = true;
+  return true;
+}
+
+/** Whether a round, a vote or a join holds the busy flag. */
+export function isBusy() {
+  return busy;
+}
+
+/** Releases the busy flag. The caller then drains the report queue and, unless it is runLeader, calls runLeader. */
+export function releaseBusy() {
+  busy = false;
+}
 
 /**
  * What every validator does after approving a transaction: if it is the
  * leader, and holds approved pending transactions, it leads one round of
- * writing (leadRound); otherwise nothing, and the next approval asks again.
- * The handlers call it fire-and-forget after answering, and the final
- * declaration's handler too, so the next leader starts at once. A round
- * already running makes a second call return at once.
+ * writing (leadRound) in a busy section; otherwise nothing, and the next
+ * approval asks again. The handlers call it fire-and-forget after
+ * answering, the final declaration's handler too, so the next leader
+ * starts at once, and so does the end of every vote and join. A busy
+ * section already open makes the call return at once. After the round the
+ * report queue is drained: the votes reported meanwhile run, each
+ * followed by runLeader again.
  */
 export async function runLeader() {
-  if (leading) return;
-  leading = true;
+  if (!takeBusy()) return;
   try {
     await leadRound();
   } finally {
-    leading = false;
+    releaseBusy();
   }
+  await drainReports();
 }
 
+/** What settleRoundAnswers returns when a passed vote means the round starts again from step 1. */
+const RESTART = Symbol('restart');
+
 /**
- * One round, written as if nothing can fail:
- *   1. the ready announcement goes to every other validator; each answers
+ * One round:
+ *   1. the ready announcement goes to every counted peer; each answers
  *      with its approved pending list (findReadyIds: approved pending
  *      transactions and due locked ones), in id order;
  *   2. the official list is the ids every one of those lists and this one
  *      holds, in id order;
- *   3. the official list goes to every other validator; each writes what it
+ *   3. the official list goes to every counted peer; each writes what it
  *      holds of it and answers with the ids it wrote; this validator writes
  *      its own;
- *   4. this validator's own registry moves is_leader to the next active
- *      validator by id (wrapping round), so an announcement from the new
- *      leader is never refused here; then the final declaration naming it
- *      goes to every other validator.
- * A list or receipt that fails its check ends the round there.
+ *   4. this validator's own registry moves is_leader to the next counted
+ *      validator by id (wrapping round, validators.queries.js
+ *      findNextCounted), so an announcement from the new leader is never
+ *      refused here; then the final declaration naming it goes to every
+ *      counted peer.
+ * A peer that gives no answer at step 1 or 3 is voted on inside this busy
+ * section (settleRoundAnswers): a passed vote starts the round again from
+ * step 1 with the ignored peer out of the sends (the peers that already
+ * wrote have those ids out of their lists and the official list is the
+ * overlap, so nothing is written twice; this validator's own write of step
+ * 3 comes before the vote, so it stands with theirs); a failed vote sends
+ * that step's call once more to that peer, and a second no answer ends
+ * the round with a line, as a refusal does. No answer to the final
+ * declaration is logged only: the leadership has moved, and the new
+ * leader meets the silent validator on its next call.
  */
 async function leadRound() {
-  if (!(await findIsLeader(env.validator.id))) return;
-  const own = await findReadyIds();
-  if (own.length === 0) return;
+  for (;;) {
+    if (!(await findIsLeader(env.validator.id))) return;
+    const own = await findReadyIds();
+    if (own.length === 0) return;
 
-  // 1. Everyone's approved pending list.
-  const lists = await sendReadyAnnouncement();
-  for (const { id, reason } of lists) {
+    // 1. Everyone's approved pending list.
+    const lists = await settleRoundAnswers(
+      await sendReadyAnnouncement(),
+      (peers) => sendReadyAnnouncement(peers),
+      'sent no approved pending list',
+    );
+    if (lists === RESTART) continue;
+    if (lists === null) return;
+
+    // 2. The ids every list holds, this one included, are the official list.
+    let official = own;
+    for (const { transactionIds } of lists) {
+      official = official.filter((id) => transactionIds.includes(id));
+    }
+    console.log(`official list: ${official.length}`);
+
+    // 3. Everyone writes, this validator included: the own write right
+    // after the send, so it stands whatever the peers' answers bring.
+    const answers = await sendOfficialList(official);
+    const written = await writeApproved(official);
+    console.log(`wrote ${written.length}`);
+    const receipts = await settleRoundAnswers(answers, (peers) => sendOfficialList(official, peers), 'did not write');
+    if (receipts === RESTART) continue;
+    if (receipts === null) return;
+    for (const { id, transactionIds } of receipts) {
+      console.log(`validator ${id} wrote ${transactionIds.length}`);
+    }
+
+    // 4. Finished; hand over.
+    const nextLeader = await findNextCounted(env.validator.id);
+    await setLeader(nextLeader);
+    const declared = await sendFinalDeclaration({ transactionIds: official, nextLeader });
+    for (const { id, status, noAnswer, reason } of declared) {
+      console.log(noAnswer
+        ? `validator ${id} gave no answer to the final declaration: ${reason}`
+        : `validator ${id} answered the final declaration ${status}`);
+    }
+    console.log(`validator ${nextLeader} is the leader`);
+    return;
+  }
+}
+
+/**
+ * The answers of a round's step, settled. The peers that gave no answer
+ * are voted on (votes.service.js runVote, an ignore vote, in this busy
+ * section): a passed vote answers RESTART; a failed one sends the step's
+ * call once more to those peers through `resend(peers)`, and a second no
+ * answer, logged, answers null. Then a refusal among the answers, logged
+ * `validator N <what>: <reason>`, answers null. Otherwise the answers, the
+ * second ones in place of the first, in id order.
+ */
+async function settleRoundAnswers(answers, resend, what) {
+  let settled = answers;
+  const silent = answers.filter((answer) => answer.noAnswer).map((answer) => answer.id);
+  if (silent.length > 0) {
+    const vote = await runVote(silent, IGNORE);
+    if (vote.passed) {
+      console.log('the round starts again');
+      return RESTART;
+    }
+    const peers = (await findCountedPeers(env.validator.id)).filter((peer) => silent.includes(peer.id));
+    const again = await resend(peers);
+    for (const answer of again) {
+      if (answer.noAnswer) {
+        console.log(`validator ${answer.id} gave no answer twice; the round ends`);
+        return null;
+      }
+    }
+    settled = answers.filter((answer) => !silent.includes(answer.id)).concat(again).sort((a, b) => a.id - b.id);
+  }
+  for (const { id, reason } of settled) {
     if (reason) {
-      console.log(`validator ${id} sent no approved pending list: ${reason}`);
-      return;
+      console.log(`validator ${id} ${what}: ${reason}`);
+      return null;
     }
   }
-
-  // 2. The ids every list holds, this one included, are the official list.
-  let official = own;
-  for (const { transactionIds } of lists) {
-    official = official.filter((id) => transactionIds.includes(id));
-  }
-  console.log(`official list: ${official.length}`);
-
-  // 3. Everyone writes, this validator included.
-  const receipts = await sendOfficialList(official);
-  const written = await writeApproved(official);
-  console.log(`wrote ${written.length}`);
-  for (const { id, reason, transactionIds } of receipts) {
-    if (reason) {
-      console.log(`validator ${id} did not write: ${reason}`);
-      return;
-    }
-    console.log(`validator ${id} wrote ${transactionIds.length}`);
-  }
-
-  // 4. Finished; hand over.
-  const ids = [...(await findActiveValidators()).keys()];
-  const nextLeader = ids[(ids.indexOf(env.validator.id) + 1) % ids.length];
-  await setLeader(nextLeader);
-  const answers = await sendFinalDeclaration({ transactionIds: official, nextLeader });
-  for (const { id, status } of answers) {
-    console.log(`validator ${id} answered the final declaration ${status}`);
-  }
-  console.log(`validator ${nextLeader} is the leader`);
+  return settled;
 }
 
 /**
@@ -400,7 +537,7 @@ export async function receiveOfficialList(body) {
 
 /**
  * Handles the leader's final declaration. Checks it as a leader call and
- * that nextLeader is an active validator, then moves is_leader to nextLeader
+ * that nextLeader is a counted validator, then moves is_leader to nextLeader
  * in this validator's own registry. Nothing to answer with; the handler
  * answers 200. Returns { ok: true, nextLeader } or { ok: false, reason }.
  */
@@ -409,8 +546,8 @@ export async function receiveFinalDeclaration(body) {
   if (!checked.ok) return checked;
 
   const { nextLeader } = checked.payload;
-  if (!(await findActiveValidator(nextLeader))) {
-    return { ok: false, reason: `nextLeader ${nextLeader} is not an active validator` };
+  if (!(await findCountedValidator(nextLeader))) {
+    return { ok: false, reason: `nextLeader ${nextLeader} is not a counted validator` };
   }
   await setLeader(nextLeader);
   return { ok: true, nextLeader };
@@ -418,21 +555,21 @@ export async function receiveFinalDeclaration(body) {
 
 /**
  * The checks every leader call gets, in order: the shape for `type`; `leader`
- * is an active validator, and the leader, per this validator's own registry;
- * the signature verifies against that row's key. Returns { ok: true, payload }
- * or { ok: false, reason }.
+ * is a counted validator (findCountedSender), and the leader, per this
+ * validator's own registry; the signature verifies against that row's key.
+ * Returns { ok: true, payload } or { ok: false, reason }.
  */
 async function checkLeaderCall(body, type) {
   const problem = checkLeaderCallShape(body, type);
   if (problem) return { ok: false, reason: problem };
 
   const { payload, signature } = body;
-  const sender = await findActiveValidator(payload.leader);
-  if (!sender) return { ok: false, reason: `leader ${payload.leader} is not an active validator` };
+  const sender = await findCountedSender(payload.leader, 'leader');
+  if (sender.reason) return { ok: false, reason: sender.reason };
   if (!(await findIsLeader(payload.leader))) {
     return { ok: false, reason: `validator ${payload.leader} is not the leader` };
   }
-  const badSignature = verifyPayloadSignature(payload, signature, sender);
+  const badSignature = verifyPayloadSignature(payload, signature, sender.validator);
   if (badSignature) return { ok: false, reason: badSignature };
 
   return { ok: true, payload };

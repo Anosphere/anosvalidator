@@ -11,6 +11,6 @@ healthRouter.get('/', async (req, res) => {
     status: healthy ? 'ok' : 'degraded',
     uptime: process.uptime(),
     db,
-    ...identity(),
+    ...(await identity()),
   });
 });
