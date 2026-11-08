@@ -1,8 +1,9 @@
 import { env } from '../config/env.js';
 import { decodeDigest, digestMatches } from '../crypto/hash.js';
 import { isObject } from '../util/is-object.js';
+import { noticeIgnoredAnswers } from './join.service.js';
 import { postToValidators } from './validators.client.js';
-import { findActivePeers } from './validators.queries.js';
+import { findCountedPeers } from './validators.queries.js';
 import { signPayload, verifyPayloadSignature } from './validators.signing.js';
 
 /**
@@ -16,7 +17,29 @@ import { signPayload, verifyPayloadSignature } from './validators.signing.js';
  * 8785 canonical bytes by the sender's P-256 key (validators.signing.js).
  * All three payloads share a header: transactionId, type, the sender's id
  * and sentAt.
+ *
+ * Every send goes to the counted peers (validators.queries.js
+ * findCountedPeers: active and not ignored). A peer that gives no answer
+ * within the timeout (validators.client.js) is no failure of the call: the
+ * check of its answer gives { reason: "no answer: <reason>", noAnswer: true }
+ * and the per-validator result the sender returns carries noAnswer: true,
+ * so a caller can tell no answer from a refusal. The approval sends and
+ * the leader calls take an optional list of peers, for the one re-send
+ * after no answer (src/votes/votes.messages.js settleNoAnswers,
+ * validators.service.js settleRoundAnswers).
  */
+
+/**
+ * postToValidators (validators.client.js), then the one thing every send
+ * watches for: more than half of the peers answering that this validator
+ * is ignored means the network does not count it any more
+ * (join.service.js noticeIgnoredAnswers). The vote sends use it too.
+ */
+export async function postToPeers(peers, path, body, options) {
+  const answers = await postToValidators(peers, path, body, options);
+  noticeIgnoredAnswers(answers);
+  return answers;
+}
 
 /** payload.type of a transaction approval receipt: the call. */
 export const TRANSACTION_APPROVAL = 'transactionApproval';
@@ -33,11 +56,12 @@ export const TRANSACTION_ACCEPTED = 'transactionAccepted';
 /**
  * Sends a transaction approval receipt for `transaction` (a submission this
  * validator has verified and put into pending; `transactionId` is its id as
- * 32 raw bytes) to every other active validator at POST /transaction-approval,
+ * 32 raw bytes) to every other counted validator at POST /transaction-approval,
  * waits for all of them, and checks each answer as a transaction approved
  * receipt (checkTransactionApproved). Resolves with one
  * { id, approved: true, receipt } or { id, approved: false, reason } per
- * validator called, in ascending id order.
+ * validator called, in ascending id order. `peers`, optional, is the list
+ * to send to instead of every counted peer: the one re-send after no answer.
  *
  * Receipt shape; the payload is what is signed:
  *
@@ -50,7 +74,7 @@ export const TRANSACTION_ACCEPTED = 'transactionAccepted';
  *   }
  *   signature: { key }   hex, by this validator's P-256 key
  */
-export async function sendTransactionApproval({ transaction, transactionId }) {
+export async function sendTransactionApproval({ transaction, transactionId, peers }) {
   const payload = {
     transaction,
     type: TRANSACTION_APPROVAL,
@@ -60,14 +84,14 @@ export async function sendTransactionApproval({ transaction, transactionId }) {
   };
   const receipt = { payload, signature: signPayload(payload) };
 
-  const peers = await findActivePeers(env.validator.id);
-  const answers = await postToValidators(peers, '/transaction-approval', receipt);
+  const targets = peers ?? await findCountedPeers(env.validator.id);
+  const answers = await postToPeers(targets, '/transaction-approval', receipt);
 
   return answers.map((answer, i) => {
-    const checked = checkTransactionApproved(answer, { from: peers[i], transactionId });
+    const checked = checkTransactionApproved(answer, { from: targets[i], transactionId });
     return checked.reason
-      ? { id: peers[i].id, approved: false, reason: checked.reason }
-      : { id: peers[i].id, approved: true, receipt: checked.receipt };
+      ? { id: targets[i].id, approved: false, reason: checked.reason, ...(checked.noAnswer && { noAnswer: true }) }
+      : { id: targets[i].id, approved: true, receipt: checked.receipt };
   });
 }
 
@@ -131,6 +155,7 @@ export function buildTransactionAccepted({ transactionId, validatorTo }) {
  * { reason }.
  */
 export function checkTransactionApproved(answer, { from, transactionId }) {
+  if (answer.noAnswer) return { reason: `no answer: ${answer.reason}`, noAnswer: true };
   if (answer.status !== 200) return { reason: `answered ${answer.status}: ${answer.body}` };
 
   let receipt;
@@ -188,7 +213,7 @@ export function checkApprovedShape(receipt) {
 }
 
 /**
- * Sends a proof of transaction acceptance to every other active validator at
+ * Sends a proof of transaction acceptance to every other counted validator at
  * POST /proof-of-acceptance, once every one of them has answered the approval
  * call with a valid transaction approved receipt and this validator has marked
  * its own pending row approved. `receipts` are those answers, untouched, in
@@ -216,15 +241,15 @@ export async function sendProofOfAcceptance({ transactionId, receipts }) {
   };
   const proof = { payload, signature: signPayload(payload) };
 
-  const peers = await findActivePeers(env.validator.id);
-  const answers = await postToValidators(peers, '/proof-of-acceptance', proof);
+  const peers = await findCountedPeers(env.validator.id);
+  const answers = await postToPeers(peers, '/proof-of-acceptance', proof);
 
   // The checks compare ids as bytes; the payload carried the submitter's string.
   const transactionIdBytes = decodeDigest(transactionId);
   return answers.map((answer, i) => {
     const checked = checkTransactionAccepted(answer, { from: peers[i], transactionId: transactionIdBytes });
     return checked.reason
-      ? { id: peers[i].id, accepted: false, reason: checked.reason }
+      ? { id: peers[i].id, accepted: false, reason: checked.reason, ...(checked.noAnswer && { noAnswer: true }) }
       : { id: peers[i].id, accepted: true, receipt: checked.receipt };
   });
 }
@@ -239,6 +264,7 @@ export async function sendProofOfAcceptance({ transactionId, receipts }) {
  * { reason }.
  */
 export function checkTransactionAccepted(answer, { from, transactionId }) {
+  if (answer.noAnswer) return { reason: `no answer: ${answer.reason}`, noAnswer: true };
   if (answer.status !== 200) return { reason: `answered ${answer.status}: ${answer.body}` };
 
   let receipt;
@@ -316,10 +342,11 @@ export const ATTACHMENT_ACCEPTED = 'attachmentAccepted';
  * Sends an attachment approval for `attachment` (a follow-up this validator
  * has verified and stored; `transactionId` the held transaction's id and
  * `attachmentId` the follow-up's, both as 32 raw bytes) to every other
- * active validator at POST /attachment-approval, waits for all of them, and
+ * counted validator at POST /attachment-approval, waits for all of them, and
  * checks each answer as an attachment approved receipt. Resolves with one
  * { id, approved: true, receipt } or { id, approved: false, reason } per
- * validator called, in ascending id order.
+ * validator called, in ascending id order. `peers`, optional, is the list
+ * to send to instead of every counted peer: the one re-send after no answer.
  *
  *   payload: {
  *     attachment:           the follow-up exactly as received ({ payload, signatures })
@@ -331,7 +358,7 @@ export const ATTACHMENT_ACCEPTED = 'attachmentAccepted';
  *   }
  *   signature: { key }
  */
-export async function sendAttachmentApproval({ attachment, transactionId, attachmentId }) {
+export async function sendAttachmentApproval({ attachment, transactionId, attachmentId, peers }) {
   const payload = {
     attachment,
     type: ATTACHMENT_APPROVAL,
@@ -342,14 +369,14 @@ export async function sendAttachmentApproval({ attachment, transactionId, attach
   };
   const approval = { payload, signature: signPayload(payload) };
 
-  const peers = await findActivePeers(env.validator.id);
-  const answers = await postToValidators(peers, '/attachment-approval', approval);
+  const targets = peers ?? await findCountedPeers(env.validator.id);
+  const answers = await postToPeers(targets, '/attachment-approval', approval);
 
   return answers.map((answer, i) => {
-    const checked = checkAttachmentAnswer(answer, ATTACHMENT_APPROVED, { from: peers[i], transactionId, attachmentId });
+    const checked = checkAttachmentAnswer(answer, ATTACHMENT_APPROVED, { from: targets[i], transactionId, attachmentId });
     return checked.reason
-      ? { id: peers[i].id, approved: false, reason: checked.reason }
-      : { id: peers[i].id, approved: true, receipt: checked.receipt };
+      ? { id: targets[i].id, approved: false, reason: checked.reason, ...(checked.noAnswer && { noAnswer: true }) }
+      : { id: targets[i].id, approved: true, receipt: checked.receipt };
   });
 }
 
@@ -382,7 +409,7 @@ export function buildAttachmentAccepted({ transactionId, attachmentId, validator
 }
 
 /**
- * Sends a proof of attachment acceptance to every other active validator at
+ * Sends a proof of attachment acceptance to every other counted validator at
  * POST /proof-of-attachment-acceptance, once every one of them has answered
  * the approval with a valid attachment approved receipt and this validator
  * has marked its own copy approved. `transactionId` and `attachmentId` are
@@ -413,15 +440,15 @@ export async function sendProofOfAttachmentAcceptance({ transactionId, attachmen
   };
   const proof = { payload, signature: signPayload(payload) };
 
-  const peers = await findActivePeers(env.validator.id);
-  const answers = await postToValidators(peers, '/proof-of-attachment-acceptance', proof);
+  const peers = await findCountedPeers(env.validator.id);
+  const answers = await postToPeers(peers, '/proof-of-attachment-acceptance', proof);
 
   // The checks compare ids as bytes; the payload carried them as hex.
   const ids = { transactionId: decodeDigest(transactionId), attachmentId: decodeDigest(attachmentId) };
   return answers.map((answer, i) => {
     const checked = checkAttachmentAnswer(answer, ATTACHMENT_ACCEPTED, { from: peers[i], ...ids });
     return checked.reason
-      ? { id: peers[i].id, accepted: false, reason: checked.reason }
+      ? { id: peers[i].id, accepted: false, reason: checked.reason, ...(checked.noAnswer && { noAnswer: true }) }
       : { id: peers[i].id, accepted: true, receipt: checked.receipt };
   });
 }
@@ -464,6 +491,7 @@ function buildAttachmentReceipt(type, { transactionId, attachmentId, validatorTo
  * Returns { receipt } when it is, else { reason }.
  */
 function checkAttachmentAnswer(answer, type, { from, transactionId, attachmentId }) {
+  if (answer.noAnswer) return { reason: `no answer: ${answer.reason}`, noAnswer: true };
   if (answer.status !== 200) return { reason: `answered ${answer.status}: ${answer.body}` };
 
   let receipt;
@@ -537,11 +565,12 @@ export const TRANSACTIONS_WRITTEN = 'transactionsWritten';
 export const FINAL_DECLARATION = 'finalDeclaration';
 
 /**
- * Sends the leader's ready announcement to every other active validator at
+ * Sends the leader's ready announcement to every other counted validator at
  * POST /ready-announcement, waits for all of them, and checks each answer as
  * an approved pending list (checkListAnswer). Resolves with one
  * { id, transactionIds } or { id, reason } per validator called, in
- * ascending id order.
+ * ascending id order. `peers`, optional, is the list to send to instead of
+ * every counted peer: the one re-send after no answer.
  *
  *   payload: {
  *     type:   'readyAnnouncement'
@@ -550,7 +579,7 @@ export const FINAL_DECLARATION = 'finalDeclaration';
  *   }
  *   signature: { key }
  */
-export async function sendReadyAnnouncement() {
+export async function sendReadyAnnouncement(peers) {
   const payload = {
     type: READY_ANNOUNCEMENT,
     leader: env.validator.id,
@@ -558,23 +587,24 @@ export async function sendReadyAnnouncement() {
   };
   const announcement = { payload, signature: signPayload(payload) };
 
-  const peers = await findActivePeers(env.validator.id);
-  const answers = await postToValidators(peers, '/ready-announcement', announcement);
+  const targets = peers ?? await findCountedPeers(env.validator.id);
+  const answers = await postToPeers(targets, '/ready-announcement', announcement);
 
   return answers.map((answer, i) => {
-    const checked = checkListAnswer(answer, { type: APPROVED_PENDING_LIST, from: peers[i] });
+    const checked = checkListAnswer(answer, { type: APPROVED_PENDING_LIST, from: targets[i] });
     return checked.reason
-      ? { id: peers[i].id, reason: checked.reason }
-      : { id: peers[i].id, transactionIds: checked.receipt.payload.transactionIds };
+      ? { id: targets[i].id, reason: checked.reason, ...(checked.noAnswer && { noAnswer: true }) }
+      : { id: targets[i].id, transactionIds: checked.receipt.payload.transactionIds };
   });
 }
 
 /**
- * Sends the leader's official list to every other active validator at
+ * Sends the leader's official list to every other counted validator at
  * POST /official-list, waits for all of them, and checks each answer as a
  * written receipt (checkListAnswer). Resolves with one { id, transactionIds }
  * (the ids that validator wrote) or { id, reason } per validator called, in
- * ascending id order.
+ * ascending id order. `peers`, optional, is the list to send to instead of
+ * every counted peer: the one re-send after no answer.
  *
  *   payload: {
  *     type:           'officialList'
@@ -584,7 +614,7 @@ export async function sendReadyAnnouncement() {
  *   }
  *   signature: { key }
  */
-export async function sendOfficialList(transactionIds) {
+export async function sendOfficialList(transactionIds, peers) {
   const payload = {
     type: OFFICIAL_LIST,
     leader: env.validator.id,
@@ -593,21 +623,22 @@ export async function sendOfficialList(transactionIds) {
   };
   const list = { payload, signature: signPayload(payload) };
 
-  const peers = await findActivePeers(env.validator.id);
-  const answers = await postToValidators(peers, '/official-list', list);
+  const targets = peers ?? await findCountedPeers(env.validator.id);
+  const answers = await postToPeers(targets, '/official-list', list);
 
   return answers.map((answer, i) => {
-    const checked = checkListAnswer(answer, { type: TRANSACTIONS_WRITTEN, from: peers[i] });
+    const checked = checkListAnswer(answer, { type: TRANSACTIONS_WRITTEN, from: targets[i] });
     return checked.reason
-      ? { id: peers[i].id, reason: checked.reason }
-      : { id: peers[i].id, transactionIds: checked.receipt.payload.transactionIds };
+      ? { id: targets[i].id, reason: checked.reason, ...(checked.noAnswer && { noAnswer: true }) }
+      : { id: targets[i].id, transactionIds: checked.receipt.payload.transactionIds };
   });
 }
 
 /**
- * Sends the leader's final declaration to every other active validator at
+ * Sends the leader's final declaration to every other counted validator at
  * POST /final-declaration and waits for all of them. Resolves with the raw
- * answers, one { id, url, status, body } per validator called.
+ * answers, one { id, url, status, body } per validator called, or
+ * { id, url, noAnswer: true, reason } for one that gave no answer.
  *
  *   payload: {
  *     type:           'finalDeclaration'
@@ -628,8 +659,8 @@ export async function sendFinalDeclaration({ transactionIds, nextLeader }) {
   };
   const declaration = { payload, signature: signPayload(payload) };
 
-  const peers = await findActivePeers(env.validator.id);
-  return postToValidators(peers, '/final-declaration', declaration);
+  const peers = await findCountedPeers(env.validator.id);
+  return postToPeers(peers, '/final-declaration', declaration);
 }
 
 /**
@@ -668,6 +699,7 @@ export function buildListReceipt(type, { transactionIds, validatorTo }) {
  * it is, else { reason }.
  */
 function checkListAnswer(answer, { type, from }) {
+  if (answer.noAnswer) return { reason: `no answer: ${answer.reason}`, noAnswer: true };
   if (answer.status !== 200) return { reason: `answered ${answer.status}: ${answer.body}` };
 
   let receipt;

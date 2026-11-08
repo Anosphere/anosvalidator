@@ -5,19 +5,33 @@
  * validators.queries.js, which this does not touch.
  */
 
+/** Whether the table has any row at all, read before the first upsert of an apply. */
+export async function findHasRows(client) {
+  const { rows } = await client.query('SELECT EXISTS (SELECT FROM validators) AS has_rows');
+  return rows[0].has_rows;
+}
+
 /**
  * Inserts the row, or refreshes an existing one: public_key, url and
- * active from the file, is_leader as it was.
+ * active from the file, is_leader as it was. `ignored` starts true on a
+ * row inserted while the table had rows (`hadRows`, read once before the
+ * loop) and false on a row inserted into an empty table; on an update it
+ * turns true when the stored row was inactive and the file's row is
+ * active, and stays as it was otherwise. So a row that enters membership
+ * on a running network is not counted until its include vote, and a
+ * genesis boot counts everyone (docs/schemas.md section 19).
  */
-export async function upsertValidator(client, { id, publicKey, url, active }) {
+export async function upsertValidator(client, { id, publicKey, url, active }, hadRows) {
   await client.query(
-    `INSERT INTO validators (id, public_key, url, active)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO validators (id, public_key, url, active, ignored)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (id) DO UPDATE SET
        public_key = EXCLUDED.public_key,
        url        = EXCLUDED.url,
-       active     = EXCLUDED.active`,
-    [id, publicKey, url, active],
+       active     = EXCLUDED.active,
+       ignored    = CASE WHEN NOT validators.active AND EXCLUDED.active THEN true
+                         ELSE validators.ignored END`,
+    [id, publicKey, url, active, hadRows],
   );
 }
 

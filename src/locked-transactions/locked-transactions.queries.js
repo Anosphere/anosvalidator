@@ -54,15 +54,16 @@ export async function insertLocked({ transactionId, accountId, futureDate, ogTra
 }
 
 /**
- * The approved flag of the locked transaction with this id, as { approved },
- * or null when there is no such transaction.
+ * The locked transaction with this id, as { approved, ogTransaction } (the
+ * flag and the submission as received), or null when there is no such
+ * transaction.
  */
 export async function findLocked(transactionId) {
   const { rows } = await query(
-    'SELECT approved FROM locked_transactions WHERE transaction_id = $1',
+    'SELECT approved, og_transaction FROM locked_transactions WHERE transaction_id = $1',
     [transactionId],
   );
-  return rows.length === 0 ? null : { approved: rows[0].approved };
+  return rows.length === 0 ? null : { approved: rows[0].approved, ogTransaction: rows[0].og_transaction };
 }
 
 /**

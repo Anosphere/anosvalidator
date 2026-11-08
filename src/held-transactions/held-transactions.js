@@ -61,7 +61,8 @@ export const FUND_PROPOSALS = 'fund_proposals';
  *                          accountIdTo, voteClosesAt and proposerWeight);
  *                          extra fields are ignored. Returns { inserted } or
  *                          { inserted: false, conflict }.
- *   find(transactionId):   the row, with at least `approved`, or null.
+ *   find(transactionId):   the row, with at least `approved` and
+ *                          `ogTransaction`, or null.
  *   markApproved(id):      marks the row approved; true when a row changed.
  *   findApproved(ids):     the approved rows among `ids`, in id order, as
  *                          { transactionId, accountId, ogTransaction, ... }.
@@ -111,13 +112,14 @@ export const HELD_TABLE_NAMES = Object.freeze(Object.keys(HELD_TABLES));
 
 /**
  * Looks for a transaction (its id as 32 raw bytes) across the five holding
- * tables. Returns { table, approved } naming the table that holds it and the
- * row's approved flag, or null when no table does.
+ * tables. Returns { table, approved, ogTransaction } naming the table that
+ * holds it, the row's approved flag and the submission as received, or
+ * null when no table does.
  */
 export async function findHeld(transactionId) {
   for (const table of HELD_TABLE_NAMES) {
     const row = await HELD_TABLES[table].find(transactionId);
-    if (row) return { table, approved: row.approved };
+    if (row) return { table, approved: row.approved, ogTransaction: row.ogTransaction };
   }
   return null;
 }

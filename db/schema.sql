@@ -5,8 +5,11 @@
 --
 -- Safe to run again on a database that already has it: tables use IF NOT
 -- EXISTS, the function and triggers use OR REPLACE, comments just overwrite.
--- It never alters a table that already exists, though. After changing this
--- file, rebuild the local databases from scratch with
+-- It never alters a table that already exists, with one exception: the
+-- ALTER TABLE right after the validators table adds its ignored column
+-- (2026-11-07) to a database built before it, and is a no-op after that.
+-- After changing this file otherwise, rebuild the local databases from
+-- scratch with
 --
 --   npm run db:reset
 --
@@ -805,6 +808,15 @@ COMMENT ON COLUMN archives.created_at     IS 'When the row was moved here. Set b
 --
 -- Rows are never deleted. A validator that leaves is set active = false, so
 -- the signatures it made while active can still be verified later.
+--
+-- active is membership, from the registry file. ignored is "not counted
+-- right now": a validator that does not answer is voted out of the count
+-- and voted back in when it returns, and only the proof of such a vote
+-- changes the flag (src/votes/). A validator is counted when it is active
+-- and not ignored (src/validators/validators.queries.js). A row that enters
+-- membership while the table already has rows starts ignored, until its
+-- include vote; the rows of the first apply into an empty table start
+-- counted (src/validators/registry.queries.js).
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS validators (
@@ -827,8 +839,19 @@ CREATE TABLE IF NOT EXISTS validators (
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   -- true when this validator is the leader.
-  is_leader               BOOLEAN NOT NULL DEFAULT false
+  is_leader               BOOLEAN NOT NULL DEFAULT false,
+
+  -- true while the network does not count this validator: set and cleared
+  -- by the proof of an ignore or include vote, never by hand. The last
+  -- column because it was added once the table was in use (ALTER TABLE ADD
+  -- COLUMN appends), so a database built from this file matches one that
+  -- was altered.
+  ignored                 BOOLEAN NOT NULL DEFAULT false
 );
+
+-- The one alter of this file: a database built before the column existed
+-- gets it here, and a database that has it is left alone.
+ALTER TABLE validators ADD COLUMN IF NOT EXISTS ignored BOOLEAN NOT NULL DEFAULT false;
 
 CREATE OR REPLACE TRIGGER validators_set_updated_at
   BEFORE UPDATE ON validators
@@ -844,6 +867,7 @@ COMMENT ON COLUMN validators.active                  IS 'false once removed. Row
 COMMENT ON COLUMN validators.created_at              IS 'When the row was inserted. Set by default, never changed.';
 COMMENT ON COLUMN validators.updated_at              IS 'When the row last changed. Maintained by the validators_set_updated_at trigger.';
 COMMENT ON COLUMN validators.is_leader               IS 'true when this validator is the leader. Default false.';
+COMMENT ON COLUMN validators.ignored                 IS 'true while the network does not count this validator; changed only by the proof of an ignore or include vote. Default false.';
 
 
 -- ---------------------------------------------------------------------------
@@ -864,3 +888,50 @@ CREATE INDEX IF NOT EXISTS nonces_expires_at_idx ON nonces (expires_at);
 COMMENT ON TABLE  nonces            IS 'The replay cache of signed account-level requests. A duplicate nonce is 401 replay. Expired rows are swept by the next insert.';
 COMMENT ON COLUMN nonces.nonce      IS 'The request''s nonce, 16 to 32 raw bytes, never reused.';
 COMMENT ON COLUMN nonces.expires_at IS 'now plus twice TIMESTAMP_WINDOW_SECONDS at insert, past which the timestamp check refuses the request anyway.';
+
+
+-- ---------------------------------------------------------------------------
+-- ignore_votes: the votes that change who is counted (src/votes/). A vote
+-- names validators and goes one of two ways: ignore (they gave no answer)
+-- or include (a joiner is back). Every validator stores a passed vote when
+-- it applies the proof, which is what sets or clears validators.ignored;
+-- the starter also stores a vote it started and lost, with the receipts it
+-- got. record holds the signed request and every receipt kept, so the
+-- change of the count can be checked later. Rows are never deleted. Added
+-- after the other tables were in use (2026-11-07), so db:setup adds it to
+-- an existing database.
+-- Stand-alone table: no foreign keys.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS ignore_votes (
+  -- The vote's id: the SHA-256 of the canonical request payload without it.
+  vote_id        BYTEA        PRIMARY KEY
+                              CHECK (octet_length(vote_id) = 32),
+
+  -- Which way: ignore or include.
+  action         TEXT         NOT NULL,
+
+  -- The validators named.
+  validator_ids  INTEGER[]    NOT NULL,
+
+  -- Who started it: the leader, or the next validator in the ring when the
+  -- leader itself is named.
+  started_by     INTEGER      NOT NULL,
+
+  -- passed or failed.
+  outcome        TEXT         NOT NULL,
+
+  -- { request, receipts }: the signed request and every receipt kept.
+  record         JSONB        NOT NULL,
+
+  created_at     TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  ignore_votes               IS 'The votes that change who is counted: a passed vote on every validator that applied it, a failed one on its starter. Rows are never deleted. Stand-alone; no foreign keys.';
+COMMENT ON COLUMN ignore_votes.vote_id       IS 'The SHA-256 of the canonical request payload without voteId, 32 raw bytes.';
+COMMENT ON COLUMN ignore_votes.action        IS 'ignore or include.';
+COMMENT ON COLUMN ignore_votes.validator_ids IS 'The validators named, ascending.';
+COMMENT ON COLUMN ignore_votes.started_by    IS 'The starter: the leader, or the next validator in the ring when the leader is named.';
+COMMENT ON COLUMN ignore_votes.outcome       IS 'passed or failed.';
+COMMENT ON COLUMN ignore_votes.record        IS '{ request, receipts }: the signed request and every receipt kept, as JSON.';
+COMMENT ON COLUMN ignore_votes.created_at    IS 'When the row was inserted. Set by default, never changed.';

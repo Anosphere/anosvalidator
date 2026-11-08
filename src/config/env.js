@@ -144,4 +144,23 @@ export const env = Object.freeze({
   // server clock, each way (src/auth/). Nonces are kept twice this long.
   // Optional.
   timestampWindowSeconds: optionalInteger('TIMESTAMP_WINDOW_SECONDS', 120),
+
+  // The calls between validators (src/validators/validators.client.js) and
+  // the catch-up, the ignore votes and the joining built on them
+  // (docs/schemas.md section 19). All six in network/testnet.env and
+  // required, so a validator with an old env file stops at boot naming the
+  // variable: the timeout of every call, in seconds; the floor an ignore
+  // vote may not take the counted validators below, a percent of the
+  // active rows; how long a joiner may hold the leader's rounds, in
+  // seconds; how long an originator waits for the vote after no answer, in
+  // seconds; how many links a chain chunk carries at most; how many rows a
+  // page of held rows carries at most.
+  network: Object.freeze({
+    callTimeoutSeconds: requiredInteger('VALIDATOR_CALL_TIMEOUT_SECONDS'),
+    ignoreFloorPercent: requiredInteger('IGNORE_FLOOR_PERCENT'),
+    joinHoldSeconds: requiredInteger('JOIN_HOLD_SECONDS'),
+    noAnswerWaitSeconds: requiredInteger('NO_ANSWER_WAIT_SECONDS'),
+    chainChunkLinks: requiredInteger('CHAIN_CHUNK_LINKS'),
+    heldRowsPage: requiredInteger('HELD_ROWS_PAGE'),
+  }),
 });

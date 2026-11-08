@@ -15,6 +15,7 @@ import { LOCKED_CONFLICT_REASONS } from '../locked-transactions/locked-transacti
 import { PENDING_CONFLICT_REASONS } from '../pending/pending.queries.js';
 import { isObject } from '../util/is-object.js';
 import { sendProofOfAcceptance, sendTransactionApproval } from '../validators/validators.messages.js';
+import { settleNoAnswers } from '../votes/votes.messages.js';
 import { findAccount, findExisting, findLatestTransactionId } from './transfer.queries.js';
 
 /** The transactionType of a plain transfer, out of a spending account, as the web app sends it. */
@@ -75,17 +76,12 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  * `signatures` holds signatures over the RFC 8785 canonical bytes of
  * `payload` by the sending account's keys, which the accounts table holds.
  *
- * The checks, in order:
+ * The checks, in the order they run:
  *   1. the shape, with transactionType one of the five; the three ids are
  *      SHA-256 digests; amount is a positive integer (millionths of a unit)
- *      as a decimal string that fits a BIGINT; and, for a guarded or vault
- *      transfer, createdAt is the account's lock ahead of now: at least the
- *      lock, at most the lock plus LOCK_OFFSET_MINUTES (env.js), the slack
- *      the wallet adds so a transfer that takes a while to arrive still
- *      passes. The other types' createdAt is not checked here;
- *   2. an account with this accountId exists, and is of the type this
- *      transfer type is for (TRANSFER_TYPES). Its keys and balance are read
- *      once here for the checks below;
+ *      as a decimal string that fits a BIGINT;
+ *   2a. an account with this accountId exists. Its keys, balance and type
+ *      are read once here for the checks below;
  *   3. the signatures, under the type's signing rule
  *      (account-signatures.js verifyAccountSignatures): any two of the
  *      three key pairs, or, for an assisted transfer, pair 1 and the wallet
@@ -93,6 +89,13 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  *      account's stored public key;
  *   4. transactionId is the SHA-256 of the canonical JSON of the payload
  *      without transactionId, which is how the web app makes it;
+ *   1b. for a guarded or vault transfer, createdAt is the account's lock
+ *      ahead of now: at least the lock, at most the lock plus
+ *      LOCK_OFFSET_MINUTES (env.js), the slack the wallet adds so a
+ *      transfer that takes a while to arrive still passes. The other types'
+ *      createdAt is not checked here;
+ *   2b. the account is of the type this transfer type is for
+ *      (TRANSFER_TYPES);
  *   5. previousTransactionId is the account's newest transaction on the
  *      garlic chain (its creation, the OG hash, or its last transfer). That
  *      chains the account's transactions together and lets each previous id
@@ -106,6 +109,10 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  *   7. the account's balance covers the amount. One held transaction per
  *      account means nothing else can spend from it before this is written.
  *
+ * Checks 1, 2a, 3 and 4 are checkTransferSignaturesAndIds, lifted out for
+ * the replay of a chain chunk (src/garlic-chain/replay.service.js), which
+ * runs them and nothing else; the rest follows here.
+ *
  * Returns { ok: true, accountId, transactionId, accountIdTo, heldIn,
  * futureDate } with the ids as the 32-byte Buffers the database uses, the
  * same shape as verifyCreateAccount gives so the validator-to-validator flow
@@ -116,24 +123,11 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  * send back to the caller. Storing is receiveAnosTransfer's job.
  */
 export async function verifyAnosTransfer(body) {
-  const problem = checkShape(body);
-  if (problem) return { ok: false, reason: problem };
+  const checked = await checkTransferSignaturesAndIds(body);
+  if (!checked.ok) return checked;
 
-  const { payload, signatures } = body;
-  const { accountType, lockMinutes, heldIn, rule } = TRANSFER_TYPES.get(payload.transactionType);
-
-  // 1. Ids and amount.
-  const accountId = decodeDigest(payload.accountId);
-  if (!accountId) return { ok: false, reason: 'payload.accountId is not a SHA-256 digest' };
-  const accountIdTo = decodeDigest(payload.accountIdTo);
-  if (!accountIdTo) return { ok: false, reason: 'payload.accountIdTo is not a SHA-256 digest' };
-  if (!decodeDigest(payload.previousTransactionId)) {
-    return { ok: false, reason: 'payload.previousTransactionId is not a SHA-256 digest' };
-  }
-  if (!/^[1-9][0-9]*$/.test(payload.amount) || BigInt(payload.amount) > MAX_BIGINT) {
-    return { ok: false, reason: 'payload.amount must be a positive integer (millionths of a unit) as a decimal string' };
-  }
-  const amount = BigInt(payload.amount);
+  const { payload } = body;
+  const { accountId, accountIdTo, amount, account, transactionId, accountType, lockMinutes, heldIn } = checked;
 
   // 1b. For a guarded or vault transfer, how far ahead createdAt is.
   let futureDate;
@@ -151,24 +145,9 @@ export async function verifyAnosTransfer(body) {
     futureDate = new Date(createdAt);
   }
 
-  // 2. The sending account, of the type this transfer type is for.
-  const account = await findAccount(accountId);
-  if (!account) return { ok: false, reason: 'no account with this accountId' };
+  // 2b. The sending account is of the type this transfer type is for.
   if (account.type !== accountType) {
     return { ok: false, reason: `${payload.transactionType} can only be sent from a ${accountType} account` };
-  }
-
-  // 3. Signatures, under the type's rule.
-  const message = Buffer.from(canonicalize(payload), 'utf8');
-  const badSignatures = verifyAccountSignatures(account, signatures, message, rule);
-  if (badSignatures) return { ok: false, reason: badSignatures };
-
-  // 4. transactionId: the hash of the payload without itself.
-  const unsigned = { ...payload };
-  delete unsigned.transactionId;
-  const transactionId = canonicalHash(unsigned);
-  if (!digestMatches(payload.transactionId, transactionId)) {
-    return { ok: false, reason: 'payload.transactionId is not the SHA-256 of the canonical payload without transactionId' };
   }
 
   // 5. previousTransactionId.
@@ -228,6 +207,59 @@ export async function verifyAnosTransfer(body) {
 }
 
 /**
+ * The shape, signature and id checks of a transfer of any of the five
+ * types: the shape and check 1 (the ids and the amount); 2a, the sending
+ * account exists, read on `client` when one is given (the replay of a chain
+ * chunk, whose accounts written earlier in the same chunk are not committed
+ * yet) and through the pool otherwise; 3, the signatures under the type's
+ * rule against that account's keys; 4, transactionId. Nothing else: no
+ * clock, no account type, no previous transaction, no receiver, no holding
+ * table, no balance. Returns { ok: true, accountId, accountIdTo, amount
+ * (BigInt), account (transfer.queries.js findAccount's row), transactionId,
+ * accountType, lockMinutes, heldIn } with the ids as 32-byte Buffers, or
+ * { ok: false, reason }.
+ */
+export async function checkTransferSignaturesAndIds(body, { client } = {}) {
+  const problem = checkShape(body);
+  if (problem) return { ok: false, reason: problem };
+
+  const { payload, signatures } = body;
+  const { accountType, lockMinutes, heldIn, rule } = TRANSFER_TYPES.get(payload.transactionType);
+
+  // 1. Ids and amount.
+  const accountId = decodeDigest(payload.accountId);
+  if (!accountId) return { ok: false, reason: 'payload.accountId is not a SHA-256 digest' };
+  const accountIdTo = decodeDigest(payload.accountIdTo);
+  if (!accountIdTo) return { ok: false, reason: 'payload.accountIdTo is not a SHA-256 digest' };
+  if (!decodeDigest(payload.previousTransactionId)) {
+    return { ok: false, reason: 'payload.previousTransactionId is not a SHA-256 digest' };
+  }
+  if (!/^[1-9][0-9]*$/.test(payload.amount) || BigInt(payload.amount) > MAX_BIGINT) {
+    return { ok: false, reason: 'payload.amount must be a positive integer (millionths of a unit) as a decimal string' };
+  }
+  const amount = BigInt(payload.amount);
+
+  // 2a. The sending account exists.
+  const account = await findAccount(accountId, client);
+  if (!account) return { ok: false, reason: 'no account with this accountId' };
+
+  // 3. Signatures, under the type's rule.
+  const message = Buffer.from(canonicalize(payload), 'utf8');
+  const badSignatures = verifyAccountSignatures(account, signatures, message, rule);
+  if (badSignatures) return { ok: false, reason: badSignatures };
+
+  // 4. transactionId: the hash of the payload without itself.
+  const unsigned = { ...payload };
+  delete unsigned.transactionId;
+  const transactionId = canonicalHash(unsigned);
+  if (!digestMatches(payload.transactionId, transactionId)) {
+    return { ok: false, reason: 'payload.transactionId is not the SHA-256 of the canonical payload without transactionId' };
+  }
+
+  return { ok: true, accountId, accountIdTo, amount, account, transactionId, accountType, lockMinutes, heldIn };
+}
+
+/**
  * What the initial validator does with a transfer submission: the same
  * steps as receiveCreateAccount in accounts.service.js, with
  * verifyAnosTransfer as the check. Verify it; store the whole submission
@@ -257,13 +289,18 @@ export async function receiveAnosTransfer(body) {
     return { ok: false, reason: table.conflictReasons[stored.conflict] };
   }
 
-  const approvals = await sendTransactionApproval({ transaction: body, transactionId });
+  // No answer from a peer: the report, the wait, the one re-send
+  // (src/votes/votes.messages.js settleNoAnswers); a refusal is a refusal.
+  const approvals = await settleNoAnswers(
+    await sendTransactionApproval({ transaction: body, transactionId }),
+    (peers) => sendTransactionApproval({ transaction: body, transactionId, peers }),
+  );
   const outcome = { ok: true, transactionId: body.payload.transactionId, approvals };
   if (!approvals.every((approval) => approval.approved)) {
     return { ...outcome, approved: false };
   }
 
-  // Every validator approved: our own row first, then tell them all.
+  // Every counted validator approved: our own row first, then tell them all.
   await table.markApproved(transactionId);
   const proof = await sendProofOfAcceptance({
     transactionId: body.payload.transactionId,

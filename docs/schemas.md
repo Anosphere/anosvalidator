@@ -597,7 +597,10 @@ Anything else refuses it with `400 { error: "bad request" }` and no log
 line.
 
 Validator to validator: the five existing endpoints, plus
-`/attachment-approval` and `/proof-of-attachment-acceptance` (section 9).
+`/attachment-approval` and `/proof-of-attachment-acceptance` (section 9);
+since 2026-11-07 also `/chain-links`, the chain chunk read, and, with step 2
+of the catch-up build, `/ignore-vote`, `/proof-of-ignore-vote`,
+`/no-answer-report`, `/join-request`, `/held-rows` and `/ready` (section 19).
 
 ## 9. Validator-to-validator messages
 
@@ -679,6 +682,13 @@ key, `validatorFrom`, `validatorTo`, `transactionId` and `attachmentId`.
 
 After a follow-up is accepted, the handlers call `runLeader()` as the
 transaction handlers do: it may have completed a transfer.
+
+Since the catch-up build (2026-11-07, section 19): every send goes to the
+counted peers and every message above is accepted from a counted validator
+only; no answer within the timeout is told apart from a refusal; the same
+approval or proof twice answers the same receipt; and the chain chunk read,
+`chainLinks` answered by `chainLinksList`, is a new pair (19.2), with six
+more in step 2.
 
 ## 10. Environment variables
 
@@ -1585,3 +1595,782 @@ needs nothing at the door: `from` and `to` travel inside the signed
 envelope it already passes. A wallet against a validator without the
 change gets every row, the dates ignored; against a doorman without the
 line, the locked read is answered 404.
+
+## 19. Catch-up, ignore votes and joining (2026-11-07)
+
+Decided 2026-11-07 in a four-round planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/validator-catch-up-plan-1.md`. Why: a
+validator that missed a transaction never got it again, nothing could add a
+validator to a running network, and one silent validator stopped every
+other one, since a proof of acceptance needed a receipt from every active
+registry row, the leader round ended at the first validator that did not
+answer, and the calls between validators had no timeout. Two build steps in
+this repo, each with its doorman part (doormansoftware `docs/schemas.md`
+section 3), built in one chat, checked on a throwaway rig on the Mac,
+deployed once at the relaunch. Nothing here touches the masterpod, the
+keyholder or the wallet.
+
+Two steps, both built 2026-11-07. Step 1: the timeout, health's new
+fields, the chain chunk read and the replay with the catch-up pass, the
+ignored flag and the counted rule, the same message twice, the six
+variables and the schema. Step 2: the votes, the report and the
+originator's wait, the leader round with no answer, the join handshake,
+the loop every boot runs, and one amendment the user approved in the build
+chat: a joiner adopts the network's view of who is ignored (19.1).
+
+### 19.1 The decisions, as they apply to the code
+
+Step 1:
+
+- **The timeout.** `VALIDATOR_CALL_TIMEOUT_SECONDS` (10, `env.network.
+  callTimeoutSeconds`). `src/validators/validators.client.js`
+  `postToValidators` gives every fetch `signal: AbortSignal.timeout`; a
+  fetch that throws (refused, reset, timed out) or whose body cannot be
+  read no longer rejects the call: that peer's entry is `{ id, url,
+  noAnswer: true, reason }` and the others come back as before.
+  `getFromValidator(validator, path)` does a GET with the same timeout,
+  `{ status, body }` parsed as JSON or `{ noAnswer: true, reason }`;
+  `getHealth(validator)` reads `/health` through it and unwraps a doorman's
+  `worker`. The four answer checks of `validators.messages.js`
+  (`checkTransactionApproved`, `checkTransactionAccepted`,
+  `checkAttachmentAnswer`, `checkListAnswer`) answer `{ reason: "no answer:
+  <reason>", noAnswer: true }` for such an entry, and the per-validator
+  results of the six senders carry `noAnswer: true` through;
+  `sendFinalDeclaration`'s raw answers carry the entry as it is.
+- **Health.** `identity()` in `src/health/health.service.js` is async and
+  gains `chain` (`{ position, recordHash }` of the newest link,
+  `garlic-chain.queries.js findTailRow`, the position a number and the
+  hash hex), `leader` (`validators.queries.js findLeaderId`, or null),
+  `ignored` (`findIgnoredIds`, the active rows with the flag, ascending)
+  and `counted` (the flag of `join.service.js`). Every reader of another
+  validator's health takes `body.worker` when it is an object and `body`
+  otherwise (`getHealth`), so the rig without a doorman and the network
+  read the same way.
+- **The chunk read.** `POST /chain-links`, `src/garlic-chain/
+  chain-links.service.js` (both sides), `chain-links.handlers.js`,
+  `chain-links.queries.js`, the router line in `validators.router.js`. The
+  request names the asker, `afterPosition` and `limit`; the receiver
+  checks the shape, `limit` at most `CHAIN_CHUNK_LINKS`, the asker an
+  active row ignored or not, the signature, and answers the links above
+  the position, ascending, at most `limit`, as 19.2 shapes them. The asker
+  checks the answer as a receipt.
+- **The replay.** `src/garlic-chain/replay.service.js` `replayLinks(links)`:
+  one database transaction per chunk, each link checked (19.3) and written
+  by `insertLink` with the chunk's `createdAt` (`insertLink` gains the
+  optional field and returns the position the identity column gave, which
+  must be the link's). The side effect of the type: `insertAccount` for an
+  account creation, `addStake` for a transferToFund, `subtractStake` for a
+  payout with `stakeFor`; the balance trigger does the rest. The clock
+  checks, the masterpod check and the holding-table checks are skipped;
+  nothing from the holding tables, logs or archives is touched. The
+  signature and id checks of each type are lifted out of the verify
+  functions into exported helpers the verify functions now call first:
+  `checkCreateAccountSignaturesAndIds` (accounts.service.js),
+  `checkTransferSignaturesAndIds` (transfer.service.js),
+  `checkTransferToFundSignaturesAndIds` and
+  `checkFundProposalSignaturesAndIds` (fund.service.js), each taking an
+  optional `client` for its account read.
+- **The catch-up pass.** `catchUp()` in the same file, on `sweepHealth()`:
+  the health of every active row but this one (`validators.queries.js
+  findMemberPeers`), the answers carrying `chain` grouped by tail, the
+  largest group more than half of them or the pass waits the timeout and
+  sweeps again; that group's tail is the network's, the leader most of the
+  group names is the leader, the group's validators are the sources,
+  lowest id first. Then the states of 19.3.
+- **The ignored flag and the counted rule.** `validators.ignored BOOLEAN NOT
+  NULL DEFAULT false`, the last column, with `ALTER TABLE validators ADD
+  COLUMN IF NOT EXISTS` right after the table for a database that exists,
+  the one alter of `db/schema.sql`, named in its header. `applyRegistry`
+  reads whether the table has rows before the loop; `upsertValidator` sets
+  `ignored` true on a row inserted into a table that had rows and on an
+  update from inactive to active, false on a row inserted into an empty
+  table, and leaves it alone otherwise. The registry hash is unchanged
+  (`active` only). `validators.queries.js`: `findActivePeers` became
+  `findCountedPeers` (active, not ignored, not own), `findActiveValidators`
+  became `findCountedValidators` (the Map), `findActiveValidator` stays for
+  membership (its row now carries `ignored`), new `findCountedValidator`,
+  `findMemberPeers`, `findLeaderId`, `findIgnoredIds`,
+  `findNextCounted(afterId)` (the lowest counted id above it, wrapping) and
+  `setIgnored(client, ids, flag)`. Every use moved to the counted form:
+  the sender checks of the two approvals and the two proofs, the receipts
+  inside a proof and its "nobody missing", `checkLeaderCall`,
+  `receiveFinalDeclaration`'s `nextLeader`, `leadRound`'s hand-over
+  (`findNextCounted(own id)`), every send. A message from an ignored
+  validator is refused with `validator N is ignored`
+  (`validators.service.js findCountedSender`, which attachments.service.js
+  uses too).
+- **The same message twice.** `receiveTransactionApproval`: after the
+  sender check, a holding table already holding the carried transaction
+  with an equal `og_transaction` (canonical JSON of both) answers the
+  approved receipt again; a conflict from another submission refuses as
+  before. `receiveProofOfAcceptance` no longer refuses a row already
+  approved, checks the receipts as before, and answers the accepted
+  receipt whether `markApproved` changed a row or not.
+  `receiveAttachmentApproval`: a follow-up with the same `attachmentId`
+  already stored for the transaction answers the approved receipt.
+  `receiveProofOfAttachmentAcceptance`: an attachment already approved
+  passes the receipt checks and answers the accepted receipt without
+  `markApproved` and without `onAccepted` again. The leader calls needed
+  nothing.
+- **Env and schema.** The six variables of 19.4 in `network/testnet.env`
+  and `env.network`, all `requiredInteger`; the column and the alter above.
+
+Step 2:
+
+- **The votes.** The table `ignore_votes` (19.4) and the folder
+  `src/votes/`: `votes.messages.js` (the three messages built, signed,
+  sent and checked; `settleNoAnswers`, the originators' report and wait),
+  `votes.service.js` (the voter, the proof's receiver, the report's
+  receiver, `runVote` the starter's side, the report queue),
+  `votes.queries.js`, `votes.handlers.js`; the router lines in
+  `validators.router.js`. The request's checks and the voter's own health
+  check of each named validator, the proof's checks and its apply in one
+  transaction, the starter's rule (passed when every voter answered yes;
+  failed stored with the receipts got; a silent voter fails an ignore vote
+  and one new vote names it as well; the proof applied to the own table
+  first, then sent to every counted validator, the named of an include
+  vote among them) are 19.3, as the plan's 1.6 lists them. A proof already
+  stored answers the accepted receipt again. The starter checks the floor
+  itself before sending (decision 8), and drops from an ignore vote an id
+  that is ignored already, not an active row, or reachable. The vote
+  request's call waits twice `VALIDATOR_CALL_TIMEOUT_SECONDS`
+  (`postToValidators` takes a `timeoutSeconds` for it): a voter's own check
+  of a silent validator takes one timeout before the voter can answer, and
+  with the plain timeout the starter gave up on every voter just as they
+  voted, which the rig showed (19.5).
+- **The report and the originator's wait.** `POST /no-answer-report`, to
+  the leader or, when the leader is named or gives no answer, to
+  `findNextCounted(leader)`; the receiver answers `200 {}` at once and
+  then, if it may start a vote (the leader, or the next in the ring when
+  the ids hold its leader), `startVote`: `runVote` in a busy section of its
+  own, or the ids into the queue while a round, a vote or a join holds the
+  flag; the queue is drained by whoever ends a busy section, then
+  `runLeader`. The four originators (`receiveCreateAccount`,
+  `receiveAnosTransfer`, the fund's `receiveTransaction`,
+  `receiveAttachment`) pass their approvals through `settleNoAnswers`: the
+  report, the poll of the own table once a second for at most
+  `NO_ANSWER_WAIT_SECONDS` until every silent validator is ignored, the
+  one re-send to the ones still counted (`sendTransactionApproval` and
+  `sendAttachmentApproval` take an optional peer list), `validator N gave
+  no answer twice` with `approved: false` as a refusal gives today.
+- **The leader round and the busy flag.** `leading` became `busy` in
+  `validators.service.js` (`takeBusy`, `releaseBusy`, `isBusy`), covering
+  a round, a vote and a join; `runLeader` drains the report queue after
+  its round. `leadRound` is a loop: a `noAnswer` entry from the ready
+  announcement or the official list runs `runVote` for those ids inside
+  the same busy section (`settleRoundAnswers`); a passed vote starts the
+  round again from step 1; a failed vote sends that step's call once more
+  to those peers (`sendReadyAnnouncement` and `sendOfficialList` take an
+  optional peer list), and a second no answer ends the round with a line;
+  the leader's own write of step 3 comes right after the send, before the
+  vote, so it stands with the peers' writes. No answer to the final
+  declaration is logged only.
+- **Joining.** `src/validators/join.service.js`, both sides: the leader's
+  hold (`joining`, the busy flag, the timer of `JOIN_HOLD_SECONDS`), the
+  three messages and the seven states of 19.3; the joiner's loop
+  (`startJoinLoop`, from `server.js` after listen) per the plan's 1.9, and
+  the handshake per 1.8. The held rows: `src/held-transactions/
+  held-rows.service.js`, `readHeldRows` on the leader (every column in
+  camelCase, bytes as hex, JSONB as it is, timestamps ISO 8601; child rows
+  under `arbitrations` and `votes`) and `storeHeldRows` on the joiner (the
+  shape of every column; the transaction's signature and id checks by its
+  type, the replay's helpers; every stored follow-up's signatures,
+  `attachments.service.js checkAttachmentSignatures`, lifted out of
+  `verifyAttachment` the way 1.3's helpers were; the insert with every
+  column as received, children with it, plain inserts of its own; a row
+  present with the same `og_transaction` skipped, with another one the
+  pull stops and the joiner starts over). `counted` is the module flag of
+  `join.service.js`; `app.js` answers 503 `{ error: "not counted yet" }`
+  to every POST but `/proof-of-ignore-vote` and `/chain-links` while it is
+  false; `GET /health` always answers. Every send goes through
+  `validators.messages.js postToPeers`, which hands the answers to
+  `join.service.js noticeIgnoredAnswers`: more than half of the peers
+  answering `validator <own> is ignored` clears `counted` and runs the loop
+  again.
+- **The amendment: a joiner adopts the network's ignored list.** Decided
+  by the user in the build chat on 2026-11-07, when the build found that
+  the plan gives a joiner no way to learn who the network ignores (a wiped
+  database applies the registry to an empty table, so every row starts
+  counted there, and a validator that was away missed the proofs), which
+  would have stopped the second joiner of the relaunch: its proof check
+  "no counted validator missing" counts validators the network ignores.
+  Health already carries `ignored`. The own table takes the list in two
+  places (`replay.service.js adoptIgnoredList`, `validators.queries.js
+  setIgnoredList`: the named rows ignored, every other active row counted,
+  one line when something changed): after every majority sweep of the
+  catch-up pass and of the loop's first step, the list most of the
+  majority group's members name, counting only members that count
+  themselves and run the same registry hash as this validator (a member on
+  an older registry cannot know a row it lacks, and a mob of fresh joiners
+  can form the majority with empty lists); and before the handshake, the
+  leader's list from its health under the same two conditions. A
+  validator named in an include vote applies the proof although its own
+  row names it (the request checks "not this validator" and "every named
+  is ignored" are relaxed for that one id), so a joiner whose own row the
+  adoption did not reach still joins.
+
+### 19.2 The messages
+
+Step 1 adds the chunk read; step 2 the six below it.
+
+`POST /chain-links`, from a validator catching up to any active validator:
+
+```
+payload: {
+  type:          "chainLinks"
+  validator:     the id of the validator asking
+  afterPosition: integer >= 0
+  limit:         integer 1..CHAIN_CHUNK_LINKS
+  sentAt:        ISO 8601
+}
+signature: { key }
+```
+
+The answer, `200`:
+
+```
+payload: {
+  type:          "chainLinksList"
+  validatorFrom: the answering validator
+  validatorTo:   the asker
+  afterPosition
+  links: [ { position, accountId: hex | null, accountIdTo: hex | null,
+             transactionId: hex, amount: decimal string (millionths),
+             transHash: hex, recordHash: hex, type, createdAt: ISO 8601,
+             ogTransaction }, ... ]
+  sentAt
+}
+signature: { key }
+```
+
+The receiver checks the shape; `limit` at most `CHAIN_CHUNK_LINKS`; that
+`validator` is an active registry row, ignored or not, whose key verifies
+the signature. The asker checks the answer as it checks a receipt: `200`,
+the shape (every link's fields by type), the signature against the registry
+key of the validator it asked, `validatorFrom`, `validatorTo` and
+`afterPosition`. Any failure of the asker's check, no answer included, is
+one failed source of the catch-up pass.
+
+`POST /ignore-vote`, the request, from the starter to every counted
+validator except itself and except the named:
+
+```
+payload: {
+  type:         "ignoreVote"
+  action:       "ignore" | "include"
+  validatorIds: [ id, ... ]   distinct, ascending
+  voteId:       hex, the SHA-256 of the canonical payload without voteId
+  startedBy:    the starter's id
+  sentAt:       ISO 8601
+}
+signature: { key }
+```
+
+The answer, `200`:
+
+```
+payload: {
+  type:          "ignoreVoted"
+  voteId
+  vote:          "yes" | "no"
+  results:       { "<id>": "ok" | "<reason>", ... }   one per named validator
+  validatorFrom: the voter
+  validatorTo:   startedBy
+  sentAt
+}
+signature: { key }
+```
+
+`POST /proof-of-ignore-vote`, from the starter to every counted validator
+except itself, and for an include vote to the named validators too:
+
+```
+payload: {
+  type:      "proofOfIgnoreVote"
+  voteId
+  request:   { payload, signature }   the request as sent
+  receipts:  [ { payload, signature }, ... ]   every yes receipt, by validator id
+  startedBy
+  sentAt
+}
+signature: { key }
+```
+
+The answer, `200`:
+
+```
+payload: {
+  type:          "ignoreVoteAccepted"
+  voteId
+  validatorFrom: the receiver
+  validatorTo:   startedBy
+  sentAt
+}
+signature: { key }
+```
+
+`POST /no-answer-report`, from any counted validator to the leader, or,
+when the leader is among the ids or gave no answer to the report, to
+`findNextCounted(leader)`; answered `200 {}` at once:
+
+```
+payload: {
+  type:         "noAnswerReport"
+  validatorIds: [ id, ... ]   distinct, ascending
+  reporter:     the reporting validator's id
+  sentAt
+}
+signature: { key }
+```
+
+`POST /join-request`, from the joiner to the leader, repeated; a receiver
+that is not the leader per its own table answers `400 { error: "not the
+leader", leader }`:
+
+```
+payload: {
+  type:           "joinRequest"
+  validator:      the joiner's id
+  tailPosition
+  tailRecordHash: hex
+  sentAt
+}
+signature: { key }
+```
+
+The answer, `200`:
+
+```
+payload: {
+  type:           "joinAnswer"
+  state:          counted | behind | busy | catchUp | voting | included | refused
+  reason:         present with "refused"
+  leader:         the receiver's id
+  tailPosition
+  tailRecordHash
+  validatorFrom, validatorTo, sentAt
+}
+signature: { key }
+```
+
+`POST /held-rows`, from the joiner to the leader while `included`:
+
+```
+payload: {
+  type:               "heldRows"
+  validator:          the joiner's id
+  table:              "pending" | "locked_transactions" | "assisted_transfers" |
+                      "escrow_transfers" | "fund_proposals"
+  afterTransactionId: hex | null
+  limit:              integer 1..HELD_ROWS_PAGE
+  sentAt
+}
+signature: { key }
+```
+
+The answer, `200`: `{ payload: { type: "heldRowsList", validatorFrom,
+validatorTo, table, rows: [ ... ], sentAt }, signature }`: the table's rows
+ordered by `transaction_id`, above `afterTransactionId`, at most `limit`,
+each row every column of the table in camelCase (bytes as hex, JSONB as it
+is, timestamps ISO 8601), plus `arbitrations` for an escrow row and `votes`
+for a proposal row, each child row every column the same way.
+
+`POST /ready`, from the joiner to the leader:
+
+```
+payload: { type: "ready", validator, tailPosition, tailRecordHash, sentAt }
+signature: { key }
+```
+
+The answer, `200`: `{ payload: { type: "readyAccepted", validatorFrom,
+validatorTo, sentAt }, signature }`; `400 behind` when the tail is not the
+leader's. Every answer of this section is checked by its asker as a
+receipt: `200`, the shape, the signature against the registry key of the
+validator asked, `validatorFrom` and `validatorTo`.
+
+### 19.3 The states and the checks
+
+The replay, per link, in order, a failure rolling the chunk back with the
+line `chain replay: <reason>`, the reason naming the position:
+
+1. `position` is the own tail's position plus one (the tail read once at
+   the start of the chunk on the chunk's connection, then the link just
+   written): `expected position P, got Q`.
+2. `transHash` is the SHA-256 of the canonical JSON of
+   `ogTransaction.payload`, for every type.
+3. `recordHash` is the SHA-256 of `transHash` followed by the previous
+   link's `recordHash`, raw bytes, the `transHash` alone for the first link
+   ever.
+4. `type` equals `ogTransaction.payload.transactionType`.
+5. The type's checks, which also give what its write puts in the row:
+   `accountCreation`, checks 1 to 3 of `verifyCreateAccount`; the five
+   transfer types, the shape, the signatures under the type's rule against
+   the sender's account as the own table has it by then and the
+   transactionId rule; `transferToFund` and `fundProposal`, the shape,
+   signature and id parts of their verify functions; `transferFromFund`, no
+   signatures, the link follows a `fundProposal` link or a
+   `transferFromFund` link of the same proposal (at the start of a chunk
+   that is the own tail link, its proposal found by id), and its payload is
+   the `payoutObject` of the next index.
+6. `transactionId`, `accountId`, `accountIdTo` and `amount` equal what the
+   type's write function puts there (amount 0 for an account creation and a
+   proposal; a payout link's `transactionId` is its `transHash`).
+7. The side effect, then `insertLink` with the chunk's `createdAt`; the
+   position the identity column gives equals the link's.
+
+The catch-up pass, after each sweep:
+
+| Own chain | Outcome |
+| --- | --- |
+| no majority tail (the largest group holds half or fewer of the answers that carry `chain`) | `no majority tail: <n> of <m> health answers carry a chain tail`; wait the timeout; sweep again |
+| position above the network's | `own chain is ahead of the network`; the pass stops |
+| position equal, hash equal | caught up |
+| position equal, hash different | `own chain differs from the network at position P; wipe the database and start again`; the pass stops |
+| position below | chunks from the first source, `afterPosition` the own position, `limit` the smaller of `CHAIN_CHUNK_LINKS` and what is missing, each replayed, until the own position is the network's; no answer, an empty chunk or a failed chunk moves to the next source; none left, wait and sweep again; at the tail, the hashes compared as above, then sweep again, since the tail may have moved |
+
+The counted rule, per message: a transaction or attachment approval, a
+proof, a leader call from a validator that is active and ignored:
+`validator N is ignored`; from no active row: `<field> N is not an active
+validator` as before. A receipt inside a proof from a validator that is not
+counted: `receipts[i]: validatorFrom N is not a counted validator`; a
+counted validator missing from a proof: `no receipt from validator N`. A
+final declaration naming a validator that is not counted: `nextLeader N is
+not a counted validator`. The chunk read needs membership only.
+
+The vote request, on a voter, in order: the shape; `startedBy` is a
+counted validator whose key verifies the signature; `voteId`; the starter
+rule: `startedBy` is the leader per the voter's own table, or, when the
+action is ignore and the named hold the voter's leader, `findNextCounted(
+leader)`; every named id is an active row, not `startedBy`, not the voter
+itself; for ignore none is ignored already, for include every one is
+ignored; for ignore the floor: counted minus named, times 100, at least
+`IGNORE_FLOOR_PERCENT` times the active rows, else `below the floor`. Then
+the voter's own check of each named validator: health within the timeout,
+`reachable` when it answered 200 with `chain.position`, `chain.recordHash`
+and `leader` equal to the voter's own. Yes for ignore when no named
+validator is reachable, yes for include when every one is, no otherwise.
+
+The proof, on every validator that applies it: the shape; a `voteId`
+already stored answers the accepted receipt again; `startedBy` as above;
+the request inside is this vote's and passes every check above but the
+health check (a receiver named in an include vote is allowed, its own
+row's flag not required); every receipt: the shape, from a counted
+validator other than `startedBy` and the named, genuinely signed, this
+`voteId`, yes, `validatorTo` `startedBy`, no validator twice; no counted
+validator missing (counted, minus `startedBy`, minus the named). Then one
+transaction: ignore sets the flags and, when the named hold the leader,
+`setLeader(startedBy)`; include clears the flags and `setLeader(startedBy)`;
+the row stored, outcome passed.
+
+The join, the leader's answer per the joiner's state:
+
+| `state` | When | The joiner then |
+| --- | --- | --- |
+| `counted` | the joiner is counted in the leader's table and its tail equals the leader's | is done: counted |
+| `behind` | counted, but its tail is not the leader's | runs the catch-up pass and asks again (the leader does not hold) |
+| `busy` | a round, a vote or another join is in progress | asks again after `VALIDATOR_CALL_TIMEOUT_SECONDS` |
+| `catchUp` | not counted; the leader now holds (busy on, `joining = { id, since }`); the joiner's tail differs from the leader's | fetches chunks from the leader only, up to the leader's tail, replays, asks again |
+| `voting` | the tails are equal; the leader has started the include vote naming the joiner, once per hold | asks again after a second |
+| `included` | the vote passed and the proof went round | pulls the held rows, then sends ready |
+| `refused` | the vote failed, `reason` says why; the hold is over | waits `VALIDATOR_CALL_TIMEOUT_SECONDS` and starts over from the catch-up pass |
+
+A second validator asking while one is joining gets `busy`. The hold ends
+with ready, with refused, or when `JOIN_HOLD_SECONDS` have passed since
+`since`: then `join of validator N timed out`, and, when the include vote
+had passed, an ignore vote naming the joiner; busy off, the queue drained,
+`runLeader`. The held rows and ready: the receiver must be the leader and
+the sender `joining.id`; ready also needs the tail equal to the leader's,
+else `400 behind`, and the joiner fetches from the leader (its tail from
+the leader's health) and sends ready once more.
+
+The loop every boot runs: the health sweep (no answer at all: `no
+validator answers yet`; no majority: the no-majority line; both again
+after the wait), the majority's leader and ignored list into the own
+table; own id is the leader: counted, `leading at position P`; the
+catch-up pass (a stop ends the loop, the validator serving but not
+counted); the handshake until `counted at position P`. A refusal, no
+answer from the leader, `not the leader` or a stopped pull goes back to
+the sweep after the wait.
+
+### 19.4 Files and variables
+
+Step 1, new: `src/garlic-chain/chain-links.service.js`,
+`chain-links.handlers.js`, `chain-links.queries.js`, `replay.service.js`;
+`src/validators/join.service.js` (the counted flag in step 1; the join in
+step 2).
+
+Step 2, new: `src/votes/votes.messages.js`, `votes.service.js`,
+`votes.queries.js`, `votes.handlers.js`;
+`src/held-transactions/held-rows.service.js`. Step 2, changed:
+`db/schema.sql` (the table), `src/app.js` (the 503 middleware),
+`src/server.js` (`startJoinLoop`), `src/validators/join.service.js`,
+`validators.service.js`, `validators.messages.js`, `validators.queries.js`
+(`findCounts`, `setIgnoredList`), `validators.router.js` (six lines),
+`validators.handlers.js` (the three join handlers),
+`src/garlic-chain/replay.service.js` (`fetchChainFrom`, `ownTail` and
+`adoptIgnoredList` exported; the sweep's `ignored`),
+`src/attachments/attachments.service.js` (`checkAttachmentSignatures`,
+`settleNoAnswers`), `src/accounts/accounts.service.js`,
+`src/transfer/transfer.service.js`, `src/fund/fund.service.js`
+(`settleNoAnswers`), `README.md`, this file.
+
+Step 1, changed: `network/testnet.env`, `src/config/env.js`,
+`db/schema.sql`, `src/validators/validators.client.js`,
+`validators.queries.js`, `validators.messages.js`, `validators.service.js`,
+`validators.router.js`, `registry.service.js`, `registry.queries.js`,
+`src/attachments/attachments.service.js`, `src/health/health.service.js`,
+`health.router.js`, `src/garlic-chain/garlic-chain.queries.js`,
+`src/accounts/accounts.service.js`, `src/transfer/transfer.service.js`,
+`transfer.queries.js`, `src/fund/fund.service.js`,
+`src/pending/pending.queries.js`,
+`src/locked-transactions/locked-transactions.queries.js`,
+`src/held-transactions/held-transactions.js`, `README.md`, this file.
+
+| Variable | Value | Field |
+| --- | --- | --- |
+| `VALIDATOR_CALL_TIMEOUT_SECONDS` | 10 | `env.network.callTimeoutSeconds` |
+| `IGNORE_FLOOR_PERCENT` | 51 | `env.network.ignoreFloorPercent` |
+| `JOIN_HOLD_SECONDS` | 120 | `env.network.joinHoldSeconds` |
+| `NO_ANSWER_WAIT_SECONDS` | 60 | `env.network.noAnswerWaitSeconds` |
+| `CHAIN_CHUNK_LINKS` | 100 | `env.network.chainChunkLinks` |
+| `HELD_ROWS_PAGE` | 100 | `env.network.heldRowsPage` |
+
+All six `requiredInteger`, in `network/testnet.env` with a comment block,
+so a validator with an old env file stops at boot naming the variable.
+
+### 19.5 Notes from the build
+
+Where the plan was silent, or named something the code could not take
+literally, the simplest thing was chosen and is recorded here; nothing in
+19.1 was changed.
+
+Step 1:
+
+- **The repeat of an approval is found before the verification**, not when
+  the insert conflicts as the plan says: the uniqueness checks of every
+  verify function refuse "already pending" before any insert, so a hook on
+  the insert's conflict would never see an exact repeat. After the sender
+  check, `findHeld` reads the row and `og_transaction` is compared as
+  canonical JSON; to that end `findPending`, `findLocked` and `findHeld`
+  now return `ogTransaction` beside `approved`.
+- **The lifted helpers read the sender's account on the replay's
+  connection**: `findAccount(accountId, client)` takes an optional client
+  (the pool when absent), passed by the replay, since an account created
+  earlier in the same chunk is not committed yet and would be invisible to
+  a read through the pool. The lifts change the order of a few checks in
+  the verify functions: a transfer's lock window and account type now run
+  after the signatures and the transactionId; a transfer to the fund's
+  minimum and account type likewise; a proposal's date, proposer weight
+  and recipient lookups after its signatures, ids and payout fields. The
+  README's transfer section says the new order; sections 4.3 and 4.4 above
+  describe the checks as designed and are left as they were.
+- **`findMemberPeers(ownId)`** was added (active, ignored or not, not own)
+  for the health sweep, since the plan renamed `findActivePeers` to the
+  counted form and the sweep must ask every member.
+- **`getHealth`** in `validators.client.js` is the one place a doorman's
+  `worker` is unwrapped, for the three readers; a body that is not JSON
+  counts as no answer (`answer is not JSON`), like a body that cannot be
+  read.
+- **Health reads the tables on every call**, so `identity()` is async and
+  the router awaits it; when the database cannot be read the three fields
+  are null and the status says `degraded` as before. `counted` is false on
+  every validator until step 2's loop sets it; the flag lives in
+  `join.service.js`, created in step 1 with the flag alone.
+- **`findTailRow(client = pool)`** takes an optional client; the replay
+  reads its tail with `findTailLink` and a payout tail's proposal with
+  `findLinkPayload`, both in `chain-links.queries.js`.
+- **The cap on `limit`** is checked after the shape, in the service, so the
+  shape function the doorman copies has no env variable in it; the shape
+  requires a positive integer, the service `at most CHAIN_CHUNK_LINKS`.
+- **`insertLink`** writes `coalesce($9::timestamptz, now())` into
+  `created_at`, so every existing caller gets now() as before, and returns
+  `position` for every caller.
+- **The sweep** keeps an answer whose body carries an object `chain` with
+  an integer `position` and a string `recordHash`, whatever the status;
+  the majority is of the kept answers; the leader is the id most of the
+  group names, the lower id on a tie, null when most name none. An empty
+  chunk from a source counts as a failed source. The log lines: `network
+  tail: position P, k of n agree, leader L`, `replayed N links from
+  validator V, now at position P`, `validator V sent no chain links:
+  <reason>`.
+- **A link of another type after an unfinished proposal** is not refused:
+  the plan constrains a payout link only, and the record hashes are the
+  network's agreement; the open proposal is simply dropped.
+- **An attachment repeat** is recognised by `attachmentId`, the hash of the
+  payload; the signatures of the repeat are not compared. A repeated proof
+  of attachment acceptance whose row another request marked just before
+  leaves the effect to that request.
+- **A receipt inside a proof from an ignored validator** is refused as
+  `is not a counted validator`; the sender itself as `validator N is
+  ignored`.
+- **`sendFinalDeclaration`'s answers** carry `noAnswer`; step 2's leader
+  round logs those as `gave no answer to the final declaration`.
+
+Step 2:
+
+- **A silent voter in an include vote** fails it with no second vote: the
+  plan's "one new vote naming that peer as well" is read for ignore votes,
+  where the silent peer joins the named; naming it in an include vote
+  would ask the voters to include a validator that is not ignored. The
+  joiner gets `refused` and starts over after the wait.
+- **The request checks on a validator named in an include vote** skip
+  "not this validator" and "every named is ignored" for that one id (19.1,
+  the amendment), since the plan's "it applies the proof as above" cannot
+  hold otherwise.
+- **The starter's pre-check of an ignore vote** also drops an id that is
+  ignored already in its own table or not an active row, beside one that
+  answers, with a line each; the voters would refuse those anyway.
+- **The report's receiver drops a report it may not act on** with a line
+  naming the leader; the plan says only when it may start a vote.
+- **`startVote` is the busy-section wrapper around `runVote`**: the
+  report handler and the drained queue go through it; the round and the
+  join call `runVote` directly inside their own busy sections, as the plan
+  says. `runLeader` ends its section by draining the queue only, since
+  calling itself again would never end; a vote's and a join's end drain
+  the queue and call `runLeader`.
+- **The vote is started in the background by the join request** that
+  finds the tails equal: a voter's health check of the joiner takes up to
+  the timeout, longer than the joiner's own call timeout, so the request
+  answers `voting` at once and the joiner asks again a second later.
+- **The leader's `not the leader` answer is a plain 400 body**, unsigned
+  like every refusal; the joiner goes back to the sweep rather than
+  trusting it, which finds the leader again.
+- **`behind` on ready**: the joiner reads the leader's tail from its
+  health, fetches from the leader and sends ready once more; a second
+  `behind` goes back to the sweep.
+- **The held rows' column names on the wire** are camelCase of the column
+  names as they are (`attestation1`, `attestation1Approved`,
+  `voteClosesAt`, `proposerWeight`); the joiner's shape check wants every
+  column of the table present with the right JavaScript type, and the
+  insert names every column.
+- **The lift of `checkAttachmentSignatures`** moves the held-row and stake
+  checks of `verifyAttachment` after the signatures, as 1.3's lifts did
+  for the transactions.
+- **`findCounts`** (active rows, counted rows) in `validators.queries.js`
+  serves the floor on both sides.
+- **The 503 middleware** sits before the body parser and after cors, so a
+  wallet's browser gets the CORS headers with the 503; `OPTIONS` and `GET`
+  pass.
+- **A repeat answers a receipt built afresh**: the same type and ids, a
+  new `sentAt` and signature, not the bytes of the first answer, which are
+  not stored.
+
+The rig (the plan's section 3), 2026-11-07, on this Mac, everything in the
+chat's scratchpad and nothing in either repo: six copies of the working
+tree with `node_modules` linked; databases `anosrig1` to `anosrig6` on
+Homebrew PostgreSQL 17 by `scripts/setup-db.sh`, under a role of the rig's
+own, `anosrig`, so the Mac's `anossoftware` role kept its password; a key
+per validator made by make-keys' own code into an owner-only file, the
+six per-validator values given as environment variables instead of `.env`
+files (Node lets the environment win over `--env-file`) and
+`MASTERPOD_URL` the same way, pointed at a stub on port 3199; a registry
+with `http://127.0.0.1:310N`, five rows then six; the genesis pair made by
+a copy of `anossoftwarescripts/make-genesis-accounts.mjs` with its keys
+path moved into the scratchpad (the Desktop keys file of the development
+chain stayed as it was), into copy 1 and copied to the other five;
+transfers by a copy of the OG signer with its keys path moved the same way;
+a guarded account and its guarded transfer by two small tools of the rig.
+No doorman: the validators called each other directly. Dropped after: the
+six databases and the role.
+
+What it showed, in the plan's order:
+
+1. Five up on the five-row registry, validator 1 `leading at position 2`,
+   the others `counted at position 2`. Ten transactions written, the tail
+   at position 12 with one record hash on all five, the leadership round
+   every validator. Row 6 into every copy and the five restarted one at a
+   time, each counted again within two seconds, row 6 ignored on all five
+   (the first restarted took no list from the others, whose registry hash
+   differed; the next ones found it on the first). Validator 6 on an empty
+   database, with `CHAIN_CHUNK_LINKS` 3 for that one boot: `ignored
+   validators adopted from the network: 6`, four chunks of 3, 3, 3 and 1,
+   the include vote with four yes votes, the proof applied on all six,
+   `counted at position 12`. The next transaction landed on all six.
+2. Validator 4 stopped; a transaction to validator 2: the report to the
+   leader (itself), `ignore vote bd1375ab naming validator 4: 4 voters`,
+   every voter yes with `no answer: fetch failed: connect ECONNREFUSED`,
+   4 ignored and the vote's row on all five, the transaction written by
+   five. A second transaction with 4 still down went through with no vote.
+3. A guarded account made, funded by the OG account, and a guarded transfer
+   dated twelve minutes ahead left approved in `locked_transactions` on the
+   five. Validator 4 started again: `adopted from the network: 4`, four
+   links replayed, the include vote, `join: included`, the five tables
+   pulled (`held rows of locked_transactions: 1 received, 1 stored`),
+   ready, `counted at position 17`; the next round wrote on all six and the
+   locked row sat on 4 approved with its date.
+4. The leader (3) stopped while idle; a transaction to validator 2: the
+   report went to validator 4, the next in the ring; 4 started the vote
+   naming 3, four yes votes, `validator 3 ignored; validator 4 is the
+   leader` on every table, the transaction written by five, the leadership
+   handed on. The old leader started again: `validator 5 is the leader`
+   adopted, `adopted from the network: 3`, one link replayed, the include
+   vote, the held rows (`1 received, 0 stored, 1 already here`), counted.
+5. A transaction built by the signer, wrapped by hand in an approval signed
+   by validator 2 and posted twice to validator 3: 200 and a
+   `transactionApproved` receipt both times (validator 3 logged `correct`
+   twice). The approval to the other five for their receipts, the proof
+   signed by validator 2 posted twice to validator 3: 200 and a
+   `transactionAccepted` receipt both times; the proof to the others, and
+   the leader's round wrote the transaction.
+6. Validator 6 stopped and ignored by a vote (five counted of six active);
+   then 3, 4 and 5 stopped; a transaction to validator 2: the report named
+   three, `no ignore vote naming validators 3, 4, 5: below the floor (5
+   counted of 6 active)`, the originator waited its minute, re-sent once,
+   `validator N gave no answer twice` three times, the submission failed
+   as a refusal does. The three came back `counted` at once (never
+   ignored), 6 by its include vote.
+7. Validator 6 stopped, a TCP server on its port that accepts and never
+   answers; a transaction to validator 2 at 16:53:51: the approval timed
+   out at 16:54:01 (`The operation was aborted due to timeout`), the report,
+   the starter's own check of 6 until 16:54:11, the voters' checks until
+   16:54:21, four yes votes, 6 ignored, the transaction written at
+   16:54:21. The black hole killed and 6 started again: it was voted in and
+   counted at position 23.
+
+Two things the rig found in the build, both fixed before the scenarios
+that show them: the leader's join answer tested "counted here" before "the
+joiner I hold rounds for", so once the include vote had passed the joiner
+was told `counted`, never `included`, and the hold ran to its two-minute
+timeout (which worked: `join of validator 6 timed out`, `validator 6
+answers; no vote`, `rounds released`, the round); and the vote request's
+plain timeout, above. Done by hand on the rig: after the failed
+submissions of scenario 6 and of the first run of scenario 7 the stray
+unapproved `pending` rows were deleted, since a refused submission leaves
+them for good (the follow-up below).
+
+What the rig could not show: the doorman (its seven entries went through
+`node --check` and a shape check with no worker behind them); the held
+rows of `assisted_transfers`, `escrow_transfers` and `fund_proposals`,
+with their attachments and child rows (only `pending` and
+`locked_transactions` rows were pulled); a chain that is ahead of or
+differs from the network's (the two stops of the pass); the join states
+`behind`, `busy`, `refused` and the answer `not the leader`; two joiners at
+once; a joiner that stops answering during its hold (the timeout's ignore
+vote on a reachable joiner was shown, on an unreachable one not); a
+counted validator refused as ignored by its peers (`noticeIgnoredAnswers`);
+a silent peer during the official-list step of a round (every silence hit
+the approvals first); the relaunch's sixteen rows and ten joiners; the
+masterpod, the keyholder and the wallet.
+
+Follow-ups, from the plan's section 5 and the build:
+
+- A validator that misses an official list it should have written (no
+  answer twice, or a refusal, at step 3 of the round, which ends the
+  round) keeps those transactions approved in its holding tables while the
+  others wrote them; a later round would write them again on that
+  validator alone. The round ends there today as a refusal did before this
+  build; a cut of those rows against the chain belongs with the split-list
+  follow-up below.
+- A validator that wrote a batch the others did not (a split official
+  list) needs a cut back to the last common link before it can catch up;
+  today it logs `own chain is ahead of the network` and stops.
+- A refused approval leaves unapproved rows on the other validators for
+  good and blocks that account; a withdraw message or an age limit.
+- Logs and archives are not copied to a joiner.
+- The held rows' approved flags come from the leader on trust.
+- A validator that is up but cut off from everyone learns it is ignored
+  only when its own sends are refused.
+- The registry stays read at boot; adding a validator stays a pull and
+  restart on every VM.
+- The wallet's answer to 503 `not counted yet` from the validator it
+  picked.

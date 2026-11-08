@@ -2,6 +2,7 @@ import {
   receiveAttachmentApproval,
   receiveProofOfAttachmentAcceptance,
 } from '../attachments/attachments.service.js';
+import { receiveHeldRows, receiveJoinRequest, receiveReady } from './join.service.js';
 import {
   receiveFinalDeclaration,
   receiveOfficialList,
@@ -13,8 +14,9 @@ import {
 
 /**
  * Route handlers for messages from other validators. HTTP in and out only;
- * the checking lives in validators.service.js, and in
- * attachments.service.js for the two attachment messages.
+ * the checking lives in validators.service.js, in attachments.service.js
+ * for the two attachment messages, and in join.service.js for the three
+ * join messages (the chunk read and the votes have handlers of their own).
  */
 
 /** POST /transaction-approval. Answers with a transaction approved receipt. */
@@ -122,4 +124,30 @@ export async function finalDeclaration(req, res) {
   console.log(`validator ${result.nextLeader} is the leader`);
   res.sendStatus(200);
   runLeader().catch((err) => console.log(err));
+}
+
+/** Sends a join service result: the signed receipt with 200, or the refusal's status and body. */
+function answerJoin(res, result, line) {
+  if (!result.ok) {
+    console.log('failed:', result.body.error);
+    res.status(result.status).json(result.body);
+    return;
+  }
+  console.log(line(result));
+  res.status(200).json(result.receipt);
+}
+
+/** POST /join-request. Answers with a join answer naming the joiner's state. */
+export async function joinRequest(req, res) {
+  answerJoin(res, await receiveJoinRequest(req.body), (result) => `join request from validator ${req.body.payload.validator}: ${result.state}`);
+}
+
+/** POST /held-rows. Answers with a page of one holding table. */
+export async function heldRows(req, res) {
+  answerJoin(res, await receiveHeldRows(req.body), (result) => `held rows of ${req.body.payload.table}: ${result.count} to validator ${req.body.payload.validator}`);
+}
+
+/** POST /ready. Answers with the ready accepted receipt; the hold is over. */
+export async function ready(req, res) {
+  answerJoin(res, await receiveReady(req.body), () => `validator ${req.body.payload.validator} is ready`);
 }

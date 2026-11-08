@@ -27,6 +27,7 @@ import { isTransferType, writeAnosTransfer } from '../transfer/transfer.service.
 import { fetchAnosAccount } from '../masterpod/masterpod.client.js';
 import { isObject } from '../util/is-object.js';
 import { sendProofOfAcceptance, sendTransactionApproval } from '../validators/validators.messages.js';
+import { settleNoAnswers } from '../votes/votes.messages.js';
 import { findExisting, insertAccount } from './accounts.queries.js';
 
 /** The transactionType of a create-account submission, as the web app sends it. */
@@ -55,12 +56,44 @@ export const ACCOUNT_CREATION = 'accountCreation';
  *      all four lookups. The database constraints (primary keys and
  *      pending.account_id UNIQUE) are the backstop if two validators race.
  *
- * Checks 1 to 3 are pure computation; only check 4 touches the database.
+ * Checks 1 to 3 are pure computation, lifted into
+ * checkCreateAccountSignaturesAndIds for the replay of a chain chunk
+ * (src/garlic-chain/replay.service.js), which runs them and nothing else;
+ * only check 4 touches the database.
  * Returns { ok: true, accountId, transactionId } with both ids as the 32-byte
  * Buffers the database uses, or { ok: false, reason } with a reason that is
  * safe to send back to the caller. Storing is receiveCreateAccount's job.
  */
 export async function verifyCreateAccount(body) {
+  const checked = checkCreateAccountSignaturesAndIds(body);
+  if (!checked.ok) return checked;
+  const { accountId, transactionId } = checked;
+
+  // 4. Uniqueness.
+  const existing = await findExisting({ accountId, transactionId });
+  if (existing.accountExists) {
+    return { ok: false, reason: 'an account with this accountId already exists' };
+  }
+  if (existing.pendingTransaction) {
+    return { ok: false, reason: PENDING_CONFLICT_REASONS.transaction_id };
+  }
+  if (existing.pendingForAccount) {
+    return { ok: false, reason: PENDING_CONFLICT_REASONS.account_id };
+  }
+  if (existing.chainTransaction) {
+    return { ok: false, reason: 'a transaction with this transactionId is already in the garlic chain' };
+  }
+
+  return { ok: true, accountId, transactionId };
+}
+
+/**
+ * The shape and checks 1 to 3 of verifyCreateAccount, nothing touching the
+ * database: the signatures, accountId and transactionId. Returns
+ * { ok: true, accountId, transactionId } with both ids as 32-byte Buffers,
+ * or { ok: false, reason }.
+ */
+export function checkCreateAccountSignaturesAndIds(body) {
   const problem = checkShape(body);
   if (problem) return { ok: false, reason: problem };
 
@@ -94,21 +127,6 @@ export async function verifyCreateAccount(body) {
   const transactionId = sha256(ACCOUNT_KEYS.map(({ name }) => publicKeys[name]).join(''));
   if (!digestMatches(payload.transactionId, transactionId)) {
     return { ok: false, reason: 'payload.transactionId is not the SHA-256 of the eight public keys in order' };
-  }
-
-  // 4. Uniqueness.
-  const existing = await findExisting({ accountId, transactionId });
-  if (existing.accountExists) {
-    return { ok: false, reason: 'an account with this accountId already exists' };
-  }
-  if (existing.pendingTransaction) {
-    return { ok: false, reason: PENDING_CONFLICT_REASONS.transaction_id };
-  }
-  if (existing.pendingForAccount) {
-    return { ok: false, reason: PENDING_CONFLICT_REASONS.account_id };
-  }
-  if (existing.chainTransaction) {
-    return { ok: false, reason: 'a transaction with this transactionId is already in the garlic chain' };
   }
 
   return { ok: true, accountId, transactionId };
@@ -162,13 +180,18 @@ export async function receiveCreateAccount(body) {
     return { ok: false, reason: PENDING_CONFLICT_REASONS[stored.conflict] };
   }
 
-  const approvals = await sendTransactionApproval({ transaction: body, transactionId });
+  // No answer from a peer: the report, the wait, the one re-send
+  // (src/votes/votes.messages.js settleNoAnswers); a refusal is a refusal.
+  const approvals = await settleNoAnswers(
+    await sendTransactionApproval({ transaction: body, transactionId }),
+    (peers) => sendTransactionApproval({ transaction: body, transactionId, peers }),
+  );
   const outcome = { ok: true, transactionId: body.payload.transactionId, approvals };
   if (!approvals.every((approval) => approval.approved)) {
     return { ...outcome, approved: false };
   }
 
-  // Every validator approved: our own row first, then tell them all.
+  // Every counted validator approved: our own row first, then tell them all.
   await markApproved(transactionId);
   const proof = await sendProofOfAcceptance({
     transactionId: body.payload.transactionId,

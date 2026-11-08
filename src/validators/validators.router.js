@@ -1,10 +1,15 @@
 import { Router } from 'express';
+import { chainLinks } from '../garlic-chain/chain-links.handlers.js';
+import { ignoreVote, noAnswerReport, proofOfIgnoreVote } from '../votes/votes.handlers.js';
 import {
   attachmentApproval,
   finalDeclaration,
+  heldRows,
+  joinRequest,
   officialList,
   proofOfAcceptance,
   proofOfAttachmentAcceptance,
+  ready,
   readyAnnouncement,
   transactionApproval,
 } from './validators.handlers.js';
@@ -26,3 +31,10 @@ validatorsRouter.post('/proof-of-attachment-acceptance', proofOfAttachmentAccept
 validatorsRouter.post('/ready-announcement', readyAnnouncement);
 validatorsRouter.post('/official-list', officialList);
 validatorsRouter.post('/final-declaration', finalDeclaration);
+validatorsRouter.post('/chain-links', chainLinks);
+validatorsRouter.post('/ignore-vote', ignoreVote);
+validatorsRouter.post('/proof-of-ignore-vote', proofOfIgnoreVote);
+validatorsRouter.post('/no-answer-report', noAnswerReport);
+validatorsRouter.post('/join-request', joinRequest);
+validatorsRouter.post('/held-rows', heldRows);
+validatorsRouter.post('/ready', ready);
