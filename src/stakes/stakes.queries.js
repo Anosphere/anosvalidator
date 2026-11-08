@@ -12,7 +12,10 @@ import { STAKE_PURPOSES, columnFor } from './stake-purposes.js';
  *
  * findStake reads a row; addStake and subtractStake move one purpose's
  * amount; moveStake moves a whole row to another account, the side effect
- * of a breakGlassTransfer (2026-11-08, docs/schemas.md section 22).
+ * of a breakGlassTransfer (2026-11-08, docs/schemas.md section 22);
+ * listDaoVoteStakes lists every account's daoVote stake with their total,
+ * the public read the masterpod takes its DAO voting snapshot from
+ * (2026-11-08, section 23).
  */
 
 const COLUMNS = STAKE_PURPOSES.map(({ column }) => column).join(', ');
@@ -93,4 +96,23 @@ export async function moveStake(client, fromAccountId, toAccountId) {
     [fromAccountId, toAccountId],
   );
   await client.query('DELETE FROM stakes WHERE account_id = $1', [fromAccountId]);
+}
+
+/**
+ * Every account's daoVote stake, for the masterpod's snapshot of DAO voting
+ * weights (docs/schemas.md section 23): the stakes rows with
+ * dao_vote_stake > 0, account id ascending, each { accountId (Buffer),
+ * daoVoteStake (a decimal string of millionths) }, and total, their sum as
+ * a decimal string, '0' when there is no row. The sum is a window over the
+ * same rows, so it is read off the first one.
+ */
+export async function listDaoVoteStakes() {
+  const { rows } = await query(
+    `SELECT account_id, dao_vote_stake, SUM(dao_vote_stake) OVER () AS total
+     FROM stakes WHERE dao_vote_stake > 0 ORDER BY account_id`,
+  );
+  return {
+    total: rows.length === 0 ? '0' : String(rows[0].total),
+    rows: rows.map((row) => ({ accountId: row.account_id, daoVoteStake: row.dao_vote_stake })),
+  };
 }

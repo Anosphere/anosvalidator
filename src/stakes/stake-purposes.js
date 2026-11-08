@@ -7,8 +7,10 @@ import { env } from '../config/env.js';
  * transferToFund must stake for it, which is also the stake an account must
  * hold to have the role (env.js, in millionths as BigInt). Of the six,
  * attestor (attests assisted transfers, arbitrates escrow disputes) and
- * guardian (proposes and votes on fund proposals) do something today; the
- * rest are recorded only.
+ * guardian (proposes and votes on fund proposals) do something on the
+ * validator; daoVote is read by the masterpod for DAO votes
+ * (/list-dao-stakes, docs/schemas.md section 23); the rest are recorded
+ * only.
  */
 export const DAO_VOTE = 'daoVote';
 export const MODERATOR = 'moderator';

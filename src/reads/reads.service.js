@@ -1,5 +1,6 @@
 import { isObject } from '../util/is-object.js';
 import { ok, refuse } from '../util/result.js';
+import { listDaoVoteStakes } from '../stakes/stakes.queries.js';
 import {
   findAccountSummary,
   findAssistedFor,
@@ -13,13 +14,18 @@ import {
 } from './reads.queries.js';
 
 /**
- * The reads feature (wallet spec 5.4): the five things an account may read
- * about itself (its account, its transactions, its open escrow trades, its
- * held assisted transfer, its locked transfer), nothing about anyone else.
- * The caller is the verified signer, req.account from
- * src/auth/require-account.js; the body is the route's own object. Each
- * function returns ok(status, body) or refuse(status, reason)
- * (util/result.js), so the handlers only log and answer.
+ * The reads feature: the five things an account may read about itself
+ * (wallet spec 5.4: its account, its transactions, its open escrow trades,
+ * its held assisted transfer, its locked transfer), nothing about anyone
+ * else; the two attestor reads (spec 13.2), the held transactions waiting
+ * for an attestor; and the one public read (spec 23), every account's
+ * daoVote stake for the masterpod's DAO voting snapshot. The caller of a
+ * signed read is the verified signer, req.account from
+ * src/auth/require-account.js (for the attestor reads the verified
+ * attestor, src/auth/require-attestor.js); the public read has no caller.
+ * The body is the route's own object. Each function returns ok(status,
+ * body) or refuse(status, reason) (util/result.js), so the handlers only
+ * log and answer.
  */
 
 const BAD_SHAPE = 'bad request shape';
@@ -299,6 +305,24 @@ export async function listDisputedEscrows(accountId) {
     verdicts: row.verdicts,
   }));
   return ok(200, { escrows });
+}
+
+/**
+ * POST /list-dao-stakes (spec 23). Public: no envelope, no signature, no
+ * caller; the body must be an object and nothing in it is read. stakes:
+ * every stakes row with dao_vote_stake > 0, accountId hex, daoVoteStake
+ * millionths as a decimal string, account id ascending; total their sum as
+ * a decimal string, "0" with no rows; asOf this server's clock at the
+ * read, ISO 8601. The masterpod reads it once when a DAO proposal is
+ * posted and once when it goes to a vote, and boils it down to one weight
+ * per anoPod. Everything in it is already on the public chain: each
+ * transferToFund link names its purpose.
+ */
+export async function listDaoStakes(body) {
+  if (!isObject(body)) return refuse(400, BAD_SHAPE);
+  const { total, rows } = await listDaoVoteStakes();
+  const stakes = rows.map((row) => ({ accountId: hex(row.accountId), daoVoteStake: row.daoVoteStake }));
+  return ok(200, { asOf: new Date().toISOString(), total, stakes });
 }
 
 /**

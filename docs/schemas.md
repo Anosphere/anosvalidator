@@ -65,7 +65,7 @@ amount is zero.
 
 | `stakeFor`  | Column             | Minimum, env variable       | Default | Behaviour today |
 | ----------- | ------------------ | --------------------------- | ------: | --------------- |
-| `daoVote`   | `dao_vote_stake`   | `STAKE_MIN_DAO_VOTE_ANOS`   |      10 | recorded only |
+| `daoVote`   | `dao_vote_stake`   | `STAKE_MIN_DAO_VOTE_ANOS`   |      10 | read by the masterpod for DAO votes (section 23) |
 | `moderator` | `moderator_stake`  | `STAKE_MIN_MODERATOR_ANOS`  |   1,000 | recorded only |
 | `attestor`  | `attestor_stake`   | `STAKE_MIN_ATTESTOR_ANOS`   |   1,000 | attests assisted transfers, arbitrates escrow disputes |
 | `guardian`  | `guardian_stake`   | `STAKE_MIN_GUARDIAN_ANOS`   |   1,000 | proposes and votes on fund proposals |
@@ -663,6 +663,16 @@ keyholder's). Every held-transfer read below answers `type`, the payload's
 | POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
 | POST   | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, type, accountId, accountIdTo, amount, createdAt, stage, attestations, unlocksAt } \| null }`, the signer's own held assisted transfer or break-glass move, the `assisted_transfers` row whose `account_id` is the signer (at most one), or `null` when there is none (added 2026-11-06, section 17; `type`, `unlocksAt` and the `locked` stage 2026-11-08, section 22) |
 | POST   | `/get-locked-transfer` | body `{}`; `200 { transfer: { transactionId, type, accountId, accountIdTo, amount, createdAt, unlocksAt, stage } \| null }`, the signer's own locked transfer, the `locked_transactions` row whose `account_id` is the signer (at most one), a guarded or vault transfer waiting out its time lock, or `null` when there is none (added 2026-11-06, section 18) |
+
+Public, unsigned (added 2026-11-08 for the DAO voting ledger on the
+masterpod, section 23): one read with no envelope, no signature and no
+middleware, the first route of the kind. The body must be an object (`400
+bad request shape`); nothing in it is read. Everything it answers is
+already on the public chain, each `transferToFund` link naming its purpose.
+
+| Method | Path                 | Answers |
+| ------ | -------------------- | ------- |
+| POST   | `/list-dao-stakes`   | body `{}`; `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`: every `stakes` row with `dao_vote_stake > 0`, `accountId` hex, `daoVoteStake` millionths as a decimal string, account id ascending; `total` their sum as a decimal string (`"0"` with no rows); `asOf` the server clock at the read, ISO 8601. Read by the masterpod for its snapshot of DAO voting weights |
 
 `/create-account` gained a fifth check after uniqueness, on the receiving
 validator only: the masterpod is asked `POST /get-anos-account { accountId }`
@@ -2838,3 +2848,115 @@ here; nothing in 22.1 was changed.
   values and a throwaway key file in the scratchpad, to catch a wrong
   import name or an import cycle that a syntax check cannot: it imported.
   No validator was booted, no test script was written, no rig was run.
+
+## 23. The DAO stake read (2026-11-08)
+
+Decided 2026-11-08 in the DAO voting planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/dao-voting-plan-1.md`. Why: `daoVote` has
+been one of the six stake purposes since 2026-10-23 (section 2), recorded
+only: a `transferToFund` for it adds to `stakes.dao_vote_stake`, and
+nothing read the column. The DAO voting ledger, plain-text proposals that
+collect support like a petition and then take two weeks of votes for and
+against, one staked anos one vote, lives on the masterpod (its spec,
+section 15): the proposals, the support and the votes are its tables and
+routes, and when a proposal is posted, and again when it goes to a vote,
+it takes one snapshot of every account's DAO stake from a validator and
+boils it down to one weight per anoPod through its `anos_accounts`
+mapping. The validators keep no proposals and no votes; they gain this one
+read, and nothing about the stakes, the fund proposals (sections 3 to 6, a
+different system) or the leader round changed. Four repos in order: the
+validator (this step), the doorman (its spec, section 6), the masterpod
+(its section 15) and the wallet (its section 11), then the architecture
+records; deployed validators and doormen first, then the masterpod, then
+the wallet, no reset, everything additive.
+
+### 23.1 The route
+
+Public: no envelope, no signature, no middleware, the first route of the
+kind. Everything it answers is already on the public chain (each
+`transferToFund` link names its purpose), so nothing is given away; the
+masterpod has no anos account and no validator key to sign with; the
+doorman's rate limit covers abuse. It joins `src/reads/` beside the other
+reads.
+
+| Method | Path | Answers |
+| ------ | ---- | ------- |
+| POST | `/list-dao-stakes` | body `{}`; `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }` |
+
+`stakes` is every `stakes` row with `dao_vote_stake > 0`: `accountId` hex,
+`daoVoteStake` millionths as a decimal string, account id ascending.
+`total` is their sum in millionths as a decimal string (`"0"` with no
+rows); `asOf` the server clock at the read, ISO 8601. The body must be an
+object (`400 bad request shape`); nothing in it is read. The 503 "not
+counted yet" of `src/app.js` applies as to every POST: a joiner answers
+503 and the caller moves to the next validator. The masterpod asks the
+validators of its `VALIDATOR_URLS` in order, five seconds each, and takes
+the first `200` of the right shape. Refusals are logged `failed:
+<reason>` like every other route.
+
+### 23.2 The rollout
+
+Read only and additive: a validator with the route and one without agree
+on everything else; no table, no env variable and no npm package changed.
+A doorman or a validator without the route answers 404 and the masterpod
+moves to the next URL, so the masterpod's `VALIDATOR_URLS` should name
+validators that have it; the rest follow at the next pull round (operator
+guide, the doorman's and the validator's pull lines). The doorman's
+validator door passes only the paths in its table (doormansoftware
+`src/doors/validator.routes.js`); `/list-dao-stakes` is added there in
+step 2 of the plan, with a body check of its own, and that doorman
+restarted, before the masterpod can reach the route.
+
+### 23.3 Files
+
+Changed: `src/stakes/stakes.queries.js` (`listDaoVoteStakes`),
+`src/reads/reads.service.js` (`listDaoStakes`),
+`src/reads/reads.handlers.js` (`listDaoStakesHandler`),
+`src/reads/reads.router.js` (the route after the attestor reads, no
+middleware); comments only in `src/app.js` (the `readsRouter` line) and
+`src/stakes/stake-purposes.js` (the header). In the docs: the README's
+endpoints table, account-level reads paragraph, stake purposes table and
+layout (two lines); sections 2 and 8 above, and this section. No schema
+change, no file under `deploy/`, no package file, no change to
+`network/`.
+
+### 23.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 23.1 was changed.
+
+- **The build was made on main at 1bf6d56**, the break-glass commit of
+  section 22. Every line the plan quotes was where it said.
+- **The query's SQL is the plan's**, the column written out as
+  `dao_vote_stake` rather than taken from `stake-purposes.js`, as the plan
+  gave it. `SUM(dao_vote_stake) OVER ()` is NUMERIC to PostgreSQL, which
+  pg hands over as a decimal string like the BIGINTs; it is read off the
+  first row and passed through `String()`, so a type parser set on the
+  pool one day could not turn it into a number.
+- **Where the new lines sit**: `listDaoVoteStakes` at the end of
+  `stakes.queries.js`, after `moveStake`; `listDaoStakes` after
+  `listDisputedEscrows` in `reads.service.js`, before the shared helpers;
+  the handler and the route line last in their files, the route under a
+  comment of its own after a blank line, as the attestor reads are set
+  apart from the account level.
+- **Section 8's paragraph is headed "Public, unsigned"**, since the
+  submission table above it is already headed "Public": those routes are
+  public too, but every object they take is signed.
+- **Two spots outside the plan's file list** said daoVote was still
+  recorded only and were fixed on the user's word, as 22.4 fixed the
+  comments the break-glass build had made false: the header comment of
+  `src/stakes/stake-purposes.js`, and the README's layout line for
+  `stakes.queries.js`, which now names `listDaoVoteStakes`.
+- **Checks.** `node --check` passed on the six source files. The SQL ran
+  by psql against the local `anos1` in one transaction rolled back, the
+  statement prepared with the query's exact text: the live table held six
+  `stakes` rows, none with DAO stake; two throwaway rows went in, one with
+  12 anos of DAO stake and one with guardian stake only; the query
+  answered the one row with DAO stake, `dao_vote_stake` `12000000` and
+  `total` `12000000`, and not the other; after the rollback the table held
+  its six rows and a DAO total of 0 again. No validator was booted, no
+  test script was written. The local PostgreSQL had to be brought back
+  first: a `postmaster.pid` left by the server that ran before the day's
+  reboot, its pid since reused by another process, was moved out of the
+  data directory, and the Homebrew launchd job started the server by
+  itself.

@@ -1,11 +1,12 @@
 import { answer } from '../util/result.js';
-import { getAccount, getAssistedTransfer, getLockedTransfer, listAssistedTransfers, listDisputedEscrows, listEscrows, listTransactions } from './reads.service.js';
+import { getAccount, getAssistedTransfer, getLockedTransfer, listAssistedTransfers, listDaoStakes, listDisputedEscrows, listEscrows, listTransactions } from './reads.service.js';
 
 /**
  * Route handlers for the reads feature. HTTP in and out only: the caller is
  * req.account (src/auth/require-account.js; for the two attestor reads the
- * verified attestor, src/auth/require-attestor.js), the route's object is
- * req.body; the service checks and answers.
+ * verified attestor, src/auth/require-attestor.js; the public read,
+ * /list-dao-stakes, has none), the route's object is req.body; the service
+ * checks and answers.
  */
 
 /** POST /get-account */
@@ -41,4 +42,9 @@ export async function listAssistedTransfersHandler(req, res) {
 /** POST /list-disputed-escrows */
 export async function listDisputedEscrowsHandler(req, res) {
   answer(res, await listDisputedEscrows(req.account));
+}
+
+/** POST /list-dao-stakes */
+export async function listDaoStakesHandler(req, res) {
+  answer(res, await listDaoStakes(req.body));
 }

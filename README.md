@@ -272,6 +272,7 @@ multi-word URL segments.
 | POST   | `/list-escrows`   | Account level. The signer's open escrow trades, as seller or buyer, newest first, each with its `stage`: `200 { escrows }`, else `400` or `401` + reason |
 | POST   | `/get-assisted-transfer` | Account level. The signer's own held assisted transfer or break-glass move, with its `type`, its `stage`, the number of attestations on it and its `unlocksAt`, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
 | POST   | `/get-locked-transfer` | Account level. The signer's own locked transfer, a guarded or vault transfer waiting out its time lock, with its `unlocksAt` and its `stage`, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
+| POST   | `/list-dao-stakes` | Public, no signature (added 2026-11-08, `docs/schemas.md` section 23). Every account's DAO vote stake, for the masterpod's snapshot of DAO voting weights, with their total and the server's clock: `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`, else `400 bad request shape` |
 | POST   | `/list-assisted-transfers` | Attestor level (account level plus attestor stake). The assisted transfers waiting for attestors on this validator, newest first: `200 { transfers }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/list-disputed-escrows` | Attestor level. The escrows in dispute that no verdict has decided on this validator, newest first: `200 { escrows }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/transaction-approval` | Validator to validator. `200` + a transaction approved receipt once the transaction checks out and is stored, else `400` + reason |
@@ -295,8 +296,14 @@ whatever the validators said.
 A fourth kind of caller, beside wallets submitting transactions, the other
 validators and nobody: an account signing with pair one, or since
 2026-11-08 with its break-glass pair, for reads about itself
-(`src/auth/require-account.js`, `src/reads/`). The envelope is the
-masterpod's and the keyholder's, with `accountId` as the signer field:
+(`src/auth/require-account.js`, `src/reads/`). The one public read,
+`POST /list-dao-stakes` (added 2026-11-08, `docs/schemas.md` section 23),
+lives in `src/reads/` too but takes no envelope and no signature: body
+`{}`, `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`,
+every account's DAO vote stake with their total and the server's clock,
+read by the masterpod for its snapshot of DAO voting weights. The envelope
+of the signed reads is the masterpod's and the keyholder's, with
+`accountId` as the signer field:
 
 ```json
 {
@@ -589,7 +596,7 @@ purpose:
 
 | `stakeFor`  | `stakes` column    | Minimum                     | Role today |
 | ----------- | ------------------ | --------------------------- | ---------- |
-| `daoVote`   | `dao_vote_stake`   | `STAKE_MIN_DAO_VOTE_ANOS`   | recorded only |
+| `daoVote`   | `dao_vote_stake`   | `STAKE_MIN_DAO_VOTE_ANOS`   | read by the masterpod for DAO votes (`docs/schemas.md` section 23) |
 | `moderator` | `moderator_stake`  | `STAKE_MIN_MODERATOR_ANOS`  | recorded only |
 | `attestor`  | `attestor_stake`   | `STAKE_MIN_ATTESTOR_ANOS`   | attests assisted transfers, arbitrates escrow disputes |
 | `guardian`  | `guardian_stake`   | `STAKE_MIN_GUARDIAN_ANOS`   | proposes and votes on fund proposals |
@@ -1445,8 +1452,8 @@ src/
   auth/                  the account level: require-account.js, signed-request.js, common-checks.js, nonces.queries.js;
                          the attestor gate on top of it: require-attestor.js
   masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check
-  reads/                 feature: the five signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer, get-locked-transfer)
-                         and the two attestor reads (list-assisted-transfers, list-disputed-escrows)
+  reads/                 feature: the five signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer, get-locked-transfer),
+                         the two attestor reads (list-assisted-transfers, list-disputed-escrows) and the one public read (list-dao-stakes)
     reads.router.js, reads.handlers.js, reads.service.js, reads.queries.js
   crypto/hash.js         SHA-256, digest decoding and constant-time comparison
   crypto/canonical.js    canonical JSON (canonicalize package) and its hash
@@ -1481,7 +1488,7 @@ src/
     transfer.queries.js  the feature's SQL
   stakes/                feature: the stakes table and the roles it gives
     stake-purposes.js    the six purposes, each with its column and minimum
-    stakes.queries.js    findStake, addStake, subtractStake, moveStake
+    stakes.queries.js    findStake, addStake, subtractStake, moveStake, listDaoVoteStakes
     stakes.service.js    holdsRole, guardianWeight
   fund/                  feature: the fund (transfer-to-fund, fund-proposal, guardian-vote)
     fund-account.js      the fund's account id
