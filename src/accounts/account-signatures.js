@@ -1,7 +1,7 @@
 import { ECDSA_P256, ML_DSA_87, decodeSignature, verifySignature } from '../crypto/signatures.js';
 
 /**
- * Signatures an account makes over a payload: the signing rules shared by
+ * Signatures an account makes over a payload: the signing rule shared by
  * transfers of every kind and by follow-ups (attestations, cancellations,
  * votes, escrow signatures and verdicts). The payload is signed as its RFC
  * 8785 canonical bytes; the keys to verify with come from the accounts
@@ -32,29 +32,21 @@ export const SIGNING_PAIRS = Object.freeze([
 ]);
 
 /**
- * Signing rule: at least two of the three pairs, both keys of each. Plain,
- * guarded, vault and escrow transfers, transfers to the fund, fund proposals
- * and every follow-up use it.
+ * Signing rule: at least two of the three pairs, both keys of each. Every
+ * transfer kind, transfers to the fund, fund proposals and every follow-up
+ * use it: the one rule since 2026-11-07, when the assisted transfer's own
+ * rule, pair one and the wallet pair, was dropped.
  */
 export const ANY_TWO_PAIRS = 'anyTwoPairs';
 
-/**
- * Signing rule: pair 1 and the wallet pair, all four keys. A pair 2 also
- * present is checked like any other and accepted. Assisted transfers use it.
- */
-export const PAIR_ONE_AND_WALLET = 'pairOneAndWallet';
-
 /** How many of SIGNING_PAIRS the ANY_TWO_PAIRS rule needs. */
 const MIN_SIGNING_PAIRS = 2;
-
-/** The pairs the PAIR_ONE_AND_WALLET rule needs: pair 1 and the wallet pair. */
-const PAIR_ONE_AND_WALLET_PAIRS = [SIGNING_PAIRS[0], SIGNING_PAIRS[2]];
 
 /**
  * Checks `signatures`, the signatures object of a transfer or a follow-up,
  * over `message` (the canonical bytes of the payload, a Buffer) against
  * `account`, the account row transfer.queries.js findAccount returns, under
- * `rule` (ANY_TWO_PAIRS or PAIR_ONE_AND_WALLET).
+ * `rule` (ANY_TWO_PAIRS).
  *
  * Every pair with a signature present is checked: both keys of the pair must
  * be present, the account must hold both keys, and each signature must
@@ -91,14 +83,6 @@ export function verifyAccountSignatures(account, signatures, message, rule) {
   if (rule === ANY_TWO_PAIRS) {
     if (signed.length < MIN_SIGNING_PAIRS) {
       return `signatures must come from at least ${MIN_SIGNING_PAIRS} of the key pairs key1, key2 and walletKey`;
-    }
-    return null;
-  }
-  if (rule === PAIR_ONE_AND_WALLET) {
-    for (const pair of PAIR_ONE_AND_WALLET_PAIRS) {
-      if (!signed.includes(pair)) {
-        return `signatures must include ${pair[0].name} and ${pair[1].name}`;
-      }
     }
     return null;
   }
