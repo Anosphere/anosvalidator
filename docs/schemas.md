@@ -19,14 +19,12 @@ disagree before then, this file wins.
 - Money is millionths of an anos: decimal strings in JSON, BIGINT in the
   database. Values given in anos below are multiplied by 1,000,000.
 - Timestamps are ISO 8601 strings.
-- Two account signing rules, shared by transactions and follow-ups:
-  - **any two pairs**: at least two of the three pairs key1/postQuantumKey1,
-    key2/postQuantumKey2 and walletKey/walletPostQuantumKey, both halves of
-    each pair present, every signature present verifying against the
-    account's stored key. Today's transfer rule.
-  - **pair one and the wallet pair**: key1, postQuantumKey1, walletKey and
-    walletPostQuantumKey all present and verifying. A key2 pair also present
-    is checked like any other and accepted. Used by assisted transfers only.
+- One account signing rule, **any two pairs**, shared by transactions and
+  follow-ups: at least two of the three pairs key1/postQuantumKey1,
+  key2/postQuantumKey2 and walletKey/walletPostQuantumKey, both halves of
+  each pair present, every signature present verifying against the
+  account's stored key. Until 2026-11-07 assisted transfers had a rule of
+  their own, pair one and the wallet pair (section 20).
 - A transaction waits in a **holding table** until a leader round writes it.
   There are five: `pending`, `locked_transactions`, `assisted_transfers`,
   `escrow_transfers` and `fund_proposals`. All five share: `transaction_id`
@@ -264,11 +262,11 @@ amount, and the kind as `type`, and the balance trigger moves the amount.
 ### 4.1 assistedAnosTransfer
 
 Sent from an **assisted** account at `POST /anos-transfer`. Signing rule
-**pair one and the wallet pair**. No time lock: `createdAt` is not checked.
-Held in `assisted_transfers`. Ready for a leader round when approved, both
-attestations approved, and no cancellation present. After the write the row
-moves to `logs` with outcome `written`, attestations included; the
-attestations are not written to the chain.
+**any two pairs**, like every other transfer (section 20). No time lock:
+`createdAt` is not checked. Held in `assisted_transfers`. Ready for a leader
+round when approved, both attestations approved, and no cancellation
+present. After the write the row moves to `logs` with outcome `written`,
+attestations included; the attestations are not written to the chain.
 
 ### 4.2 escrowTransfer
 
@@ -2374,3 +2372,107 @@ Follow-ups, from the plan's section 5 and the build:
   restart on every VM.
 - The wallet's answer to 503 `not counted yet` from the validator it
   picked.
+
+## 20. The assisted signing rule (2026-11-07)
+
+Decided 2026-11-07 in a one-round planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/assisted-signing-plan-1.md`. Why: an
+assisted transfer was signed under a rule of its own, **pair one and the
+wallet pair**: the user's pair one and the wallet's pair, all four
+signatures present. Nothing moved out of an assisted account without the
+wallet's signature, so the wallet held a kind of custody over it. A
+spending, guarded, vault or escrow transfer moves on **any two pairs**: the
+user's two pairs alone are enough, or one user pair with the wallet pair.
+That was the intent for assisted accounts too; the separate rule was a
+mistake. The two attestations are not touched: an assisted transfer still
+waits for two attestors. One build step in this repo, with its doorman
+part (doormansoftware `docs/schemas.md` section 4), built 2026-11-07,
+deployed at the relaunch. Nothing here touches the wallet, the masterpod,
+the keyholder or the database.
+
+### 20.1 The decisions, as they apply to the code
+
+- **One rule.** The signing rule of `assistedAnosTransfer` is **any two
+  pairs**, the rule the other four transfer types use: at least two of the
+  three pairs (pair one, pair two, the wallet pair), both halves of each
+  pair present, every signature present verifying against the account's
+  stored keys. The assisted row of `TRANSFER_TYPES`
+  (`src/transfer/transfer.service.js`) says `ANY_TWO_PAIRS`. The two
+  attestations, from two different attestors with attestor stake, neither
+  the sender, stay exactly as they were (4.1, 5.2). Readiness, the cancel,
+  the write and the move to `logs`: unchanged.
+- **The old rule's code is gone.** `PAIR_ONE_AND_WALLET`, its list of
+  pairs and its branch in `verifyAccountSignatures`
+  (`src/accounts/account-signatures.js`) are deleted. The `rule` parameter
+  of the check and `ANY_TWO_PAIRS` stay as they were, so the four callers
+  (transfers, follow-ups, transfers to the fund, fund proposals) do not
+  change; one rule is left, and the throw for an unknown rule stays. The
+  catch-up replay (`src/garlic-chain/replay.service.js`) goes through
+  `checkTransferSignaturesAndIds`, which reads the rule from the table, so
+  it follows the change with no edit.
+- **The refusal** for too few pairs is the one the other types give,
+  `signatures must come from at least 2 of the key pairs key1, key2 and
+  walletKey`; the reason `signatures must include key1 and
+  postQuantumKey1`, and its twin for the wallet pair, are gone with the
+  branch.
+- **The wallet is not touched.** It signs every transfer with pair one and
+  the signing server adds the wallet pair, which passes the new rule. A way
+  for the wallet to sign with the two user pairs and no wallet signature is
+  a testnet-month follow-up.
+- **No pull round of its own.** The change rides the relaunch, where every
+  doorman and worker pulls anyway (20.2).
+- **What is already there.** A held assisted transfer signed under the old
+  rule carries pair one and the wallet pair, which passes the new rule, so
+  held rows survive the update unchanged. Every assisted link on the chain
+  so far passes the new rule for the same reason, so a replay on the new
+  code reads the old chain as before. Every account stores its second user
+  pair at creation (`src/accounts/accounts.service.js`, `publicKey2` and
+  `publicKeyPq2`), assisted accounts included, so an existing assisted
+  account can sign with its two user pairs the moment the validators run
+  the new code. No database or schema change.
+
+### 20.2 The rollout
+
+- **A mixed network does no harm to what is sent today.** Each validator
+  checks a transfer's signatures itself when another asks it to approve
+  (`src/validators/validators.service.js` calls `verifyAnosTransfer`). What
+  the wallet sends, pair one and the wallet pair, passes both rules, so
+  validators on the old code and on the new agree on every transfer the
+  wallet makes.
+- **A transfer signed by two user pairs needs every counted validator on
+  the new code.** One on the old code refuses it, and the transfer gets no
+  proof of acceptance. A validator that joins later replays the chain
+  through `checkTransferSignaturesAndIds`, so it too must be on the new
+  code to pass such a link. Nothing signs that way today, so there is
+  nothing to hold back; the relaunch puts every validator on the new code
+  before anything could.
+
+### 20.3 Files
+
+Changed: `src/transfer/transfer.service.js` (the assisted row of
+`TRANSFER_TYPES`, the import, the comment on check 3) and
+`src/accounts/account-signatures.js` (the deletions and the comments). No
+file under `deploy/`, no package file and no schema file changes. In the
+docs: the README's "Account signing rules" and its transfer table,
+sections 1 and 4.1 above, and this section.
+
+### 20.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 20.1 was changed.
+
+- **Main had moved on.** The plan names main at b93b8cb; the build was
+  made on 385c6b5, the merge of the `updatevalidator18` branch. Every line
+  the plan quotes was where it said, so the text was followed as it stood.
+- **Nothing else named the old rule.** A search of the repo for
+  `PAIR_ONE_AND_WALLET`, `pairOneAndWallet` and "pair one and the wallet"
+  found only the spots the plan lists, plus `docs/build-plan.md`, which is
+  history and stays.
+- **Section 1's bullet** lost its closing sentence "Today's transfer
+  rule.", which set one rule against the other; with one rule it said
+  nothing.
+- **Checks.** `node --check` passed on both files. No server was booted,
+  no test script was written and no rig was run (the plan's 1.4): what the
+  wallet sends passes both rules, so nothing on a running network changes
+  until something signs an assisted transfer with two user pairs, which
+  nothing does today.

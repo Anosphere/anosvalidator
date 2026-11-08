@@ -1,4 +1,4 @@
-import { ANY_TWO_PAIRS, PAIR_ONE_AND_WALLET, verifyAccountSignatures } from '../accounts/account-signatures.js';
+import { ANY_TWO_PAIRS, verifyAccountSignatures } from '../accounts/account-signatures.js';
 import { ASSISTED, GUARDED, SPENDING, VAULT } from '../accounts/account-types.js';
 import { env } from '../config/env.js';
 import { canonicalHash, canonicalize } from '../crypto/canonical.js';
@@ -53,7 +53,7 @@ const TRANSFER_TYPES = new Map([
   [ANOS_TRANSFER, { accountType: SPENDING, lockMinutes: 0, heldIn: PENDING, rule: ANY_TWO_PAIRS }],
   [GUARDED_ANOS_TRANSFER, { accountType: GUARDED, lockMinutes: env.locks.guardedMinutes, heldIn: LOCKED_TRANSACTIONS, rule: ANY_TWO_PAIRS }],
   [VAULT_ANOS_TRANSFER, { accountType: VAULT, lockMinutes: env.locks.vaultMinutes, heldIn: LOCKED_TRANSACTIONS, rule: ANY_TWO_PAIRS }],
-  [ASSISTED_ANOS_TRANSFER, { accountType: ASSISTED, lockMinutes: 0, heldIn: ASSISTED_TRANSFERS, rule: PAIR_ONE_AND_WALLET }],
+  [ASSISTED_ANOS_TRANSFER, { accountType: ASSISTED, lockMinutes: 0, heldIn: ASSISTED_TRANSFERS, rule: ANY_TWO_PAIRS }],
   [ESCROW_TRANSFER, { accountType: SPENDING, lockMinutes: 0, heldIn: ESCROW_TRANSFERS, rule: ANY_TWO_PAIRS }],
 ]);
 
@@ -84,9 +84,8 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  *      are read once here for the checks below;
  *   3. the signatures, under the type's signing rule
  *      (account-signatures.js verifyAccountSignatures): any two of the
- *      three key pairs, or, for an assisted transfer, pair 1 and the wallet
- *      pair; both keys of each pair, every one verifying against the
- *      account's stored public key;
+ *      three key pairs, both keys of each pair, every one verifying
+ *      against the account's stored public key;
  *   4. transactionId is the SHA-256 of the canonical JSON of the payload
  *      without transactionId, which is how the web app makes it;
  *   1b. for a guarded or vault transfer, createdAt is the account's lock

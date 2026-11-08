@@ -469,7 +469,7 @@ validator refuses.
 
 ## Account signing rules
 
-Two rules, shared by every transfer kind and every follow-up
+One rule, shared by every transfer kind and every follow-up
 (`src/accounts/account-signatures.js`). The keys to verify with come from the
 `accounts` table, never from the object itself; a follow-up carries no
 public keys at all.
@@ -478,10 +478,11 @@ public keys at all.
   `key2`/`postQuantumKey2` and `walletKey`/`walletPostQuantumKey`, both
   halves of each pair present, every signature present verifying against the
   account's stored key.
-- **pair one and the wallet pair**: `key1`, `postQuantumKey1`, `walletKey`
-  and `walletPostQuantumKey` all present and verifying. A `key2` pair also
-  present is checked like any other and accepted. Used by assisted
-  transfers only.
+
+Until 2026-11-07 assisted transfers had a rule of their own, pair one and
+the wallet pair (`key1`, `postQuantumKey1`, `walletKey` and
+`walletPostQuantumKey`, all four present), dropped so that the wallet holds
+no custody over an assisted account (`docs/schemas.md` section 20).
 
 ## Transfer submission
 
@@ -493,7 +494,7 @@ an account, of one of five types:
 | `anosTransfer`         | a spending account | `pending`             | any two pairs | the next leader round |
 | `guardedAnosTransfer`  | a guarded account  | `locked_transactions` | any two pairs | `GUARDED_LOCK_MINUTES` (a week) have passed |
 | `vaultAnosTransfer`    | a vault account    | `locked_transactions` | any two pairs | `VAULT_LOCK_MINUTES` (a month) have passed |
-| `assistedAnosTransfer` | an assisted account | `assisted_transfers` | pair one and the wallet pair | two attestors have attested |
+| `assistedAnosTransfer` | an assisted account | `assisted_transfers` | any two pairs | two attestors have attested |
 | `escrowTransfer`       | a spending account, the seller | `escrow_transfers` | any two pairs | the seller signs for success, or arbitrators decide |
 
 - `payload` is the signed part: `accountId` (the sender), `transactionId`,
