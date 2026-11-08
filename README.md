@@ -81,6 +81,7 @@ Shared values, in `network/testnet.env`:
 | `NO_ANSWER_WAIT_SECONDS`   | `60`           | How long an originator that got no answer waits for the vote before it sends once more |
 | `CHAIN_CHUNK_LINKS`        | `100`          | Links in one chain chunk, at most |
 | `HELD_ROWS_PAGE`           | `100`          | Rows in one page of held rows, at most |
+| `UNAPPROVED_AGE_LIMIT_SECONDS` | `300`      | How long a held row may stay unapproved; past it, the validator holding it drops it (section "Database") |
 
 Machine values, in `.env`:
 
@@ -226,7 +227,11 @@ as received, and `approved` turns true once every validator accepted it. A
 submission whose transaction id or account id is found in any holding table
 or on the chain is refused. `src/held-transactions/held-transactions.js` is
 the registry of the five, so one code path stores, finds and approves in all
-of them.
+of them. A row still unapproved `UNAPPROVED_AGE_LIMIT_SECONDS` (300) after
+it was stored is dropped by the validator holding it, a plain delete in any
+of the five, once a minute (`src/held-transactions/unapproved-sweep.js`;
+docs/schemas.md section 21): a refused approval leaves such rows behind,
+and an account can send nothing through a validator that holds one.
 
 Conventions used in the schema:
 

@@ -40,7 +40,9 @@ disagree before then, this file wins.
   (section 9).
 - A row that leaves a holding table is deleted (`pending`,
   `locked_transactions`) or moved whole to `logs` or `archives` (the other
-  three; section 7).
+  three; section 7). A row still unapproved `UNAPPROVED_AGE_LIMIT_SECONDS`
+  after it was stored is dropped by the validator holding it, a plain
+  delete in any of the five (section 21).
 - Every validator keeps its own copy of every table and does every move to
   logs or archives for itself, at the same logical moment, so the copies
   stay identical.
@@ -2363,7 +2365,8 @@ Follow-ups, from the plan's section 5 and the build:
   list) needs a cut back to the last common link before it can catch up;
   today it logs `own chain is ahead of the network` and stops.
 - A refused approval leaves unapproved rows on the other validators for
-  good and blocks that account; a withdraw message or an age limit.
+  good and blocks that account; a withdraw message or an age limit. Built
+  as the age limit, 2026-11-07 (section 21).
 - Logs and archives are not copied to a joiner.
 - The held rows' approved flags come from the leader on trust.
 - A validator that is up but cut off from everyone learns it is ignored
@@ -2476,3 +2479,91 @@ here; nothing in 20.1 was changed.
   wallet sends passes both rules, so nothing on a running network changes
   until something signs an assisted transfer with two user pairs, which
   nothing does today.
+
+## 21. The age limit on unapproved held rows (2026-11-07)
+
+Decided 2026-11-07 in a planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/unapproved-age-limit-plan-1.md`. Why: a
+transaction is stored in its holding table with `approved = false` before
+the approval round, on the originating validator and on every peer that
+approves it. When one validator refuses, the round ends there (section 19:
+a refusal is a refusal, and no answer twice counts as one). The
+originating validator never sends the proof of acceptance, and nothing
+tells the others to drop their rows, so they stay for good, on the
+originating validator too; the refusing validator holds nothing. Because
+`account_id` is unique in every holding table, the account can then send
+nothing through a validator that holds such a row, and a retry that
+reaches the refusing validator gets stuck the same way on the rest. The
+wallet is told `202` + `{ transactionId }` all the same
+(`src/util/submission-response.js`), so the sender sees nothing but a
+transfer that never arrives. On the rig of section 19 such rows were
+deleted by hand. One build step in this repo; nothing touches the doorman,
+the wallet, the masterpod, the keyholder, the registry or the database
+schema.
+
+### 21.1 The decisions, as they apply to the code
+
+- **An age limit, nothing else.** Every validator drops, on its own, any
+  held row that is still unapproved `UNAPPROVED_AGE_LIMIT_SECONDS` after
+  it was stored: `300` in `network/testnet.env`, read as
+  `env.unapprovedAgeLimitSeconds`, required at boot like the network
+  variables of section 19. No withdraw message, no new
+  validator-to-validator message and no round: an unapproved row is a
+  reservation that only the proof of acceptance can turn into a
+  transaction, and a round could itself be refused or go unanswered. The
+  user, 2026-11-07: a refusal of this kind is rare, the timer is the easy
+  fix, and in the rare case the sender waits.
+- **Safe by the timing of section 19.** An approval round is over long
+  before the limit: the sends with their `VALIDATOR_CALL_TIMEOUT_SECONDS`
+  (10), the wait of at most `NO_ANSWER_WAIT_SECONDS` (60) for an ignore
+  vote, the one re-send and the proof add up to well under two minutes,
+  and in the normal case to seconds. A row unapproved past five minutes
+  can no longer become approved, so dropping it changes nothing any
+  validator writes.
+- **A plain delete, in all five tables.** No move to `logs`, no trace but
+  the log line `dropped unapproved <table> transaction <id hex>: older
+  than 300 seconds`. An unapproved row has no follow-ups and no child rows
+  (a follow-up is accepted on an approved row only, section 5), so the
+  delete is one statement per table: `DELETE FROM <table> WHERE NOT
+  approved AND created_at < now() - make_interval(secs => $1) RETURNING
+  transaction_id`.
+- **The sweep.** `src/held-transactions/unapproved-sweep.js`:
+  `sweepUnapproved` runs the five deletes and logs each row dropped; a
+  database error is logged (`unapproved sweep of <table> failed:
+  <message>`) and the next sweep tries again. `startUnapprovedSweep`,
+  called by `src/server.js` next to `startJoinLoop` once the server
+  listens, runs it at once and then every minute (`SWEEP_EVERY_MS`), on
+  every validator, counted or not, with the timer unref'd;
+  `stopUnapprovedSweep` clears it at shutdown. Nothing waits on the sweep:
+  a blocked account is free again within a minute of the limit passing.
+- **The wallet's answer is unchanged.** `202` + `{ transactionId }`
+  whatever the validators said, as before. A refusal answered to the
+  wallet, and a withdraw message that frees the account at once, stay
+  follow-ups.
+- **What is already there.** Rows stuck on the live validators are dropped
+  by the first sweep after the first boot on this code, so no hand deletes
+  are needed at the relaunch. A validator on the old code keeps its stuck
+  rows until it is updated; it harms nobody else.
+
+### 21.2 Files
+
+Changed: `network/testnet.env` (the variable and its comment),
+`src/config/env.js` (`unapprovedAgeLimitSeconds`), `src/server.js` (the
+import, the start after `startJoinLoop`, the stop in `shutdown`). New:
+`src/held-transactions/unapproved-sweep.js`. In the docs: the README's
+environment table and its holding tables paragraph, section 1 and the
+follow-ups of section 19 above, and this section. No file under `deploy/`,
+no package file and no schema file changes; the doorman is not touched.
+
+### 21.3 Notes from the build
+
+- **The parameter.** `make_interval(secs => $1)` was checked on PostgreSQL
+  17 with a prepared statement and an untyped argument, the way pg sends
+  one; the server infers double precision.
+- **One level down.** The same thing can happen to a follow-up: an
+  attestation, a cancellation, a vote, an escrow signature or a verdict
+  that one validator refuses stays in its slot or row unapproved on the
+  others, and a cancellation stuck that way keeps an assisted transfer off
+  the ready list. The slots are JSON columns with no time of their own, so
+  an age limit there needs a time per slot. Not in this build; a
+  testnet-month follow-up.
