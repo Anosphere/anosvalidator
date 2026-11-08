@@ -163,4 +163,9 @@ export const env = Object.freeze({
     chainChunkLinks: requiredInteger('CHAIN_CHUNK_LINKS'),
     heldRowsPage: requiredInteger('HELD_ROWS_PAGE'),
   }),
+
+  // How long a held row may stay unapproved before the validator that
+  // holds it drops it, in seconds (src/held-transactions/unapproved-sweep.js,
+  // docs/schemas.md section 21). Required; in network/testnet.env.
+  unapprovedAgeLimitSeconds: requiredInteger('UNAPPROVED_AGE_LIMIT_SECONDS'),
 });

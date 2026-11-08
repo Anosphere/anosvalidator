@@ -3,6 +3,7 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { closePool, query } from './db/pool.js';
 import { runGenesis } from './genesis/genesis.service.js';
+import { startUnapprovedSweep, stopUnapprovedSweep } from './held-transactions/unapproved-sweep.js';
 import { startJoinLoop } from './validators/join.service.js';
 import { applyRegistry } from './validators/registry.service.js';
 
@@ -54,6 +55,10 @@ const server = app.listen(env.port, () => {
   // Every boot asks to join (src/validators/join.service.js): in the
   // background, serving meanwhile, never stopping the process.
   startJoinLoop();
+  // And the sweep of unapproved held rows
+  // (src/held-transactions/unapproved-sweep.js): once now, then every
+  // minute, dropping any row that outlived UNAPPROVED_AGE_LIMIT_SECONDS.
+  startUnapprovedSweep();
 });
 
 let shuttingDown = false;
@@ -62,6 +67,7 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  stopUnapprovedSweep();
   console.log(`\n${signal} received, shutting down...`);
 
   // Safety net: never hang forever if a connection refuses to close.
