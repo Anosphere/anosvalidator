@@ -43,15 +43,18 @@ export const ESCROW_STAGES = Object.freeze({
 });
 
 /**
- * The stages of a held assisted transfer, as /get-assisted-transfer names
- * them (spec 17.2): waiting until every validator accepted the transfer;
- * attesting while it waits for two approved attestations; writing with
- * both attestations approved, until the next leader round writes it;
- * cancelling with the sender's cancel on it.
+ * The stages of a held assisted transfer or break-glass move, as
+ * /get-assisted-transfer names them (spec 17.2, section 22): waiting until
+ * every validator accepted the transfer; attesting while it waits for two
+ * approved attestations; locked with both attestations approved and its
+ * unlock moment, a break-glass move's future_date, still ahead; writing
+ * with both attestations approved and no moment ahead, until the next
+ * leader round writes it; cancelling with a cancel on it.
  */
 export const ASSISTED_STAGES = Object.freeze({
   WAITING: 'waiting',
   ATTESTING: 'attesting',
+  LOCKED: 'locked',
   WRITING: 'writing',
   CANCELLING: 'cancelling',
 });
@@ -178,12 +181,15 @@ function stageOf(row) {
 
 /**
  * POST /get-assisted-transfer (spec 17). Body { }. transfer: the signer's
- * held assisted transfer, the assisted_transfers row whose account_id is
- * the signer (there is at most one), or null when there is none: the held
- * transfer only, nothing from logs or archives. The transfer fields as the
- * other held-transfer reads answer them (heldTransferOf); stage from
+ * held assisted transfer or break-glass move (section 22), the
+ * assisted_transfers row whose account_id is the signer (there is at most
+ * one), or null when there is none: the held transfer only, nothing from
+ * logs or archives. The transfer fields as the other held-transfer reads
+ * answer them (heldTransferOf, `type` among them); stage from
  * assistedStageOf; attestations the number of attestation slots holding
- * an object, 0, 1 or 2.
+ * an object, 0, 1 or 2; unlocksAt the row's future_date, the moment a
+ * break-glass move out of a guarded or vault account may be written, as
+ * ISO 8601, or null.
  */
 export async function getAssistedTransfer(accountId) {
   const row = await findAssistedFor(accountId);
@@ -192,24 +198,31 @@ export async function getAssistedTransfer(accountId) {
     ...heldTransferOf(row),
     stage: assistedStageOf(row),
     attestations: [row.has_attestation_1, row.has_attestation_2].filter(Boolean).length,
+    unlocksAt: row.future_date === null ? null : row.future_date.toISOString(),
   };
   return ok(200, { transfer });
 }
 
 /**
- * Where a held assisted transfer is, from its row (spec 17.2), the first
- * line that matches: not approved is waiting; a cancellation present is
- * cancelling; both attestations approved is writing; else attesting,
- * accepted and waiting for two approved attestations. A cancel is accepted
- * until the transfer is written, even with both attestations approved, and
- * a cancellation present keeps the row off the ready list (5.3, section
- * 6), so cancelling is decided before writing; the order is a definition,
- * as stageOf's is.
+ * Where a held assisted transfer or break-glass move is, from its row (spec
+ * 17.2), the first line that matches: not approved is waiting; a
+ * cancellation present is cancelling; both attestations approved with the
+ * unlock moment still ahead (row.due false: a break-glass move out of a
+ * guarded or vault account, section 22) is locked; both attestations
+ * approved and due is writing; else attesting, accepted and waiting for two
+ * approved attestations. A cancel is accepted until the transfer is
+ * written, even with both attestations approved, and a cancellation
+ * present keeps the row off the ready list (5.3, section 6), so cancelling
+ * is decided before locked and writing; the order is a definition, as
+ * stageOf's is. row.due is decided by the database's clock, the one
+ * findReadyAssistedIds reads, so the wallet and the ready list agree.
  */
 function assistedStageOf(row) {
   if (!row.approved) return ASSISTED_STAGES.WAITING;
   if (row.has_cancellation) return ASSISTED_STAGES.CANCELLING;
-  if (row.attestation_1_approved && row.attestation_2_approved) return ASSISTED_STAGES.WRITING;
+  if (row.attestation_1_approved && row.attestation_2_approved) {
+    return row.due ? ASSISTED_STAGES.WRITING : ASSISTED_STAGES.LOCKED;
+  }
   return ASSISTED_STAGES.ATTESTING;
 }
 
@@ -252,7 +265,7 @@ function lockedStageOf(row) {
  * POST /list-assisted-transfers (spec 13.2). Body { }. The assisted
  * transfers waiting for attestors on this validator: approved, no
  * cancellation present, an attestation slot still empty; newest first.
- * accountId, accountIdTo, amount and createdAt are read from
+ * type, accountId, accountIdTo, amount and createdAt are read from
  * og_transaction.payload; attestorIds lists payload.attestorId of the
  * attestations present, slot order, so a second attestor sees who signed
  * first. The caller is the verified attestor, req.account from
@@ -289,14 +302,17 @@ export async function listDisputedEscrows(accountId) {
 }
 
 /**
- * A held transfer in wire form (the two attestor reads): its id and, read
- * from og_transaction.payload as pendingOf reads them, the sender, the
- * receiver, the amount and createdAt.
+ * A held transfer in wire form (every held-transfer read): its id and, read
+ * from og_transaction.payload as pendingOf reads them, its type (since
+ * 2026-11-08: an assisted_transfers row is an assistedAnosTransfer or a
+ * breakGlassTransfer, section 22), the sender, the receiver, the amount and
+ * createdAt.
  */
 function heldTransferOf(row) {
   const payload = isObject(row.og_transaction?.payload) ? row.og_transaction.payload : {};
   return {
     transactionId: hex(row.transaction_id),
+    type: stringOrNull(payload.transactionType),
     accountId: stringOrNull(payload.accountId),
     accountIdTo: stringOrNull(payload.accountIdTo),
     amount: typeof payload.amount === 'string' ? payload.amount : '0',

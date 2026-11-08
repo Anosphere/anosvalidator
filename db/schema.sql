@@ -201,7 +201,7 @@ COMMENT ON COLUMN garlic_chain.position            IS 'The row''s place in the c
 
 
 -- ---------------------------------------------------------------------------
--- Moving the anos: when a transfer link is inserted, of any of the seven
+-- Moving the anos: when a transfer link is inserted, of any of the eight
 -- transfer types below, its amount leaves the sender's balance (account_id)
 -- and lands in the receiver's (account_id_to). Done by a trigger so the
 -- balances can never
@@ -217,12 +217,14 @@ COMMENT ON COLUMN garlic_chain.position            IS 'The row''s place in the c
 -- pending; the trigger is the backstop. The UPDATEs fire
 -- accounts_set_updated_at, so both accounts' updated_at move.
 --
--- Only rows whose type is one of the seven transfer types qualify (the WHEN
+-- Only rows whose type is one of the eight transfer types qualify (the WHEN
 -- clause): 'anosTransfer', 'guardedAnosTransfer', 'vaultAnosTransfer',
--- 'assistedAnosTransfer', 'escrowTransfer', 'transferToFund' (an account
--- staking anos with the fund) and 'transferFromFund' (a payout of a fund
--- proposal; the fund is the sender). An account creation or a fund proposal
--- link has no account_id_to and amount 0, and is left alone.
+-- 'assistedAnosTransfer', 'escrowTransfer', 'breakGlassTransfer' (the whole
+-- balance of an account whose keys died with its passkey, to a new account
+-- of the same type; 2026-11-08), 'transferToFund' (an account staking anos
+-- with the fund) and 'transferFromFund' (a payout of a fund proposal; the
+-- fund is the sender). An account creation or a fund proposal link has no
+-- account_id_to and amount 0, and is left alone.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION apply_anos_transfer()
@@ -258,7 +260,7 @@ CREATE OR REPLACE TRIGGER garlic_chain_apply_anos_transfer
   AFTER INSERT ON garlic_chain
   FOR EACH ROW
   WHEN (NEW.type IN ('anosTransfer', 'guardedAnosTransfer', 'vaultAnosTransfer',
-                     'assistedAnosTransfer', 'escrowTransfer',
+                     'assistedAnosTransfer', 'escrowTransfer', 'breakGlassTransfer',
                      'transferToFund', 'transferFromFund'))
   EXECUTE FUNCTION apply_anos_transfer();
 
@@ -444,6 +446,15 @@ COMMENT ON COLUMN stakes.updated_at       IS 'When the row last changed. Maintai
 -- attestation_1 and attestation_2 (the first attestation to arrive goes in
 -- slot 1) and cancellation, the sender's assistedTransferCancel. Once a
 -- cancellation is approved the row moves to logs instead.
+--
+-- Since 2026-11-08 the table holds assisted transfers and break-glass moves
+-- (breakGlassTransfer: the whole balance of an account whose keys died with
+-- its passkey, to a new account of the same type, signed by the break-glass
+-- pair; docs/schemas.md section 22), told apart by
+-- og_transaction.payload.transactionType. A move waits for the same two
+-- attestations; its cancellation slot takes the break-glass pair's
+-- breakGlassCancel or the account's own assistedTransferCancel. future_date
+-- is the moment a move out of a guarded or vault account may be written.
 -- Stand-alone table: no foreign keys.
 -- ---------------------------------------------------------------------------
 
@@ -471,6 +482,11 @@ CREATE TABLE IF NOT EXISTS assisted_transfers (
   cancellation            JSONB,
   cancellation_approved   BOOLEAN NOT NULL DEFAULT false,
 
+  -- The moment a break-glass move may be written: its createdAt when the
+  -- sender is a guarded or vault account. NULL for an assisted transfer and
+  -- for a move out of a spending or assisted account.
+  future_date             TIMESTAMPTZ,
+
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -481,7 +497,7 @@ CREATE OR REPLACE TRIGGER assisted_transfers_set_updated_at
   WHEN (OLD.* IS DISTINCT FROM NEW.*)
   EXECUTE FUNCTION set_updated_at();
 
-COMMENT ON TABLE  assisted_transfers                        IS 'Transfers out of assisted accounts waiting for two attestations. One per account at a time. Stand-alone; no foreign keys.';
+COMMENT ON TABLE  assisted_transfers                        IS 'Transfers out of assisted accounts, and since 2026-11-08 break-glass moves, waiting for two attestations. One per account at a time. Stand-alone; no foreign keys.';
 COMMENT ON COLUMN assisted_transfers.transaction_id         IS 'SHA-256 digest, 32 raw bytes.';
 COMMENT ON COLUMN assisted_transfers.account_id             IS 'The sending account. SHA-256 digest, 32 raw bytes. One outstanding transaction per account.';
 COMMENT ON COLUMN assisted_transfers.og_transaction         IS 'The transaction object exactly as submitted, as JSON.';
@@ -492,6 +508,7 @@ COMMENT ON COLUMN assisted_transfers.attestation_2          IS 'The second attes
 COMMENT ON COLUMN assisted_transfers.attestation_2_approved IS 'true once every validator accepted attestation_2. Default false.';
 COMMENT ON COLUMN assisted_transfers.cancellation           IS 'The sender''s assistedTransferCancel, { payload, signatures } as received. NULL while none.';
 COMMENT ON COLUMN assisted_transfers.cancellation_approved  IS 'true once every validator accepted the cancellation; the row then moves to logs. Default false.';
+COMMENT ON COLUMN assisted_transfers.future_date            IS 'The moment a break-glass move may be written: its createdAt when the sender is a guarded or vault account. NULL for an assisted transfer and for a move out of a spending or assisted account.';
 COMMENT ON COLUMN assisted_transfers.created_at             IS 'When the row was inserted. Set by default, never changed.';
 COMMENT ON COLUMN assisted_transfers.updated_at             IS 'When the row last changed. Maintained by the assisted_transfers_set_updated_at trigger.';
 

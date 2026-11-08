@@ -60,8 +60,11 @@ const CHILD_COMMON = Object.freeze({
 });
 
 /**
- * The five tables: their columns with kinds, the slots that hold a whole
- * follow-up, and the child table whose rows ride with each row.
+ * The five tables: their columns with kinds, the columns that may be null
+ * besides a slot (`nullable`; assisted_transfers' future_date, a TIME that
+ * only a break-glass move out of a guarded or vault account fills, since
+ * 2026-11-08), the slots that hold a whole follow-up, and the child table
+ * whose rows ride with each row.
  */
 const TABLES = Object.freeze({
   [PENDING]: { columns: COMMON, slots: [], children: null },
@@ -75,7 +78,9 @@ const TABLES = Object.freeze({
       attestation_2_approved: BOOL,
       cancellation: JSON_VALUE,
       cancellation_approved: BOOL,
+      future_date: TIME,
     },
+    nullable: ['future_date'],
     slots: ['attestation_1', 'attestation_2', 'cancellation'],
     children: null,
   },
@@ -282,7 +287,7 @@ function fromWire(value, kind) {
 /** Returns a description of the first structural problem with a wire row of `spec`, or null. */
 function checkRowShape(wire, spec) {
   if (!isObject(wire)) return 'must be an object';
-  const bad = checkColumns(wire, spec.columns);
+  const bad = checkColumns(wire, spec.columns, spec.nullable);
   if (bad) return bad;
   if (spec.children) {
     const kids = wire[spec.children.key];
@@ -296,11 +301,18 @@ function checkRowShape(wire, spec) {
   return null;
 }
 
-function checkColumns(wire, columns) {
+/**
+ * Every column of `columns` as its kind demands. A slot (a JSON column other
+ * than og_transaction and a child's signature) may be null, and so may a
+ * TIME column the table's spec lists in `nullable` (assisted_transfers'
+ * future_date; locked_transactions' is never null).
+ */
+function checkColumns(wire, columns, nullable = []) {
   for (const [column, kind] of Object.entries(columns)) {
     const name = camel(column);
     const value = wire[name];
     if (value === null && kind === JSON_VALUE && column !== 'og_transaction' && column !== 'signature') continue;
+    if (value === null && kind === TIME && nullable.includes(column)) continue;
     if (kind === BYTES && !decodeDigest(value)) return `${name} must be a SHA-256 digest`;
     if (kind === JSON_VALUE && !isObject(value)) return `${name} must be an object`;
     if (kind === TIME && (typeof value !== 'string' || Number.isNaN(Date.parse(value)))) return `${name} must be a date`;

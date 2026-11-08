@@ -15,8 +15,8 @@ import {
   checkTransferToFundSignaturesAndIds,
   payoutObject,
 } from '../fund/fund.service.js';
-import { addStake, subtractStake } from '../stakes/stakes.queries.js';
-import { checkTransferSignaturesAndIds, isTransferType } from '../transfer/transfer.service.js';
+import { addStake, moveStake, subtractStake } from '../stakes/stakes.queries.js';
+import { BREAK_GLASS_TRANSFER, checkTransferSignaturesAndIds, isTransferType } from '../transfer/transfer.service.js';
 import { isObject } from '../util/is-object.js';
 import { appliedRegistry } from '../validators/registry.service.js';
 import { getHealth } from '../validators/validators.client.js';
@@ -64,7 +64,8 @@ import { findTailRow, insertLink } from './garlic-chain.queries.js';
  *   5. the signature and id checks of the type, nothing else (checkByType);
  *   6. the side effect of the type: an account creation inserts the account
  *      row, a transferToFund adds the stake, a transferFromFund with stakeFor
- *      takes it back; the balance trigger does the rest on the insert;
+ *      takes it back, a breakGlassTransfer moves the sender's stakes row to
+ *      the receiver; the balance trigger does the rest on the insert;
  *   7. the insert, with the chunk's createdAt; the position the identity
  *      column gives must be the link's.
  * A link that fails rolls the chunk back, with one log line naming the
@@ -185,9 +186,11 @@ function sameId(actual, expected) {
  * { ok: false, reason }:
  *   accountCreation: checks 1 to 3 of verifyCreateAccount; the account row
  *     with the eight keys and the type;
- *   the five transfer types: the shape, the signatures under the type's
+ *   the six transfer types: the shape, the signatures under the type's
  *     rule against the sender's account as the own table has it by now, and
- *     the transactionId rule;
+ *     the transactionId rule; a breakGlassTransfer moves the sender's
+ *     stakes row to the receiver (stakes.queries.js moveStake), as its
+ *     write does;
  *   transferToFund and fundProposal: the shape, signature and id parts of
  *     their verify functions; a transferToFund adds the stake;
  *   transferFromFund: no signatures; the link must follow a fundProposal
@@ -230,7 +233,8 @@ async function checkByType(client, link, transHash, proposal) {
     const checked = await checkTransferSignaturesAndIds(ogTransaction, { client });
     if (!checked.ok) return checked;
     const { accountId, accountIdTo, transactionId, amount } = checked;
-    return { ok: true, expected: { accountId, accountIdTo, transactionId, amount }, sideEffect: null, proposal: null };
+    const sideEffect = payload.transactionType === BREAK_GLASS_TRANSFER ? () => moveStake(client, accountId, accountIdTo) : null;
+    return { ok: true, expected: { accountId, accountIdTo, transactionId, amount }, sideEffect, proposal: null };
   }
 
   if (type === TRANSFER_TO_FUND) {

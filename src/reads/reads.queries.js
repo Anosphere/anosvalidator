@@ -146,21 +146,25 @@ export async function findOpenEscrowsFor(accountId, limit) {
 }
 
 /**
- * The account's held assisted transfer (spec 17.1): the assisted_transfers
- * row whose account_id is this account, or null when there is none (there
- * is at most one: account_id is UNIQUE there). The row: transaction_id,
- * og_transaction, approved, created_at, two booleans saying which
- * attestation slot holds an object (has_attestation_1, has_attestation_2),
- * attestation_1_approved and attestation_2_approved as the columns are, and
- * has_cancellation, whether the cancellation slot holds an object.
+ * The account's held assisted transfer, or break-glass move (spec 17.1,
+ * section 22): the assisted_transfers row whose account_id is this account,
+ * or null when there is none (there is at most one: account_id is UNIQUE
+ * there). The row: transaction_id, og_transaction, approved, future_date,
+ * created_at, two booleans saying which attestation slot holds an object
+ * (has_attestation_1, has_attestation_2), attestation_1_approved and
+ * attestation_2_approved as the columns are, has_cancellation, whether the
+ * cancellation slot holds an object, and due, whether future_date is null
+ * or has passed by the database's clock, the one findReadyAssistedIds
+ * (section 6) reads.
  */
 export async function findAssistedFor(accountId) {
   const { rows } = await query(
-    `SELECT transaction_id, og_transaction, approved, created_at,
+    `SELECT transaction_id, og_transaction, approved, future_date, created_at,
             attestation_1 IS NOT NULL AS has_attestation_1,
             attestation_2 IS NOT NULL AS has_attestation_2,
             attestation_1_approved, attestation_2_approved,
-            cancellation IS NOT NULL AS has_cancellation
+            cancellation IS NOT NULL AS has_cancellation,
+            (future_date IS NULL OR future_date <= now()) AS due
      FROM assisted_transfers
      WHERE account_id = $1`,
     [accountId],

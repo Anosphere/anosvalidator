@@ -16,10 +16,16 @@ import { findAssisted, markAssistedSlotApproved, setAssistedSlot } from './assis
  * Stored in attestation_1 if empty, else attestation_2 if empty, else
  * refused. No effect on acceptance beyond readiness: a transfer with both
  * attestations approved (and no cancellation) is ready for a leader round.
+ * An attestation attaches to a break-glass move's row (breakGlassTransfer,
+ * docs/schemas.md section 22) exactly as to an assisted transfer's: nothing
+ * here reads the row's type.
  *
  * The interface every kind exports, for attachments.service.js:
  *   type, table, signerField: the payload.type, the holding table and the
  *     payload field naming the signer;
+ *   rule (optional): the signing rule the signer's signatures must meet
+ *     (account-signatures.js), in place of any two pairs; the
+ *     breakGlassCancel names BREAK_GLASS_PAIR;
  *   requiredStake(stake): null, or a reason when the signer's stake (as
  *     stakes.queries.js findStake returns it) does not qualify; or null
  *     when the kind needs no stake;

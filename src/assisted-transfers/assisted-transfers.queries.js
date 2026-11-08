@@ -1,12 +1,16 @@
 import { query } from '../db/pool.js';
 
 /**
- * SQL for the assisted_transfers table: transfers out of assisted accounts
- * waiting for two attestations before a leader round writes them
- * (db/schema.sql). Pending's twin, with three slots for the follow-ups
+ * SQL for the assisted_transfers table: transfers out of assisted accounts,
+ * and since 2026-11-08 break-glass moves (breakGlassTransfer, docs/schemas.md
+ * section 22), waiting for two attestations before a leader round writes
+ * them (db/schema.sql). Pending's twin, with three slots for the follow-ups
  * attached to the transfer: attestation_1, attestation_2 and cancellation,
  * each a whole signed object with its own approved flag. Mirrors
- * locked-transactions.queries.js.
+ * locked-transactions.queries.js. future_date is the moment a break-glass
+ * move out of a guarded or vault account may be written, its createdAt;
+ * null for an assisted transfer and for a move out of a spending or
+ * assisted account. A row is ready only once it has passed.
  *
  * Ids are Buffers of 32 raw bytes, matching the BYTEA columns; pg sends a
  * Buffer parameter as bytea. Slot names come from ASSISTED_SLOTS, a fixed
@@ -31,12 +35,13 @@ const UNIQUE_VIOLATION = '23505';
 
 const COLUMNS = `transaction_id, account_id, og_transaction, approved,
   attestation_1, attestation_1_approved, attestation_2, attestation_2_approved,
-  cancellation, cancellation_approved`;
+  cancellation, cancellation_approved, future_date`;
 
 /**
- * A row as { transactionId, accountId, ogTransaction, approved, slots },
- * where slots maps each slot name to { object, approved }: the signed object
- * stored there (null while the slot is empty) and its approved flag.
+ * A row as { transactionId, accountId, ogTransaction, approved, futureDate,
+ * slots }, where futureDate is the unlock moment (a Date, or null) and slots
+ * maps each slot name to { object, approved }: the signed object stored
+ * there (null while the slot is empty) and its approved flag.
  */
 function toRow(row) {
   const slots = {};
@@ -48,6 +53,7 @@ function toRow(row) {
     accountId: row.account_id,
     ogTransaction: row.og_transaction,
     approved: row.approved,
+    futureDate: row.future_date,
     slots,
   };
 }
@@ -59,19 +65,21 @@ function checkSlot(slot) {
 /**
  * Inserts one transaction. `approved` and the slots take their defaults.
  * `ogTransaction` is the submission exactly as received, stored as JSONB
- * like pending.og_transaction.
+ * like pending.og_transaction. `futureDate` (a Date) is the unlock moment of
+ * a break-glass move out of a guarded or vault account; undefined for an
+ * assisted transfer and for the other moves, stored as NULL.
  *
  * Returns { inserted: true }, or { inserted: false, conflict } when a row
  * with this transaction_id (conflict 'transaction_id') or for this account_id
  * (conflict 'account_id') already exists: the backstop for two requests
  * racing past the check that runs first. Any other database error is thrown.
  */
-export async function insertAssisted({ transactionId, accountId, ogTransaction }) {
+export async function insertAssisted({ transactionId, accountId, futureDate, ogTransaction }) {
   try {
     await query(
-      `INSERT INTO assisted_transfers (transaction_id, account_id, og_transaction)
-       VALUES ($1, $2, $3::jsonb)`,
-      [transactionId, accountId, JSON.stringify(ogTransaction)],
+      `INSERT INTO assisted_transfers (transaction_id, account_id, og_transaction, future_date)
+       VALUES ($1, $2, $3::jsonb, $4)`,
+      [transactionId, accountId, JSON.stringify(ogTransaction), futureDate ?? null],
     );
     return { inserted: true };
   } catch (err) {
@@ -137,14 +145,17 @@ export async function markAssistedSlotApproved(transactionId, slot) {
 }
 
 /**
- * The ids of every assisted transfer a leader round may write, in id order,
- * as hex strings: approved, both attestations approved, and no cancellation
- * present (approved or not; present blocks).
+ * The ids of every assisted transfer or break-glass move a leader round may
+ * write, in id order, as hex strings: approved, both attestations approved,
+ * no cancellation present (approved or not; present blocks), and its unlock
+ * moment passed when it has one (future_date null or not after now, by the
+ * database's clock, the one findDueIds reads).
  */
 export async function findReadyAssistedIds() {
   const { rows } = await query(
     `SELECT transaction_id FROM assisted_transfers
      WHERE approved AND attestation_1_approved AND attestation_2_approved AND cancellation IS NULL
+       AND (future_date IS NULL OR future_date <= now())
      ORDER BY transaction_id`,
   );
   return rows.map((row) => row.transaction_id.toString('hex'));

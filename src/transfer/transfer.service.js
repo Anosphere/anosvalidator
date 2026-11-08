@@ -1,4 +1,4 @@
-import { ANY_TWO_PAIRS, verifyAccountSignatures } from '../accounts/account-signatures.js';
+import { ANY_TWO_PAIRS, BREAK_GLASS_PAIR, verifyAccountSignatures } from '../accounts/account-signatures.js';
 import { ASSISTED, GUARDED, SPENDING, VAULT } from '../accounts/account-types.js';
 import { env } from '../config/env.js';
 import { canonicalHash, canonicalize } from '../crypto/canonical.js';
@@ -13,6 +13,7 @@ import {
 } from '../held-transactions/held-transactions.js';
 import { LOCKED_CONFLICT_REASONS } from '../locked-transactions/locked-transactions.queries.js';
 import { PENDING_CONFLICT_REASONS } from '../pending/pending.queries.js';
+import { moveStake } from '../stakes/stakes.queries.js';
 import { isObject } from '../util/is-object.js';
 import { sendProofOfAcceptance, sendTransactionApproval } from '../validators/validators.messages.js';
 import { settleNoAnswers } from '../votes/votes.messages.js';
@@ -33,8 +34,11 @@ export const ASSISTED_ANOS_TRANSFER = 'assistedAnosTransfer';
 /** The transactionType of an escrow transfer, out of a spending account, released by the seller, the buyer or arbitrators. */
 export const ESCROW_TRANSFER = 'escrowTransfer';
 
+/** The transactionType of a break-glass move: the whole balance of an account whose keys were lost with its passkey, to a new account of the same type, signed by the break-glass pair, attested by two attestors (docs/schemas.md section 22). */
+export const BREAK_GLASS_TRANSFER = 'breakGlassTransfer';
+
 /**
- * The five transfer types, each with the one account type it may be sent
+ * The six transfer types, each with the one account type it may be sent
  * from (a guarded account can only send a guardedAnosTransfer, a vault
  * account only a vaultAnosTransfer, an assisted account only an
  * assistedAnosTransfer, a spending account a plain anosTransfer or an
@@ -48,6 +52,16 @@ export const ESCROW_TRANSFER = 'escrowTransfer';
  * transfer in escrow_transfers for the seller's success signature or the
  * arbitrators' verdicts; neither has a lock, and their createdAt is not
  * checked.
+ *
+ * The sixth type, breakGlassTransfer (2026-11-08, section 22), may be sent
+ * from an account of any of the four types (accountType null), to a new
+ * account of the sender's type. Its lock is the sender's type's
+ * (lockMinutes null: lockMinutesFor decides from the account row), so a
+ * move out of a guarded or vault account is dated that lock ahead like the
+ * account's own transfers, and one out of a spending or assisted account
+ * is not checked. It is held with the assisted transfers, waiting for two
+ * attestations and, when it has a lock, for its moment (future_date), under
+ * the break-glass rule: the break-glass pair alone.
  */
 const TRANSFER_TYPES = new Map([
   [ANOS_TRANSFER, { accountType: SPENDING, lockMinutes: 0, heldIn: PENDING, rule: ANY_TWO_PAIRS }],
@@ -55,9 +69,17 @@ const TRANSFER_TYPES = new Map([
   [VAULT_ANOS_TRANSFER, { accountType: VAULT, lockMinutes: env.locks.vaultMinutes, heldIn: LOCKED_TRANSACTIONS, rule: ANY_TWO_PAIRS }],
   [ASSISTED_ANOS_TRANSFER, { accountType: ASSISTED, lockMinutes: 0, heldIn: ASSISTED_TRANSFERS, rule: ANY_TWO_PAIRS }],
   [ESCROW_TRANSFER, { accountType: SPENDING, lockMinutes: 0, heldIn: ESCROW_TRANSFERS, rule: ANY_TWO_PAIRS }],
+  [BREAK_GLASS_TRANSFER, { accountType: null, lockMinutes: null, heldIn: ASSISTED_TRANSFERS, rule: BREAK_GLASS_PAIR }],
 ]);
 
-/** True when `transactionType` is one of the five transfer types. */
+/** The time lock a break-glass move waits out: the sender's type's lock (guarded, vault), none otherwise. */
+function lockMinutesFor(accountType) {
+  if (accountType === GUARDED) return env.locks.guardedMinutes;
+  if (accountType === VAULT) return env.locks.vaultMinutes;
+  return 0;
+}
+
+/** True when `transactionType` is one of the six transfer types. */
 export function isTransferType(transactionType) {
   return TRANSFER_TYPES.has(transactionType);
 }
@@ -69,7 +91,7 @@ const MAX_BIGINT = 2n ** 63n - 1n;
 
 /**
  * Validates a transfer submission, { payload, signatures }, of any of the
- * five transfer types.
+ * six transfer types.
  *
  * `payload` is the signed part (accountId, transactionId,
  * previousTransactionId, transactionType, amount, accountIdTo, createdAt).
@@ -77,7 +99,7 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  * `payload` by the sending account's keys, which the accounts table holds.
  *
  * The checks, in the order they run:
- *   1. the shape, with transactionType one of the five; the three ids are
+ *   1. the shape, with transactionType one of the six; the three ids are
  *      SHA-256 digests; amount is a positive integer (millionths of a unit)
  *      as a decimal string that fits a BIGINT;
  *   2a. an account with this accountId exists. Its keys, balance and type
@@ -85,16 +107,21 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  *   3. the signatures, under the type's signing rule
  *      (account-signatures.js verifyAccountSignatures): any two of the
  *      three key pairs, both keys of each pair, every one verifying
- *      against the account's stored public key;
+ *      against the account's stored public key; for a breakGlassTransfer
+ *      the break-glass pair alone;
  *   4. transactionId is the SHA-256 of the canonical JSON of the payload
  *      without transactionId, which is how the web app makes it;
  *   1b. for a guarded or vault transfer, createdAt is the account's lock
  *      ahead of now: at least the lock, at most the lock plus
  *      LOCK_OFFSET_MINUTES (env.js), the slack the wallet adds so a
- *      transfer that takes a while to arrive still passes. The other types'
- *      createdAt is not checked here;
+ *      transfer that takes a while to arrive still passes. A
+ *      breakGlassTransfer out of a guarded or vault account is checked
+ *      the same way against the sender's type's lock (lockMinutesFor);
+ *      the other types' createdAt, and a break-glass move out of a
+ *      spending or assisted account, are not checked here;
  *   2b. the account is of the type this transfer type is for
- *      (TRANSFER_TYPES);
+ *      (TRANSFER_TYPES); skipped for a breakGlassTransfer, which an
+ *      account of any type may send;
  *   5. previousTransactionId is the account's newest transaction on the
  *      garlic chain (its creation, the OG hash, or its last transfer). That
  *      chains the account's transactions together and lets each previous id
@@ -105,6 +132,9 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  *      transaction with this transactionId. One query covers the twelve
  *      lookups. The database constraints are the backstop if two validators
  *      race;
+ *   6b. for a breakGlassTransfer, accountIdTo is an account of the
+ *      sender's type (findExisting's accountToType): the money moves to a
+ *      new account of the same kind;
  *   7. the account's balance covers the amount. One held transaction per
  *      account means nothing else can spend from it before this is written.
  *
@@ -117,9 +147,10 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  * same shape as verifyCreateAccount gives so the validator-to-validator flow
  * treats both alike, plus heldIn, the holding table the transfer waits in
  * (held-transactions.js), and futureDate: for a guarded or vault transfer,
- * createdAt as a Date, the moment the transfer may be written; undefined for
- * the other types. Or { ok: false, reason } with a reason that is safe to
- * send back to the caller. Storing is receiveAnosTransfer's job.
+ * and for a break-glass move out of a guarded or vault account, createdAt
+ * as a Date, the moment the transfer may be written; undefined for the
+ * rest. Or { ok: false, reason } with a reason that is safe to send back
+ * to the caller. Storing is receiveAnosTransfer's job.
  */
 export async function verifyAnosTransfer(body) {
   const checked = await checkTransferSignaturesAndIds(body);
@@ -144,8 +175,9 @@ export async function verifyAnosTransfer(body) {
     futureDate = new Date(createdAt);
   }
 
-  // 2b. The sending account is of the type this transfer type is for.
-  if (account.type !== accountType) {
+  // 2b. The sending account is of the type this transfer type is for; a
+  //     break-glass move may leave an account of any type.
+  if (accountType !== null && account.type !== accountType) {
     return { ok: false, reason: `${payload.transactionType} can only be sent from a ${accountType} account` };
   }
 
@@ -162,6 +194,10 @@ export async function verifyAnosTransfer(body) {
   const existing = await findExisting({ accountId, accountIdTo, transactionId });
   if (!existing.accountToExists) {
     return { ok: false, reason: 'no account with this accountIdTo' };
+  }
+  // 6b. A break-glass move lands in an account of the sender's type.
+  if (payload.transactionType === BREAK_GLASS_TRANSFER && existing.accountToType !== account.type) {
+    return { ok: false, reason: 'payload.accountIdTo is not an account of the same type as payload.accountId' };
   }
   if (existing.pendingTransaction) {
     return { ok: false, reason: PENDING_CONFLICT_REASONS.transaction_id };
@@ -206,7 +242,7 @@ export async function verifyAnosTransfer(body) {
 }
 
 /**
- * The shape, signature and id checks of a transfer of any of the five
+ * The shape, signature and id checks of a transfer of any of the six
  * types: the shape and check 1 (the ids and the amount); 2a, the sending
  * account exists, read on `client` when one is given (the replay of a chain
  * chunk, whose accounts written earlier in the same chunk are not committed
@@ -216,14 +252,16 @@ export async function verifyAnosTransfer(body) {
  * table, no balance. Returns { ok: true, accountId, accountIdTo, amount
  * (BigInt), account (transfer.queries.js findAccount's row), transactionId,
  * accountType, lockMinutes, heldIn } with the ids as 32-byte Buffers, or
- * { ok: false, reason }.
+ * { ok: false, reason }. lockMinutes is the type's, or for a
+ * breakGlassTransfer the sender's type's (lockMinutesFor), read off the
+ * account row found in 2a.
  */
 export async function checkTransferSignaturesAndIds(body, { client } = {}) {
   const problem = checkShape(body);
   if (problem) return { ok: false, reason: problem };
 
   const { payload, signatures } = body;
-  const { accountType, lockMinutes, heldIn, rule } = TRANSFER_TYPES.get(payload.transactionType);
+  const { accountType, lockMinutes: typeLockMinutes, heldIn, rule } = TRANSFER_TYPES.get(payload.transactionType);
 
   // 1. Ids and amount.
   const accountId = decodeDigest(payload.accountId);
@@ -238,9 +276,10 @@ export async function checkTransferSignaturesAndIds(body, { client } = {}) {
   }
   const amount = BigInt(payload.amount);
 
-  // 2a. The sending account exists.
+  // 2a. The sending account exists. Its type decides a break-glass move's lock.
   const account = await findAccount(accountId, client);
   if (!account) return { ok: false, reason: 'no account with this accountId' };
+  const lockMinutes = typeLockMinutes ?? lockMinutesFor(account.type);
 
   // 3. Signatures, under the type's rule.
   const message = Buffer.from(canonicalize(payload), 'utf8');
@@ -309,7 +348,7 @@ export async function receiveAnosTransfer(body) {
 }
 
 /**
- * Writes one transfer, of any of the five types, on `client`, inside the
+ * Writes one transfer, of any of the six types, on `client`, inside the
  * batch that accounts.service.js writeTransactions runs: its garlic chain
  * link, with the sender as account_id, the receiver as account_id_to, the
  * amount, and the transactionType as its type. trans_hash and record_hash
@@ -318,11 +357,14 @@ export async function receiveAnosTransfer(body) {
  * previous link's record_hash.
  *
  * The balances move in the database: the garlic_chain_apply_anos_transfer
- * trigger (db/schema.sql), which fires for all five types, deducts the
+ * trigger (db/schema.sql), which fires for all six types, deducts the
  * amount from the sender and adds it to the receiver as the link is
  * inserted, and fails the insert, and with it the batch, if either account
- * is missing or the sender would go negative. Returns the link's
- * record_hash for the next link to chain on.
+ * is missing or the sender would go negative. A breakGlassTransfer also
+ * moves the sender's stakes row to the receiver (stakes.queries.js
+ * moveStake), as a transferToFund adds stake, in the same transaction; the
+ * roles move with it. Returns the link's record_hash for the next link to
+ * chain on.
  */
 export async function writeAnosTransfer(client, { transactionId, accountId, ogTransaction }, previousRecordHash) {
   const { payload } = ogTransaction;
@@ -340,6 +382,7 @@ export async function writeAnosTransfer(client, { transactionId, accountId, ogTr
     type: payload.transactionType,
     ogTransaction,
   });
+  if (payload.transactionType === BREAK_GLASS_TRANSFER) await moveStake(client, accountId, decodeDigest(payload.accountIdTo));
   return recordHash;
 }
 
@@ -352,7 +395,7 @@ function checkShape(body) {
   if (typeof payload.transactionId !== 'string') return 'payload.transactionId must be a string';
   if (typeof payload.previousTransactionId !== 'string') return 'payload.previousTransactionId must be a string';
   if (!isTransferType(payload.transactionType)) {
-    return `payload.transactionType must be "${ANOS_TRANSFER}", "${GUARDED_ANOS_TRANSFER}", "${VAULT_ANOS_TRANSFER}", "${ASSISTED_ANOS_TRANSFER}" or "${ESCROW_TRANSFER}"`;
+    return `payload.transactionType must be "${ANOS_TRANSFER}", "${GUARDED_ANOS_TRANSFER}", "${VAULT_ANOS_TRANSFER}", "${ASSISTED_ANOS_TRANSFER}", "${ESCROW_TRANSFER}" or "${BREAK_GLASS_TRANSFER}"`;
   }
   if (typeof payload.amount !== 'string') return 'payload.amount must be a string';
   if (typeof payload.accountIdTo !== 'string') return 'payload.accountIdTo must be a string';

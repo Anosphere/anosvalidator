@@ -51,7 +51,7 @@ export function createApp() {
   app.use(accountsRouter); // owns top-level paths such as /create-account
   app.use(transferRouter); // owns /anos-transfer
   app.use(fundRouter); // owns /transfer-to-fund, /fund-proposal and /guardian-vote
-  app.use(assistedTransfersRouter); // owns /attestation and /assisted-transfer-cancel
+  app.use(assistedTransfersRouter); // owns /attestation, /assisted-transfer-cancel and /break-glass-cancel
   app.use(escrowRouter); // owns /escrow-signature
   app.use(readsRouter); // the account level: /get-account, /list-transactions, /list-escrows, /get-assisted-transfer and /get-locked-transfer; the attestor reads: /list-assisted-transfers and /list-disputed-escrows
   app.use(validatorsRouter); // validator-to-validator messages: /transaction-approval and the rest, the chunk read, the votes, the join

@@ -6,18 +6,20 @@ import { pool, query } from '../db/pool.js';
  */
 
 /**
- * The account a transfer is sent from: the six public keys a transfer may be
- * signed with, as Buffers of raw bytes (null where the account has none),
- * its balance and its type. current_balance is a BIGINT, which pg hands over
- * as a decimal string so nothing is lost; the service compares it as a
- * BigInt. Returns null when there is no account with this id. Reads on
- * `client` when one is given (the replay of a chain chunk, inside its
- * transaction) and through the pool otherwise.
+ * The account a transfer is sent from: the eight public keys a transfer or
+ * a follow-up may be verified with (the three signing pairs and, since
+ * 2026-11-08, the break-glass pair), as Buffers of raw bytes (null where
+ * the account has none), its balance and its type. current_balance is a
+ * BIGINT, which pg hands over as a decimal string so nothing is lost; the
+ * service compares it as a BigInt. Returns null when there is no account
+ * with this id. Reads on `client` when one is given (the replay of a chain
+ * chunk, inside its transaction) and through the pool otherwise.
  */
 export async function findAccount(accountId, client = pool) {
   const { rows } = await client.query(
     `SELECT public_key1, public_key_pq1, public_key2, public_key_pq2,
-            alt_wallet_pk, alt_wallet_pk_pq, current_balance, type
+            alt_wallet_pk, alt_wallet_pk_pq, break_glass_pk, break_glass_pk_pq,
+            current_balance, type
      FROM accounts WHERE account_id = $1`,
     [accountId],
   );
@@ -30,6 +32,8 @@ export async function findAccount(accountId, client = pool) {
     publicKeyPq2: row.public_key_pq2,
     altWalletPk: row.alt_wallet_pk,
     altWalletPkPq: row.alt_wallet_pk_pq,
+    breakGlassPk: row.break_glass_pk,
+    breakGlassPkPq: row.break_glass_pk_pq,
     currentBalance: row.current_balance,
     type: row.type,
   };
@@ -60,12 +64,15 @@ export async function findLatestTransactionId(accountId) {
  * holding tables (pending, locked_transactions, assisted_transfers,
  * escrow_transfers, fund_proposals), and no garlic chain transaction with
  * this transactionId. Each EXISTS is a primary-key or unique-index lookup,
- * so this costs the same on an empty table as on a full one.
+ * so this costs the same on an empty table as on a full one. The receiving
+ * account's type comes back with it (accountToType, null when there is no
+ * such account; every account row has one), for the break-glass transfer's
+ * same-type check (2026-11-08).
  */
 export async function findExisting({ accountId, accountIdTo, transactionId }) {
   const { rows } = await query(
     `SELECT
-       EXISTS (SELECT 1 FROM accounts            WHERE account_id     = $2) AS account_to_exists,
+       (SELECT type FROM accounts WHERE account_id = $2) AS account_to_type,
        EXISTS (SELECT 1 FROM pending             WHERE transaction_id = $3) AS pending_transaction,
        EXISTS (SELECT 1 FROM pending             WHERE account_id     = $1) AS pending_for_account,
        EXISTS (SELECT 1 FROM locked_transactions WHERE transaction_id = $3) AS locked_transaction,
@@ -81,7 +88,8 @@ export async function findExisting({ accountId, accountIdTo, transactionId }) {
   );
   const row = rows[0];
   return {
-    accountToExists: row.account_to_exists,
+    accountToExists: row.account_to_type !== null,
+    accountToType: row.account_to_type,
     pendingTransaction: row.pending_transaction,
     pendingForAccount: row.pending_for_account,
     lockedTransaction: row.locked_transaction,

@@ -24,7 +24,12 @@ disagree before then, this file wins.
   key2/postQuantumKey2 and walletKey/walletPostQuantumKey, both halves of
   each pair present, every signature present verifying against the
   account's stored key. Until 2026-11-07 assisted transfers had a rule of
-  their own, pair one and the wallet pair (section 20).
+  their own, pair one and the wallet pair (section 20). Since 2026-11-08 a
+  second rule, **the break-glass pair**, for the `breakGlassTransfer` and
+  its `breakGlassCancel` alone: breakGlassKey/breakGlassPostQuantumKey,
+  both present and verifying against `break_glass_pk` and
+  `break_glass_pk_pq`, and no signature from the three pairs beside them
+  (section 22).
 - A transaction waits in a **holding table** until a leader round writes it.
   There are five: `pending`, `locked_transactions`, `assisted_transfers`,
   `escrow_transfers` and `fund_proposals`. All five share: `transaction_id`
@@ -34,8 +39,10 @@ disagree before then, this file wins.
   validator accepted the transaction. A submission whose transaction id or
   account id is found in any holding table or on the chain is refused.
 - A **follow-up** is a signed object attached to a transaction that is
-  waiting in a holding table: an attestation, a cancellation, a vote, an
-  escrow signature or verdict. Each is stored in or next to the row with its
+  waiting in a holding table: an attestation, a cancellation (the sender's
+  `assistedTransferCancel` or, since 2026-11-08, the break-glass pair's
+  `breakGlassCancel`), a vote, an escrow signature or verdict. Each is
+  stored in or next to the row with its
   own approved flag and goes round the validators the way a transaction does
   (section 9).
 - A row that leaves a holding table is deleted (`pending`,
@@ -116,16 +123,24 @@ CREATE TABLE IF NOT EXISTS assisted_transfers (
   attestation_2_approved  BOOLEAN NOT NULL DEFAULT false,
   cancellation            JSONB,
   cancellation_approved   BOOLEAN NOT NULL DEFAULT false,
+  future_date             TIMESTAMPTZ,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
-Pending's twin for assisted transfers. `attestation_1` and `attestation_2`
+Pending's twin for assisted transfers and, since 2026-11-08, for break-glass
+moves (`breakGlassTransfer`, section 22), told apart by
+`og_transaction.payload.transactionType`. `attestation_1` and `attestation_2`
 hold whole attestation objects, `{ payload, signatures }` as received, the
 first to arrive in slot 1. `cancellation` holds the sender's signed
-`assistedTransferCancel` while its round runs; once approved on a validator,
-that validator moves the row to `logs`.
+`assistedTransferCancel`, or on a break-glass row the break-glass pair's
+`breakGlassCancel`, while its round runs; once approved on a validator,
+that validator moves the row to `logs`. `future_date` is the moment a
+break-glass move may be written, its `createdAt` when the sender is a
+guarded or vault account; NULL for an assisted transfer and for a move out
+of a spending or assisted account. A row with a moment is ready only once it
+has passed.
 
 ### escrow_transfers
 
@@ -232,11 +247,11 @@ after a time; archives are kept.
 
 ### Changes to existing tables
 
-- `garlic_chain_apply_anos_transfer` fires for seven link types:
+- `garlic_chain_apply_anos_transfer` fires for eight link types:
   `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`,
-  `assistedAnosTransfer`, `escrowTransfer`, `transferToFund` and
-  `transferFromFund`. Its error messages name `NEW.type` instead of
-  `anosTransfer`.
+  `assistedAnosTransfer`, `escrowTransfer`, `breakGlassTransfer` (since
+  2026-11-08, section 22), `transferToFund` and `transferFromFund`. Its
+  error messages name `NEW.type` instead of `anosTransfer`.
 - The comments on `locked_transactions` no longer say assisted accounts
   have a time lock. They do not.
 - `pending`, `garlic_chain`, `accounts` and `validators` are unchanged.
@@ -246,7 +261,8 @@ after a time; archives are kept.
 A transaction is `{ payload, signatures }` with `payload.transactionType`
 naming its kind. The four existing kinds, `accountCreation`,
 `anosTransfer`, `guardedAnosTransfer` and `vaultAnosTransfer`, are
-unchanged and documented in the README. Four kinds are added.
+unchanged and documented in the README. Four kinds are added here, and a
+fifth, the `breakGlassTransfer`, on 2026-11-08 (4.5, section 22).
 
 Shared by every transfer kind, old and new, unless a section says
 otherwise: the transfer payload of the README (`accountId`,
@@ -376,6 +392,36 @@ links are implied. After the write the row and its votes move to
 `archives`, outcome `written`. A proposal whose vote fails moves to
 `archives`, outcome `voteFailed`, and nothing is written.
 
+### 4.5 breakGlassTransfer
+
+Added 2026-11-08 (section 22). Sent from an account of **any** of the four
+types at `POST /anos-transfer`, by the break-glass pair the account was
+created with, once its user keys died with the passkey: the whole balance,
+to a new account of the **same type** in the same pod. Signing rule **the
+break-glass pair alone**: `breakGlassKey` and `breakGlassPostQuantumKey`
+both present and verifying against `break_glass_pk` and `break_glass_pk_pq`,
+and no signature from the three user pairs beside them (one rule per
+object, no mixing). The receiver must be an existing account of the
+sender's type, checked right after the receiver's existence
+(`payload.accountIdTo is not an account of the same type as
+payload.accountId`); the masterpod checks it again when the moves are
+filed. It follows the sender's type's lock: from a guarded or vault account
+`createdAt` is checked as the account's own transfers are, at least the
+lock and at most the lock plus `LOCK_OFFSET_MINUTES` ahead, and that moment
+is kept as `future_date`; from a spending or assisted account `createdAt`
+is not checked and `future_date` is NULL. Held in `assisted_transfers`.
+Ready for a leader round as 4.1, approved, both attestations approved, no
+cancellation present, and, when it has one, its moment passed
+(`future_date IS NULL OR future_date <= now()`). The write is one link of
+type `breakGlassTransfer` with the balance trigger, and in the same
+database transaction the sender's `stakes` row moves to the receiver, every
+purpose added to the receiver's row (created when it has none) and the
+sender's row deleted, so the roles move with the money; the catch-up replay
+does the same. After the write the row moves to `logs`, outcome `written`,
+as an assisted transfer does. The attestations are the same two, from two
+attestors with attestor stake, neither the sender (5.2); the cancel is
+either 5.3 by the account's own keys or 5.7 by the break-glass pair.
+
 ## 5. Follow-ups
 
 ### 5.1 Common rules
@@ -384,13 +430,13 @@ Every follow-up is `{ payload, signatures }`:
 
 ```
 payload: {
-  type:          the kind, one of the seven below
+  type:          the kind, one of the eight below
   transactionId: the held transaction it attaches to
   <signer>:      the signer's account id, under the field the kind names
   signedAt:      ISO 8601, recorded, not compared with the clock
   ...the kind's own fields
 }
-signatures: the signer's account keys, any two pairs
+signatures: the signer's account keys, any two pairs; a breakGlassCancel the break-glass pair (5.7)
 ```
 
 Checks every kind runs, in order: the shape; the held row exists in the
@@ -419,8 +465,9 @@ canonical payload, which they compute; the signer does not send it.
 payload: { type: "attestation", transactionId, accountId, attestorId, signedAt }
 ```
 
-For an `assistedAnosTransfer`. `accountId` is the transfer's sender and must
-equal the row's `account_id`. Signer: `attestorId`, with
+For an `assistedAnosTransfer` or a `breakGlassTransfer` (4.5). `accountId`
+is the transfer's sender and must equal the row's `account_id`. Signer:
+`attestorId`, with
 `attestor_stake` at or above its minimum. Own checks: `attestorId` is not
 `accountId`; `attestorId` is not the attestor in the other slot. Stored in
 `attestation_1` if empty, else `attestation_2` if empty, else refused. No
@@ -436,7 +483,10 @@ Signer: `accountId`, the row's `account_id`, the sender. Own checks: no
 cancellation present. Accepted until the transfer is written, even when both
 attestations are approved; readiness excludes rows with a cancellation
 present. Stored in `cancellation`. Effect on acceptance: the validator moves
-the row to `logs`, outcome `userCancelled`.
+the row to `logs`, outcome `userCancelled`. Accepted on a break-glass row
+(4.5) as on an assisted one: nothing checks the row's type, so an owner who
+still has their device stops a false move with the account's own keys under
+any two pairs (section 22).
 
 ### 5.4 guardianVote
 
@@ -486,6 +536,23 @@ acceptance: when two approved rows say `cancel`, the row and its
 arbitrations move to `archives`, outcome `arbitratedCancel`. When two
 approved rows say `success`, the escrow is ready (section 6).
 
+### 5.7 breakGlassCancel
+
+```
+payload: { type: "breakGlassCancel", transactionId, accountId, signedAt }
+```
+
+Added 2026-11-08 (section 22), at `POST /break-glass-cancel`. For a
+`breakGlassTransfer` (4.5). Signer: `accountId`, the row's `account_id`,
+the sender, under the rule **the break-glass pair alone** instead of any
+two pairs: the kind names its rule and the common signature check uses it.
+No stake. Own checks: the row's transaction is a `breakGlassTransfer`
+(`not a break-glass transfer`); no cancellation present. Accepted until the
+move is written, even when both attestations are approved. Stored in
+`cancellation`, the slot 5.3 uses. Effect on acceptance: the validator
+moves the row to `logs`, outcome `userCancelled`. No wallet page offers it
+yet; the owner's dispute path is a later plan.
+
 ## 6. The leader round
 
 Unchanged in shape: ready announcement, every validator's ready list, the
@@ -498,7 +565,7 @@ Each validator's ready list, in id order:
 | --------------------- | ---------- |
 | `pending`             | approved |
 | `locked_transactions` | approved, `future_date <= now()` |
-| `assisted_transfers`  | approved, `attestation_1_approved`, `attestation_2_approved`, `cancellation IS NULL` |
+| `assisted_transfers`  | approved, `attestation_1_approved`, `attestation_2_approved`, `cancellation IS NULL`, and `future_date IS NULL OR future_date <= now()` (a break-glass move's moment, section 22) |
 | `escrow_transfers`    | approved, `cancel_signature IS NULL`, and `success_signature_approved` or (`dispute_signature_approved` and at least two approved `success` verdicts) |
 | `fund_proposals`      | approved, `vote_closes_at <= now()`, and the tally passes |
 
@@ -514,6 +581,8 @@ The write, one database transaction per validator, rows in id order:
 - `accountCreation`: as today.
 - `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`,
   `assistedAnosTransfer`, `escrowTransfer`: one link, the balance trigger.
+- `breakGlassTransfer`: one link, the balance trigger, the sender's stakes
+  row moved to the receiver (section 22).
 - `transferToFund`: one link, the balance trigger, the stake added.
 - `fundProposal`: the proposal link, then the payout links in index order,
   the balance trigger for each, the stakes reduced for payouts with
@@ -558,11 +627,12 @@ through their wallets:
 | Method | Path                       | Takes |
 | ------ | -------------------------- | ----- |
 | POST   | `/create-account`          | `accountCreation` (unchanged) |
-| POST   | `/anos-transfer`           | `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`, `assistedAnosTransfer`, `escrowTransfer` |
+| POST   | `/anos-transfer`           | `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`, `assistedAnosTransfer`, `escrowTransfer`, `breakGlassTransfer` (4.5) |
 | POST   | `/transfer-to-fund`        | `transferToFund` |
 | POST   | `/fund-proposal`           | `fundProposal` |
 | POST   | `/attestation`             | `attestation` |
 | POST   | `/assisted-transfer-cancel`| `assistedTransferCancel` |
+| POST   | `/break-glass-cancel`      | `breakGlassCancel` (5.7) |
 | POST   | `/guardian-vote`           | `guardianVote` |
 | POST   | `/escrow-signature`        | `escrowSuccess`, `escrowCancel`, `escrowDispute`, `escrowVerdict`, by `payload.type` |
 
@@ -572,22 +642,27 @@ the validator called and has been sent round, or `400` + `{ error }`. The
 
 Account level (added 2026-10-25 for the wallet; the wallet spec, section
 5.3 and 5.4 of `~/Desktop/Z/web_app/docs/schemas.md`, is the spec): an
-account signing with pair one reads about itself. The envelope is
+account signing with pair one, or since 2026-11-08 with its break-glass
+pair, reads about itself. The envelope is
 `{ payload: { accountId, path, timestamp, nonce, body }, signatures: { ecdsa,
 mldsa } }`, checked by `src/auth/require-account.js`: the shape (`400 bad
 request shape`), the path (`401 path mismatch`), the timestamp within
 `TIMESTAMP_WINDOW_SECONDS` (`401 timestamp outside window`), the account
 (`400 invalid accountId`, `401 unknown account`, `401 bad signature` against
-`public_key1` and `public_key_pq1`), the nonce (`400 invalid nonce`, `401
-replay`; the new `nonces` table, the keyholder's).
+`public_key1` and `public_key_pq1`, or failing that against `break_glass_pk`
+and `break_glass_pk_pq`, so a recovered person reads an account whose user
+keys are gone with the seed the bankers delivered, section 22), the nonce
+(`400 invalid nonce`, `401 replay`; the new `nonces` table, the
+keyholder's). Every held-transfer read below answers `type`, the payload's
+`transactionType`, since 2026-11-08.
 
 | Method | Path                 | Answers |
 | ------ | -------------------- | ------- |
 | POST   | `/get-account`       | `200 { accountId, type, balance: millionths as a decimal string, latestTransactionId: hex \| null, createdAt }`; `latestTransactionId` is the link with the highest `position` whose `account_id` is the signer |
 | POST   | `/list-transactions` | body `{ beforePosition?, limit? (default 50, at most 200), from?, to? (ISO 8601; added 2026-11-06, section 18.3) }`; `200 { transactions: [ { transactionId, position, type, accountId, accountIdTo, amount, createdAt } ], pending: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, approved } ] }`, the links where the signer sent or received, `position` descending, with `createdAt` at or after `from` and before `to` when given, and its pending row (at most one) read from `og_transaction.payload`, not cut by the dates |
-| POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
-| POST   | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, stage, attestations } \| null }`, the signer's own held assisted transfer, the `assisted_transfers` row whose `account_id` is the signer (at most one), or `null` when there is none (added 2026-11-06, section 17) |
-| POST   | `/get-locked-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, unlocksAt, stage } \| null }`, the signer's own locked transfer, the `locked_transactions` row whose `account_id` is the signer (at most one), a guarded or vault transfer waiting out its time lock, or `null` when there is none (added 2026-11-06, section 18) |
+| POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
+| POST   | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, type, accountId, accountIdTo, amount, createdAt, stage, attestations, unlocksAt } \| null }`, the signer's own held assisted transfer or break-glass move, the `assisted_transfers` row whose `account_id` is the signer (at most one), or `null` when there is none (added 2026-11-06, section 17; `type`, `unlocksAt` and the `locked` stage 2026-11-08, section 22) |
+| POST   | `/get-locked-transfer` | body `{}`; `200 { transfer: { transactionId, type, accountId, accountIdTo, amount, createdAt, unlocksAt, stage } \| null }`, the signer's own locked transfer, the `locked_transactions` row whose `account_id` is the signer (at most one), a guarded or vault transfer waiting out its time lock, or `null` when there is none (added 2026-11-06, section 18) |
 
 `/create-account` gained a fifth check after uniqueness, on the receiving
 validator only: the masterpod is asked `POST /get-anos-account { accountId }`
@@ -608,7 +683,8 @@ The transaction messages are unchanged: `transactionApproval` answered by
 `transactionApproved`, `proofOfTransactionAcceptance` answered by
 `transactionAccepted`, and the three leader calls. The receiver of a
 transaction approval picks the checks by `payload.transaction.payload.
-transactionType`, now one of eight kinds, and stores the transaction in the
+transactionType`, now one of nine kinds (the `breakGlassTransfer` since
+2026-11-08, section 22), and stores the transaction in the
 same holding table the originating validator used. The proof's receiver
 looks for the transaction across the five holding tables.
 
@@ -829,14 +905,17 @@ routes join `src/reads/`.
 
 | Method | Path | Answers |
 | ------ | ---- | ------- |
-| POST | `/list-assisted-transfers` | body `{}`; `200 { transfers: [ { transactionId, accountId, accountIdTo, amount, createdAt, attestorIds } ] }` |
-| POST | `/list-disputed-escrows` | body `{}`; `200 { escrows: [ { transactionId, accountId, accountIdTo, amount, createdAt, disputedBy, verdicts: [ { arbitratorId, verdict, approved } ] } ] }` |
+| POST | `/list-assisted-transfers` | body `{}`; `200 { transfers: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, attestorIds } ] }` |
+| POST | `/list-disputed-escrows` | body `{}`; `200 { escrows: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, disputedBy, verdicts: [ { arbitratorId, verdict, approved } ] } ] }` |
 
 `/list-assisted-transfers`: every `assisted_transfers` row on this
 validator with `approved`, `cancellation IS NULL` and an empty attestation
-slot (`attestation_1 IS NULL OR attestation_2 IS NULL`): the trades waiting
-for attestors. `accountId`, `accountIdTo`, `amount` and `createdAt` are
-read from `og_transaction.payload`; `attestorIds` lists
+slot (`attestation_1 IS NULL OR attestation_2 IS NULL`): the trades, and
+since 2026-11-08 the break-glass moves (section 22), waiting for attestors.
+`type` (`payload.transactionType`, `assistedAnosTransfer` or
+`breakGlassTransfer`, which the attestor edition tells the two apart by),
+`accountId`, `accountIdTo`, `amount` and `createdAt` are read from
+`og_transaction.payload`; `attestorIds` lists
 `payload.attestorId` of the attestations present, slot order, so a second
 attestor sees who signed first.
 
@@ -1412,17 +1491,22 @@ wins:
 | `stage` | The row | What it means |
 | ------- | ------- | ------------- |
 | `waiting` | `approved` false | not every validator has accepted the transfer yet; no follow-up is accepted on it (5.1) |
-| `cancelling` | `cancellation IS NOT NULL` | the sender's cancel is on it; once approved, the row moves to `logs` (5.3) |
-| `writing` | `attestation_1_approved` and `attestation_2_approved` | both attestations accepted by every validator; the next leader round writes it (section 6); the sender may still cancel until then (5.3) |
+| `cancelling` | `cancellation IS NOT NULL` | a cancel is on it, the sender's (5.3) or the break-glass pair's (5.7); once approved, the row moves to `logs` |
+| `locked` | `attestation_1_approved` and `attestation_2_approved`, and `future_date > now()` | a break-glass move out of a guarded or vault account (4.5, section 22): both attestations accepted, waiting out the sender's lock until `unlocksAt`; a cancel is still accepted. Added 2026-11-08 |
+| `writing` | `attestation_1_approved` and `attestation_2_approved` (and `future_date` NULL or passed) | both attestations accepted by every validator; the next leader round writes it (section 6); the sender may still cancel until then (5.3) |
 | `attesting` | none of the above | accepted, waiting for two approved attestations; the sender may cancel |
 
 A cancel is accepted until the transfer is written, even when both
 attestations are approved (5.3), and a cancellation present keeps the row
 off the ready list (section 6), so `cancelling` is decided before
 `writing`: a row with both attestations approved and a cancellation on it
-is being cancelled, not written. A wallet that meets a `stage` it does
-not know treats the transfer as held and offers no action, so a fifth
-stage added here cannot make it do the wrong thing.
+is being cancelled, not written. `locked` comes before `writing` for the
+same reason: a row with both attestations approved and its moment ahead is
+off the ready list until the moment passes, by the database's clock, the
+one the ready list reads. A wallet that meets a `stage` it does not know
+treats the transfer as held and offers no action, so the fifth stage,
+`locked`, added 2026-11-08, and any later one cannot make it do the wrong
+thing.
 
 ### 17.3 Notes from the build
 
@@ -2567,3 +2651,190 @@ no package file and no schema file changes; the doorman is not touched.
   the ready list. The slots are JSON columns with no time of their own, so
   an age limit there needs a time per slot. Not in this build; a
   testnet-month follow-up.
+
+## 22. The break-glass transfer (2026-11-08)
+
+Decided 2026-11-08 in a planning chat of five rounds, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/break-glass-plan-1.md`. Why: the two user
+pairs of every account (pair one and pair two) were wrapped under the
+anoPod encryption key, which the backup code also opens, so whoever rebuilt
+a backup code held the original signing keys, and pair one with pair two
+alone satisfies any two pairs. The recovery flow of 2026-10-26 handed a
+recovered person exactly those keys back, and the break-glass seed
+deposited with the keyholders for this very case was never used. From now
+on the wallet wraps the signing keys under a key from the passkey's PRF
+output alone: a lost passkey kills the old accounts' keys for good, and the
+break-glass key is what moves the money, to new accounts of the same type,
+through a new transaction type that two attestors sign like an assisted
+transfer, so that a stolen break-glass key is pointless on its own. Four
+repos in order, the validator (this step), the doorman (its spec, section
+5), the masterpod (its section 14) and the wallet (its section 11), then
+the architecture records; deployed after a reset of the testnet with a
+fresh genesis, every validator and its doorman before the masterpod and
+the wallet. This section is the validator's part, step 1 of the plan.
+
+### 22.1 The decisions, as they apply to the code
+
+- **A second signing rule.** `BREAK_GLASS_KEYS` and `BREAK_GLASS_PAIR` in
+  `src/accounts/account-signatures.js`: the break-glass pair alone, both
+  keys present and verifying against `break_glass_pk` and
+  `break_glass_pk_pq`, and no signature from the three signing pairs beside
+  them (`a breakGlassTransfer is signed by the break-glass pair alone`).
+  The break-glass pair is not among `SIGNING_PAIRS` and never counts toward
+  any two pairs; under any two pairs a stray break-glass signature is
+  ignored, as any unknown field is. The per-key checks moved into
+  `checkPair`, shared by the walk over the signing pairs and the
+  break-glass branch, so every reason string exists once. `findAccount`
+  (`src/transfer/transfer.queries.js`) returns the two break-glass keys as
+  well, so every caller verifies with eight keys.
+- **The sixth transfer type**, `breakGlassTransfer` (4.5), in
+  `TRANSFER_TYPES` of `src/transfer/transfer.service.js` with `accountType`
+  null (any of the four), `lockMinutes` null (the sender's type's, through
+  `lockMinutesFor`: `GUARDED_LOCK_MINUTES`, `VAULT_LOCK_MINUTES`, else 0),
+  held in `assisted_transfers`, rule `BREAK_GLASS_PAIR`.
+  `checkTransferSignaturesAndIds` resolves the lock from the account row it
+  reads in 2a and returns it; check 1b runs on it as for a guarded or vault
+  transfer, check 2b is skipped when the type's account type is null, and
+  a new check 6b, right after the receiver's existence, requires the
+  receiver to be of the sender's type. For that, `findExisting`'s first
+  `EXISTS` became a select of the receiver's type (`accountToType`), and
+  `accountToExists` is that type being non-null. The shape check's reason
+  names six types.
+- **The stakes row moves with the money.** `moveStake` in
+  `src/stakes/stakes.queries.js`: the whole row, all six purposes, added to
+  the receiver's row (created when it has none), the sender's row deleted;
+  a sender with no row moves nothing. `writeAnosTransfer` calls it after
+  the link, inside the batch, as a transferToFund adds stake; the replay's
+  `checkByType` (`src/garlic-chain/replay.service.js`) gives a break-glass
+  link the same side effect. The roles move with it; guardians return
+  stake to the new account with an ordinary proposal.
+- **The unlock moment.** `assisted_transfers.future_date TIMESTAMPTZ`,
+  NULL for an assisted transfer and for a move out of a spending or
+  assisted account; `insertAssisted` stores the `futureDate`
+  `verifyAnosTransfer` computes for a lock, which the registry's `insert`
+  already passed on, and `findReadyAssistedIds` requires it NULL or passed,
+  by the database's clock. The joiner's copy of a held row carries it
+  (`src/held-transactions/held-rows.service.js`: the column in the table's
+  spec, and a `nullable` list there so a null `TIME` passes the shape
+  check; `locked_transactions`' `future_date` is never null). The trigger
+  `garlic_chain_apply_anos_transfer` fires for the new type.
+- **The cancel, either key.** `breakGlassCancel` (5.7),
+  `src/assisted-transfers/break-glass-cancel.js`, in the shape of the
+  assisted cancel with a `rule` member, `BREAK_GLASS_PAIR`;
+  `checkAttachmentSignatures` (`src/attachments/attachments.service.js`)
+  verifies under `kind.rule ?? ANY_TWO_PAIRS`, so the other seven kinds are
+  untouched; `breakGlassCancel` is the eighth of `KINDS`.
+  `assistedTransferCancel` and `attestation` check nothing about the row's
+  type, so the owner's any-two-pairs cancel and the attestors' attestations
+  attach to a break-glass row as to an assisted one. Route
+  `POST /break-glass-cancel` on the assisted transfers router.
+- **The reads.** `src/auth/require-account.js` accepts the break-glass
+  pair as the signer when pair one does not verify, so the finish of a
+  recovery reads the old account's balance and latest transaction id with
+  the seed the bankers delivered; the nonce is recorded after, as before.
+  Every held-transfer read answers `type` (`payload.transactionType`),
+  `/list-assisted-transfers` included, which the attestor edition tells
+  trades and moves apart by; `/get-assisted-transfer` answers `unlocksAt`
+  and a fifth stage, `locked`, between `cancelling` and `writing` (17.2),
+  decided by the same database clock as the ready list.
+- **Not here.** No closed flag on an old account; no notification kinds;
+  no wallet page for either cancel; no migration of old key blobs (a fresh
+  genesis, decision 12 of the plan). The doorman's door, the masterpod's
+  cases and routes, and the wallet's three steps are steps 2 to 6 of the
+  plan.
+
+### 22.2 The rollout
+
+- **Every validator on the new code before the wallet is.** A validator on
+  the old code refuses a `breakGlassTransfer` at the shape check and a
+  `breakGlassCancel` as an unknown kind, so a counted validator left behind
+  would refuse every move; and a joiner on the old code can neither replay
+  such a link nor take a held row that carries `future_date`. The reset
+  gives a network where every validator starts on this code; the wallet,
+  deployed last, is the only thing that sends the new type.
+- **The schema column** needs a fresh database (`db/schema.sql`, which the
+  reset gives) or one `ALTER TABLE assisted_transfers ADD COLUMN IF NOT
+  EXISTS future_date TIMESTAMPTZ` on a database kept from before. Nothing
+  else in the schema changed but the trigger's `WHEN` list and the
+  comments, which `npm run db:setup` replaces on an existing database.
+- **No new npm package, no new environment variable**: the lock numbers of
+  `network/testnet.env` are reused through `env.locks`.
+
+### 22.3 Files
+
+Changed: `src/accounts/account-signatures.js`,
+`src/transfer/transfer.queries.js`, `src/transfer/transfer.service.js`,
+`src/stakes/stakes.queries.js`, `db/schema.sql`,
+`src/assisted-transfers/assisted-transfers.queries.js`,
+`src/assisted-transfers/assisted-transfers.router.js`,
+`src/attachments/attachments.service.js`,
+`src/held-transactions/held-rows.service.js`,
+`src/garlic-chain/replay.service.js`, `src/auth/require-account.js`,
+`src/reads/reads.queries.js`, `src/reads/reads.service.js`; comments only
+in `src/assisted-transfers/attestation.js`,
+`src/assisted-transfers/assisted-transfer-cancel.js`,
+`src/held-transactions/held-transactions.js`, `src/app.js`,
+`src/accounts/accounts.service.js` and `src/validators/validators.service.js`
+(a count each). New:
+`src/assisted-transfers/break-glass-cancel.js`. In the docs: the README's
+database list, endpoints, account-level reads, signing rules, transfer
+table, follow-ups, assisted transfers and layout; sections 1, 3, 4 (4.5),
+5 (5.1 to 5.3, 5.7), 6, 8, 9, 13.2 and 17.2 above, and this section. No
+file under `deploy/`, no package file, no change to `network/`.
+
+### 22.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 22.1 was changed.
+
+- **The build was made on main at 234bbd6**, the age-limit commit of
+  section 21. Every line the plan quotes was where it said.
+- **`accounts.type` is nullable in the schema**, so `accountToExists`
+  derived from the type select (1.2 of the plan) rests on every account
+  row having a type. It does: genesis writes `fund` and `spending`, a
+  creation is refused without one of the four, and the five local
+  databases hold no untyped row. The comment on `findExisting` says so.
+- **The nullable `TIME` column** is marked by a `nullable` list on the
+  table's spec in `held-rows.service.js`, read by `checkColumns` for `TIME`
+  columns only, as the plan's sentence says; a second column kind would
+  have touched `toWire` and `fromWire`, which already pass null through.
+- **`insertAssisted` writes `futureDate ?? null`**, so the undefined the
+  registry's `insert` passes for an assisted transfer lands as NULL
+  explicitly; the driver would have sent undefined as null anyway.
+- **The reason for a user-pair signature under the break-glass rule**
+  names the `breakGlassTransfer` even when the object is a
+  `breakGlassCancel`, as the plan gave it; the doorman mirrors the string
+  in step 2.
+- **`breakGlassCancel.verify` reads `row.ogTransaction?.payload?.transactionType`**
+  with optional chaining, defensive only: a held row's `og_transaction` is
+  always an object with a payload.
+- **Doc spots beyond the plan's list**, each a count or a field list the
+  change had made false: section 4's "Four kinds are added"; 5.1's "one of
+  the seven below" and its signatures line; `type` in the `/list-escrows`,
+  `/get-locked-transfer` and `/list-disputed-escrows` rows of 8 and 13.2
+  (every held-transfer read answers it, 1.8 of the plan); 17.2's closing
+  sentence on "a fifth stage"; the schema's `COMMENT ON TABLE` for
+  `assisted_transfers`; the README's database list, its follow-ups count
+  and signatures line, the `type` field in its reads list, the layout
+  lines for `transfer/` and `assisted-transfers.queries.js`, and the count
+  of kinds in its validator-to-validator section; and the two source
+  comments that said five transfer types (`accounts.service.js`
+  `writeTransactions`, `validators.service.js` the approval's check).
+- **Checks.** `node --check` passed on all seventeen source files. The SQL
+  ran by psql as the superuser against a throwaway database
+  `anos_bg_check` built from `db/schema.sql`, in one transaction rolled
+  back, the database then dropped: `PREPARE` without parameter types
+  inferred `{bytea, bytea}` for the stake move's statement, so the untyped
+  `$2` in its `INSERT ... SELECT` resolves against the target column as
+  the driver sends it; the move added to a receiver that had a row, moved
+  nothing from a sender with none and created a row for a receiver with
+  none, deleting the sender's each time it had one; `insertAssisted` took
+  a date and a null; `findReadyAssistedIds` listed the row with no moment
+  and the row whose moment had passed and left out the row whose moment
+  was ahead; `findAssistedFor`'s `due` was false for the latter; the
+  `findExisting` type select answered a type and null; and the trigger
+  moved 1000 from sender to receiver for a `breakGlassTransfer` link.
+  Beyond the plan, the whole app was imported once with dummy environment
+  values and a throwaway key file in the scratchpad, to catch a wrong
+  import name or an import cycle that a syntax check cannot: it imported.
+  No validator was booted, no test script was written, no rig was run.

@@ -248,7 +248,7 @@ export async function writeApproved(transactionIds) {
  * { transactionId, accountId, ogTransaction } straight from pending or
  * any other holding table, in id order. Each row is written by its
  * transactionType: an account creation by writeAccountCreation below, a
- * transfer of any of the five types by transfer.service.js
+ * transfer of any of the six types by transfer.service.js
  * writeAnosTransfer, a transfer to the fund and a fund proposal (the
  * proposal link, then its payout links) by fund.service.js
  * writeTransferToFund and writeFundProposal. Returns true when the batch
