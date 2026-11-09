@@ -161,7 +161,7 @@ async function findRepeatedApproval(payload) {
  * Runs on a submission the checks the originating validator ran, picked by
  * its transactionType: verifyCreateAccount (accounts.service.js) for an
  * account creation, verifyAnosTransfer (transfer.service.js) for any of the
- * five transfer types, verifyTransferToFund and verifyFundProposal
+ * six transfer types, verifyTransferToFund and verifyFundProposal
  * (fund.service.js) for a transfer to the fund and a fund proposal. All
  * answer { ok: true, accountId, transactionId, heldIn, ... } or { ok: false,
  * reason }: heldIn names the holding table the transaction waits in, with

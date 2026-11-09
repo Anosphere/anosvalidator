@@ -9,6 +9,13 @@ import { STAKE_PURPOSES, columnFor } from './stake-purposes.js';
  *
  * The column names come from stake-purposes.js, a fixed table, never from
  * a request, so they are safe to put into the SQL text.
+ *
+ * findStake reads a row; addStake and subtractStake move one purpose's
+ * amount; moveStake moves a whole row to another account, the side effect
+ * of a breakGlassTransfer (2026-11-08, docs/schemas.md section 22);
+ * listDaoVoteStakes lists every account's daoVote stake with their total,
+ * the public read the masterpod takes its DAO voting snapshot from
+ * (2026-11-08, section 23).
  */
 
 const COLUMNS = STAKE_PURPOSES.map(({ column }) => column).join(', ');
@@ -70,4 +77,42 @@ export async function subtractStake(client, accountId, purpose, amount) {
     throw new Error(`no stakes row for account ${accountId.toString('hex')} to take ${purpose} stake from`);
   }
   await client.query(`DELETE FROM stakes WHERE account_id = $1 AND ${ALL_ZERO}`, [accountId]);
+}
+
+/**
+ * Moves every stake of `fromAccountId` to `toAccountId`: the whole stakes row,
+ * all six purposes, added to the receiver's row (created when it has none),
+ * then the sender's row deleted. `client` as for addStake: this runs inside
+ * the batch that writes the breakGlassTransfer link (transfer.service.js
+ * writeAnosTransfer) and inside the replay of such a link. A sender with no
+ * stakes row moves nothing.
+ */
+export async function moveStake(client, fromAccountId, toAccountId) {
+  const sums = STAKE_PURPOSES.map(({ column }) => `${column} = stakes.${column} + EXCLUDED.${column}`).join(', ');
+  await client.query(
+    `INSERT INTO stakes (account_id, ${COLUMNS})
+     SELECT $2, ${COLUMNS} FROM stakes WHERE account_id = $1
+     ON CONFLICT (account_id) DO UPDATE SET ${sums}`,
+    [fromAccountId, toAccountId],
+  );
+  await client.query('DELETE FROM stakes WHERE account_id = $1', [fromAccountId]);
+}
+
+/**
+ * Every account's daoVote stake, for the masterpod's snapshot of DAO voting
+ * weights (docs/schemas.md section 23): the stakes rows with
+ * dao_vote_stake > 0, account id ascending, each { accountId (Buffer),
+ * daoVoteStake (a decimal string of millionths) }, and total, their sum as
+ * a decimal string, '0' when there is no row. The sum is a window over the
+ * same rows, so it is read off the first one.
+ */
+export async function listDaoVoteStakes() {
+  const { rows } = await query(
+    `SELECT account_id, dao_vote_stake, SUM(dao_vote_stake) OVER () AS total
+     FROM stakes WHERE dao_vote_stake > 0 ORDER BY account_id`,
+  );
+  return {
+    total: rows.length === 0 ? '0' : String(rows[0].total),
+    rows: rows.map((row) => ({ accountId: row.account_id, daoVoteStake: row.dao_vote_stake })),
+  };
 }

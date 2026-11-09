@@ -4,7 +4,9 @@ import { query } from '../db/pool.js';
  * SQL for the fund feature's two tables (db/schema.sql): fund_proposals,
  * pending's twin for fund proposals, open for votes until vote_closes_at,
  * and guardian_votes, one row per guardian's vote on a proposal. Plus the
- * lookups a proposal's checks need. Mirrors locked-transactions.queries.js.
+ * lookups a proposal's checks need, and since 2026-11-08 the two lookups of
+ * the fund proposal reads (docs/schemas.md section 25), findOpenProposals
+ * and findProposalVotes. Mirrors locked-transactions.queries.js.
  *
  * Ids are Buffers of 32 raw bytes, matching the BYTEA columns; pg sends a
  * Buffer parameter as bytea.
@@ -124,6 +126,41 @@ export async function findClosedProposals() {
 }
 
 /**
+ * Every fund proposal still open, for the fund proposal reads
+ * (docs/schemas.md section 25): the fund_proposals rows, at most one
+ * (account_id is UNIQUE there and always the fund's), in id order, each the
+ * row (toRow) plus createdAt (a Date), closed (whether vote_closes_at has
+ * passed by the database's clock, the one findClosedProposals reads, so the
+ * read and the ready list agree) and the tally as it stands, forWeight and
+ * againstWeight, the sums findClosedProposals makes without its closed
+ * filter: proposer_weight plus the weight of the approved votes for, and
+ * the weight of the approved votes against, both Numbers.
+ */
+export async function findOpenProposals() {
+  const { rows } = await query(
+    `SELECT p.transaction_id, p.account_id, p.og_transaction, p.approved, p.vote_closes_at, p.proposer_weight,
+            p.created_at,
+            p.vote_closes_at <= now() AS closed,
+            p.proposer_weight
+              + coalesce((SELECT sum(v.weight) FROM guardian_votes v
+                          WHERE v.transaction_id = p.transaction_id AND v.approved AND v.vote = 'for'), 0)
+              AS for_weight,
+            coalesce((SELECT sum(v.weight) FROM guardian_votes v
+                      WHERE v.transaction_id = p.transaction_id AND v.approved AND v.vote = 'against'), 0)
+              AS against_weight
+     FROM fund_proposals p
+     ORDER BY p.transaction_id`,
+  );
+  return rows.map((row) => ({
+    ...toRow(row),
+    createdAt: row.created_at,
+    closed: row.closed,
+    forWeight: Number(row.for_weight),
+    againstWeight: Number(row.against_weight),
+  }));
+}
+
+/**
  * The approved proposals among these ids (Buffers), in id order, as
  * { transactionId, accountId, ogTransaction }, the shape pending's
  * findApproved gives. The vote is not tallied again here: the leader's
@@ -236,6 +273,28 @@ export async function findVotes(transactionId) {
     weight: row.weight,
     signature: row.signature,
     approved: row.approved,
+  }));
+}
+
+/**
+ * Every vote on this proposal with the moment it was stored, for the fund
+ * proposal reads (docs/schemas.md section 25): findVotes without the
+ * signature, plus votedAt (created_at, a Date). In guardian order, as
+ * { guardianAccountId, vote, weight, approved, votedAt }.
+ */
+export async function findProposalVotes(transactionId) {
+  const { rows } = await query(
+    `SELECT guardian_account_id, vote, weight, approved, created_at FROM guardian_votes
+     WHERE transaction_id = $1
+     ORDER BY guardian_account_id`,
+    [transactionId],
+  );
+  return rows.map((row) => ({
+    guardianAccountId: row.guardian_account_id,
+    vote: row.vote,
+    weight: row.weight,
+    approved: row.approved,
+    votedAt: row.created_at,
   }));
 }
 

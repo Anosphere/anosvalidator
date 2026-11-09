@@ -57,8 +57,11 @@ export const FUND_PROPOSALS = 'fund_proposals';
  * One entry per table, each with the same five members, built from that
  * table's query module:
  *   insert(row):           stores { transactionId, accountId, ogTransaction }
- *                          plus whatever the table needs (futureDate,
- *                          accountIdTo, voteClosesAt and proposerWeight);
+ *                          plus whatever the table needs (futureDate for
+ *                          locked_transactions and, since 2026-11-08, for
+ *                          assisted_transfers, where a break-glass move out
+ *                          of a guarded or vault account carries one;
+ *                          accountIdTo; voteClosesAt and proposerWeight);
  *                          extra fields are ignored. Returns { inserted } or
  *                          { inserted: false, conflict }.
  *   find(transactionId):   the row, with at least `approved` and

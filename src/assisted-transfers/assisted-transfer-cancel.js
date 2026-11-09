@@ -14,7 +14,11 @@ import { findAssisted, markAssistedSlotApproved, setAssistedSlot } from './assis
  * needed. Own check: no cancellation present. Accepted until the transfer is
  * written, even when both attestations are approved; readiness excludes
  * rows with a cancellation present. Stored in the cancellation slot. Effect
- * on acceptance: the row moves to logs, outcome userCancelled.
+ * on acceptance: the row moves to logs, outcome userCancelled. Accepted on
+ * a break-glass move's row (breakGlassTransfer, docs/schemas.md section 22)
+ * as on an assisted transfer's: nothing here reads the row's type, so an
+ * owner who still has their device stops a false move with the account's
+ * own keys under any two pairs.
  *
  * The interface is described in attestation.js.
  */

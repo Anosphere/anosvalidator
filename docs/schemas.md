@@ -24,7 +24,12 @@ disagree before then, this file wins.
   key2/postQuantumKey2 and walletKey/walletPostQuantumKey, both halves of
   each pair present, every signature present verifying against the
   account's stored key. Until 2026-11-07 assisted transfers had a rule of
-  their own, pair one and the wallet pair (section 20).
+  their own, pair one and the wallet pair (section 20). Since 2026-11-08 a
+  second rule, **the break-glass pair**, for the `breakGlassTransfer` and
+  its `breakGlassCancel` alone: breakGlassKey/breakGlassPostQuantumKey,
+  both present and verifying against `break_glass_pk` and
+  `break_glass_pk_pq`, and no signature from the three pairs beside them
+  (section 22).
 - A transaction waits in a **holding table** until a leader round writes it.
   There are five: `pending`, `locked_transactions`, `assisted_transfers`,
   `escrow_transfers` and `fund_proposals`. All five share: `transaction_id`
@@ -34,8 +39,10 @@ disagree before then, this file wins.
   validator accepted the transaction. A submission whose transaction id or
   account id is found in any holding table or on the chain is refused.
 - A **follow-up** is a signed object attached to a transaction that is
-  waiting in a holding table: an attestation, a cancellation, a vote, an
-  escrow signature or verdict. Each is stored in or next to the row with its
+  waiting in a holding table: an attestation, a cancellation (the sender's
+  `assistedTransferCancel` or, since 2026-11-08, the break-glass pair's
+  `breakGlassCancel`), a vote, an escrow signature or verdict. Each is
+  stored in or next to the row with its
   own approved flag and goes round the validators the way a transaction does
   (section 9).
 - A row that leaves a holding table is deleted (`pending`,
@@ -58,9 +65,9 @@ amount is zero.
 
 | `stakeFor`  | Column             | Minimum, env variable       | Default | Behaviour today |
 | ----------- | ------------------ | --------------------------- | ------: | --------------- |
-| `daoVote`   | `dao_vote_stake`   | `STAKE_MIN_DAO_VOTE_ANOS`   |      10 | recorded only |
-| `moderator` | `moderator_stake`  | `STAKE_MIN_MODERATOR_ANOS`  |   1,000 | recorded only |
-| `attestor`  | `attestor_stake`   | `STAKE_MIN_ATTESTOR_ANOS`   |   1,000 | attests assisted transfers, arbitrates escrow disputes |
+| `daoVote`   | `dao_vote_stake`   | `STAKE_MIN_DAO_VOTE_ANOS`   |      10 | read by the masterpod for DAO votes (section 23) |
+| `moderator` | `moderator_stake`  | `STAKE_MIN_MODERATOR_ANOS`  |   1,000 | recorded only; the pod must be appointed to stake (section 24) |
+| `attestor`  | `attestor_stake`   | `STAKE_MIN_ATTESTOR_ANOS`   |   1,000 | attests assisted transfers, arbitrates escrow disputes; the pod must be appointed to stake (section 24) |
 | `guardian`  | `guardian_stake`   | `STAKE_MIN_GUARDIAN_ANOS`   |   1,000 | proposes and votes on fund proposals |
 | `validator` | `validator_stake`  | `STAKE_MIN_VALIDATOR_ANOS`  |  50,000 | recorded only; the `validators` table is unchanged |
 | `masterPod` | `master_pod_stake` | `STAKE_MIN_MASTER_POD_ANOS` | 500,000 | recorded only |
@@ -116,16 +123,24 @@ CREATE TABLE IF NOT EXISTS assisted_transfers (
   attestation_2_approved  BOOLEAN NOT NULL DEFAULT false,
   cancellation            JSONB,
   cancellation_approved   BOOLEAN NOT NULL DEFAULT false,
+  future_date             TIMESTAMPTZ,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
-Pending's twin for assisted transfers. `attestation_1` and `attestation_2`
+Pending's twin for assisted transfers and, since 2026-11-08, for break-glass
+moves (`breakGlassTransfer`, section 22), told apart by
+`og_transaction.payload.transactionType`. `attestation_1` and `attestation_2`
 hold whole attestation objects, `{ payload, signatures }` as received, the
 first to arrive in slot 1. `cancellation` holds the sender's signed
-`assistedTransferCancel` while its round runs; once approved on a validator,
-that validator moves the row to `logs`.
+`assistedTransferCancel`, or on a break-glass row the break-glass pair's
+`breakGlassCancel`, while its round runs; once approved on a validator,
+that validator moves the row to `logs`. `future_date` is the moment a
+break-glass move may be written, its `createdAt` when the sender is a
+guarded or vault account; NULL for an assisted transfer and for a move out
+of a spending or assisted account. A row with a moment is ready only once it
+has passed.
 
 ### escrow_transfers
 
@@ -232,11 +247,11 @@ after a time; archives are kept.
 
 ### Changes to existing tables
 
-- `garlic_chain_apply_anos_transfer` fires for seven link types:
+- `garlic_chain_apply_anos_transfer` fires for eight link types:
   `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`,
-  `assistedAnosTransfer`, `escrowTransfer`, `transferToFund` and
-  `transferFromFund`. Its error messages name `NEW.type` instead of
-  `anosTransfer`.
+  `assistedAnosTransfer`, `escrowTransfer`, `breakGlassTransfer` (since
+  2026-11-08, section 22), `transferToFund` and `transferFromFund`. Its
+  error messages name `NEW.type` instead of `anosTransfer`.
 - The comments on `locked_transactions` no longer say assisted accounts
   have a time lock. They do not.
 - `pending`, `garlic_chain`, `accounts` and `validators` are unchanged.
@@ -246,7 +261,8 @@ after a time; archives are kept.
 A transaction is `{ payload, signatures }` with `payload.transactionType`
 naming its kind. The four existing kinds, `accountCreation`,
 `anosTransfer`, `guardedAnosTransfer` and `vaultAnosTransfer`, are
-unchanged and documented in the README. Four kinds are added.
+unchanged and documented in the README. Four kinds are added here, and a
+fifth, the `breakGlassTransfer`, on 2026-11-08 (4.5, section 22).
 
 Shared by every transfer kind, old and new, unless a section says
 otherwise: the transfer payload of the README (`accountId`,
@@ -303,6 +319,21 @@ round as a link of type `transferToFund`. In the same database transaction
 the sender's `stakes` row gets the amount added to the purpose's column,
 the row created if the account has none. Nothing else happens: the role
 follows from the amount.
+
+Since 2026-11-08 (section 24) a `transferToFund` for `moderator` or
+`attestor` passes one more check, on the receiving validator only, after
+the checks above: it asks the masterpod
+`POST MASTERPOD_URL/get-anos-account { accountId }` for the sending account
+(`src/masterpod/masterpod.client.js`, 5-second timeout, the same call as
+the binding check of create-account) and goes on only when the answer
+binds the account to a vouched anoPod whose `role` is the `stakeFor`. No
+answer, or an account not bound, is refused with
+`the masterpod could not confirm the sending account's anoPod`; a bound
+anoPod whose `role` is anything else with
+`the sending account's anoPod is not appointed as <stakeFor>`. The handler
+logs `failed: <reason>` and answers `400 { error }` like any refusal. The
+peers approving the stake, the replay of a chain chunk and the held-row
+checks do not ask.
 
 ### 4.4 fundProposal
 
@@ -376,6 +407,36 @@ links are implied. After the write the row and its votes move to
 `archives`, outcome `written`. A proposal whose vote fails moves to
 `archives`, outcome `voteFailed`, and nothing is written.
 
+### 4.5 breakGlassTransfer
+
+Added 2026-11-08 (section 22). Sent from an account of **any** of the four
+types at `POST /anos-transfer`, by the break-glass pair the account was
+created with, once its user keys died with the passkey: the whole balance,
+to a new account of the **same type** in the same pod. Signing rule **the
+break-glass pair alone**: `breakGlassKey` and `breakGlassPostQuantumKey`
+both present and verifying against `break_glass_pk` and `break_glass_pk_pq`,
+and no signature from the three user pairs beside them (one rule per
+object, no mixing). The receiver must be an existing account of the
+sender's type, checked right after the receiver's existence
+(`payload.accountIdTo is not an account of the same type as
+payload.accountId`); the masterpod checks it again when the moves are
+filed. It follows the sender's type's lock: from a guarded or vault account
+`createdAt` is checked as the account's own transfers are, at least the
+lock and at most the lock plus `LOCK_OFFSET_MINUTES` ahead, and that moment
+is kept as `future_date`; from a spending or assisted account `createdAt`
+is not checked and `future_date` is NULL. Held in `assisted_transfers`.
+Ready for a leader round as 4.1, approved, both attestations approved, no
+cancellation present, and, when it has one, its moment passed
+(`future_date IS NULL OR future_date <= now()`). The write is one link of
+type `breakGlassTransfer` with the balance trigger, and in the same
+database transaction the sender's `stakes` row moves to the receiver, every
+purpose added to the receiver's row (created when it has none) and the
+sender's row deleted, so the roles move with the money; the catch-up replay
+does the same. After the write the row moves to `logs`, outcome `written`,
+as an assisted transfer does. The attestations are the same two, from two
+attestors with attestor stake, neither the sender (5.2); the cancel is
+either 5.3 by the account's own keys or 5.7 by the break-glass pair.
+
 ## 5. Follow-ups
 
 ### 5.1 Common rules
@@ -384,13 +445,13 @@ Every follow-up is `{ payload, signatures }`:
 
 ```
 payload: {
-  type:          the kind, one of the seven below
+  type:          the kind, one of the eight below
   transactionId: the held transaction it attaches to
   <signer>:      the signer's account id, under the field the kind names
   signedAt:      ISO 8601, recorded, not compared with the clock
   ...the kind's own fields
 }
-signatures: the signer's account keys, any two pairs
+signatures: the signer's account keys, any two pairs; a breakGlassCancel the break-glass pair (5.7)
 ```
 
 Checks every kind runs, in order: the shape; the held row exists in the
@@ -419,8 +480,9 @@ canonical payload, which they compute; the signer does not send it.
 payload: { type: "attestation", transactionId, accountId, attestorId, signedAt }
 ```
 
-For an `assistedAnosTransfer`. `accountId` is the transfer's sender and must
-equal the row's `account_id`. Signer: `attestorId`, with
+For an `assistedAnosTransfer` or a `breakGlassTransfer` (4.5). `accountId`
+is the transfer's sender and must equal the row's `account_id`. Signer:
+`attestorId`, with
 `attestor_stake` at or above its minimum. Own checks: `attestorId` is not
 `accountId`; `attestorId` is not the attestor in the other slot. Stored in
 `attestation_1` if empty, else `attestation_2` if empty, else refused. No
@@ -436,7 +498,10 @@ Signer: `accountId`, the row's `account_id`, the sender. Own checks: no
 cancellation present. Accepted until the transfer is written, even when both
 attestations are approved; readiness excludes rows with a cancellation
 present. Stored in `cancellation`. Effect on acceptance: the validator moves
-the row to `logs`, outcome `userCancelled`.
+the row to `logs`, outcome `userCancelled`. Accepted on a break-glass row
+(4.5) as on an assisted one: nothing checks the row's type, so an owner who
+still has their device stops a false move with the account's own keys under
+any two pairs (section 22).
 
 ### 5.4 guardianVote
 
@@ -486,6 +551,23 @@ acceptance: when two approved rows say `cancel`, the row and its
 arbitrations move to `archives`, outcome `arbitratedCancel`. When two
 approved rows say `success`, the escrow is ready (section 6).
 
+### 5.7 breakGlassCancel
+
+```
+payload: { type: "breakGlassCancel", transactionId, accountId, signedAt }
+```
+
+Added 2026-11-08 (section 22), at `POST /break-glass-cancel`. For a
+`breakGlassTransfer` (4.5). Signer: `accountId`, the row's `account_id`,
+the sender, under the rule **the break-glass pair alone** instead of any
+two pairs: the kind names its rule and the common signature check uses it.
+No stake. Own checks: the row's transaction is a `breakGlassTransfer`
+(`not a break-glass transfer`); no cancellation present. Accepted until the
+move is written, even when both attestations are approved. Stored in
+`cancellation`, the slot 5.3 uses. Effect on acceptance: the validator
+moves the row to `logs`, outcome `userCancelled`. No wallet page offers it
+yet; the owner's dispute path is a later plan.
+
 ## 6. The leader round
 
 Unchanged in shape: ready announcement, every validator's ready list, the
@@ -498,7 +580,7 @@ Each validator's ready list, in id order:
 | --------------------- | ---------- |
 | `pending`             | approved |
 | `locked_transactions` | approved, `future_date <= now()` |
-| `assisted_transfers`  | approved, `attestation_1_approved`, `attestation_2_approved`, `cancellation IS NULL` |
+| `assisted_transfers`  | approved, `attestation_1_approved`, `attestation_2_approved`, `cancellation IS NULL`, and `future_date IS NULL OR future_date <= now()` (a break-glass move's moment, section 22) |
 | `escrow_transfers`    | approved, `cancel_signature IS NULL`, and `success_signature_approved` or (`dispute_signature_approved` and at least two approved `success` verdicts) |
 | `fund_proposals`      | approved, `vote_closes_at <= now()`, and the tally passes |
 
@@ -514,6 +596,8 @@ The write, one database transaction per validator, rows in id order:
 - `accountCreation`: as today.
 - `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`,
   `assistedAnosTransfer`, `escrowTransfer`: one link, the balance trigger.
+- `breakGlassTransfer`: one link, the balance trigger, the sender's stakes
+  row moved to the receiver (section 22).
 - `transferToFund`: one link, the balance trigger, the stake added.
 - `fundProposal`: the proposal link, then the payout links in index order,
   the balance trigger for each, the stakes reduced for payouts with
@@ -558,11 +642,12 @@ through their wallets:
 | Method | Path                       | Takes |
 | ------ | -------------------------- | ----- |
 | POST   | `/create-account`          | `accountCreation` (unchanged) |
-| POST   | `/anos-transfer`           | `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`, `assistedAnosTransfer`, `escrowTransfer` |
+| POST   | `/anos-transfer`           | `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`, `assistedAnosTransfer`, `escrowTransfer`, `breakGlassTransfer` (4.5) |
 | POST   | `/transfer-to-fund`        | `transferToFund` |
 | POST   | `/fund-proposal`           | `fundProposal` |
 | POST   | `/attestation`             | `attestation` |
 | POST   | `/assisted-transfer-cancel`| `assistedTransferCancel` |
+| POST   | `/break-glass-cancel`      | `breakGlassCancel` (5.7) |
 | POST   | `/guardian-vote`           | `guardianVote` |
 | POST   | `/escrow-signature`        | `escrowSuccess`, `escrowCancel`, `escrowDispute`, `escrowVerdict`, by `payload.type` |
 
@@ -572,22 +657,42 @@ the validator called and has been sent round, or `400` + `{ error }`. The
 
 Account level (added 2026-10-25 for the wallet; the wallet spec, section
 5.3 and 5.4 of `~/Desktop/Z/web_app/docs/schemas.md`, is the spec): an
-account signing with pair one reads about itself. The envelope is
+account signing with pair one, or since 2026-11-08 with its break-glass
+pair, reads about itself. The envelope is
 `{ payload: { accountId, path, timestamp, nonce, body }, signatures: { ecdsa,
 mldsa } }`, checked by `src/auth/require-account.js`: the shape (`400 bad
 request shape`), the path (`401 path mismatch`), the timestamp within
 `TIMESTAMP_WINDOW_SECONDS` (`401 timestamp outside window`), the account
 (`400 invalid accountId`, `401 unknown account`, `401 bad signature` against
-`public_key1` and `public_key_pq1`), the nonce (`400 invalid nonce`, `401
-replay`; the new `nonces` table, the keyholder's).
+`public_key1` and `public_key_pq1`, or failing that against `break_glass_pk`
+and `break_glass_pk_pq`, so a recovered person reads an account whose user
+keys are gone with the seed the bankers delivered, section 22), the nonce
+(`400 invalid nonce`, `401 replay`; the new `nonces` table, the
+keyholder's). Every held-transfer read below answers `type`, the payload's
+`transactionType`, since 2026-11-08.
 
 | Method | Path                 | Answers |
 | ------ | -------------------- | ------- |
-| POST   | `/get-account`       | `200 { accountId, type, balance: millionths as a decimal string, latestTransactionId: hex \| null, createdAt }`; `latestTransactionId` is the link with the highest `position` whose `account_id` is the signer |
+| POST   | `/get-account`       | `200 { accountId, type, balance: millionths as a decimal string, latestTransactionId: hex \| null, createdAt, stakes: { daoVote, moderator, attestor, guardian, validator, masterPod }, guardianVotes }`; `latestTransactionId` is the link with the highest `position` whose `account_id` is the signer; `stakes` the signer's six amounts in millionths as decimal strings, `"0"` each when it has no `stakes` row, and `guardianVotes` its votes on fund proposals, `floor(guardian / GUARDIAN_VOTE_ANOS)`, a number (added 2026-11-08, section 25) |
 | POST   | `/list-transactions` | body `{ beforePosition?, limit? (default 50, at most 200), from?, to? (ISO 8601; added 2026-11-06, section 18.3) }`; `200 { transactions: [ { transactionId, position, type, accountId, accountIdTo, amount, createdAt } ], pending: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, approved } ] }`, the links where the signer sent or received, `position` descending, with `createdAt` at or after `from` and before `to` when given, and its pending row (at most one) read from `og_transaction.payload`, not cut by the dates |
-| POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
-| POST   | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, stage, attestations } \| null }`, the signer's own held assisted transfer, the `assisted_transfers` row whose `account_id` is the signer (at most one), or `null` when there is none (added 2026-11-06, section 17) |
-| POST   | `/get-locked-transfer` | body `{}`; `200 { transfer: { transactionId, accountId, accountIdTo, amount, createdAt, unlocksAt, stage } \| null }`, the signer's own locked transfer, the `locked_transactions` row whose `account_id` is the signer (at most one), a guarded or vault transfer waiting out its time lock, or `null` when there is none (added 2026-11-06, section 18) |
+| POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
+| POST   | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, type, accountId, accountIdTo, amount, createdAt, stage, attestations, unlocksAt } \| null }`, the signer's own held assisted transfer or break-glass move, the `assisted_transfers` row whose `account_id` is the signer (at most one), or `null` when there is none (added 2026-11-06, section 17; `type`, `unlocksAt` and the `locked` stage 2026-11-08, section 22) |
+| POST   | `/get-locked-transfer` | body `{}`; `200 { transfer: { transactionId, type, accountId, accountIdTo, amount, createdAt, unlocksAt, stage } \| null }`, the signer's own locked transfer, the `locked_transactions` row whose `account_id` is the signer (at most one), a guarded or vault transfer waiting out its time lock, or `null` when there is none (added 2026-11-06, section 18) |
+
+Public, unsigned (added 2026-11-08: one read for the DAO voting ledger on
+the masterpod, section 23, the first route of the kind, and two more the
+same day for the wallet's Guardians page, section 25): reads with no
+envelope, no signature and no middleware. The body must be an object (`400
+bad request shape`). Everything they answer is the fund's public business:
+each `transferToFund` link names its purpose on the chain, a written
+proposal's payouts are on the chain as `transferFromFund` links, and the
+votes are the guardians' public act on the fund's money.
+
+| Method | Path                 | Answers |
+| ------ | -------------------- | ------- |
+| POST   | `/list-dao-stakes`   | body `{}`; `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`: every `stakes` row with `dao_vote_stake > 0`, `accountId` hex, `daoVoteStake` millionths as a decimal string, account id ascending; `total` their sum as a decimal string (`"0"` with no rows); `asOf` the server clock at the read, ISO 8601. Read by the masterpod for its snapshot of DAO voting weights |
+| POST   | `/list-fund-proposals` | body `{ status: 'open' \| 'decided', limit?, offset?, from?, to? }`; `200 { settings, proposals: [ item ] }`: for `open` the `fund_proposals` rows (at most one), for `decided` the `archives` rows that left `fund_proposals`, newest first, `limit` default 20 at most 200, after `offset` rows, with `created_at` at or after `from` and before `to` when given; `settings` the validator's `{ anosPerVote, minimumStake, percent, minutes }`; an `item` the proposal with its status, its tally and its votes (section 25.1). Bad values are `400 invalid status`, `invalid limit`, `invalid offset`, `invalid from` and `invalid to` |
+| POST   | `/get-fund-proposal` | body `{ transactionId: hex }`; `200 { settings, proposal }`, the item plus `proposerWeight` and `payouts: [ { index, accountIdTo, amount, reason, stakeFor } ]`, looked for in `fund_proposals` first, then in `archives`; `400 invalid transactionId` unless 64 hex characters; `404 unknown proposal` |
 
 `/create-account` gained a fifth check after uniqueness, on the receiving
 validator only: the masterpod is asked `POST /get-anos-account { accountId }`
@@ -608,7 +713,8 @@ The transaction messages are unchanged: `transactionApproval` answered by
 `transactionApproved`, `proofOfTransactionAcceptance` answered by
 `transactionAccepted`, and the three leader calls. The receiver of a
 transaction approval picks the checks by `payload.transaction.payload.
-transactionType`, now one of eight kinds, and stores the transaction in the
+transactionType`, now one of nine kinds (the `breakGlassTransfer` since
+2026-11-08, section 22), and stores the transaction in the
 same holding table the originating validator used. The proof's receiver
 looks for the transaction across the five holding tables.
 
@@ -717,7 +823,7 @@ need no edit:
 
 | Variable                   | Default                 | Meaning |
 | -------------------------- | ----------------------- | ------- |
-| `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked (the binding check) |
+| `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked: the binding check of create-account and, since 2026-11-08, the appointment check of a moderator or attestor stake (section 24) |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`                   | the window of a signed account-level request, each way; nonces live twice this long |
 
 Since the testnet build (2026-10-27) these live in two files, the committed
@@ -829,14 +935,17 @@ routes join `src/reads/`.
 
 | Method | Path | Answers |
 | ------ | ---- | ------- |
-| POST | `/list-assisted-transfers` | body `{}`; `200 { transfers: [ { transactionId, accountId, accountIdTo, amount, createdAt, attestorIds } ] }` |
-| POST | `/list-disputed-escrows` | body `{}`; `200 { escrows: [ { transactionId, accountId, accountIdTo, amount, createdAt, disputedBy, verdicts: [ { arbitratorId, verdict, approved } ] } ] }` |
+| POST | `/list-assisted-transfers` | body `{}`; `200 { transfers: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, attestorIds } ] }` |
+| POST | `/list-disputed-escrows` | body `{}`; `200 { escrows: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, disputedBy, verdicts: [ { arbitratorId, verdict, approved } ] } ] }` |
 
 `/list-assisted-transfers`: every `assisted_transfers` row on this
 validator with `approved`, `cancellation IS NULL` and an empty attestation
-slot (`attestation_1 IS NULL OR attestation_2 IS NULL`): the trades waiting
-for attestors. `accountId`, `accountIdTo`, `amount` and `createdAt` are
-read from `og_transaction.payload`; `attestorIds` lists
+slot (`attestation_1 IS NULL OR attestation_2 IS NULL`): the trades, and
+since 2026-11-08 the break-glass moves (section 22), waiting for attestors.
+`type` (`payload.transactionType`, `assistedAnosTransfer` or
+`breakGlassTransfer`, which the attestor edition tells the two apart by),
+`accountId`, `accountIdTo`, `amount` and `createdAt` are read from
+`og_transaction.payload`; `attestorIds` lists
 `payload.attestorId` of the attestations present, slot order, so a second
 attestor sees who signed first.
 
@@ -1412,17 +1521,22 @@ wins:
 | `stage` | The row | What it means |
 | ------- | ------- | ------------- |
 | `waiting` | `approved` false | not every validator has accepted the transfer yet; no follow-up is accepted on it (5.1) |
-| `cancelling` | `cancellation IS NOT NULL` | the sender's cancel is on it; once approved, the row moves to `logs` (5.3) |
-| `writing` | `attestation_1_approved` and `attestation_2_approved` | both attestations accepted by every validator; the next leader round writes it (section 6); the sender may still cancel until then (5.3) |
+| `cancelling` | `cancellation IS NOT NULL` | a cancel is on it, the sender's (5.3) or the break-glass pair's (5.7); once approved, the row moves to `logs` |
+| `locked` | `attestation_1_approved` and `attestation_2_approved`, and `future_date > now()` | a break-glass move out of a guarded or vault account (4.5, section 22): both attestations accepted, waiting out the sender's lock until `unlocksAt`; a cancel is still accepted. Added 2026-11-08 |
+| `writing` | `attestation_1_approved` and `attestation_2_approved` (and `future_date` NULL or passed) | both attestations accepted by every validator; the next leader round writes it (section 6); the sender may still cancel until then (5.3) |
 | `attesting` | none of the above | accepted, waiting for two approved attestations; the sender may cancel |
 
 A cancel is accepted until the transfer is written, even when both
 attestations are approved (5.3), and a cancellation present keeps the row
 off the ready list (section 6), so `cancelling` is decided before
 `writing`: a row with both attestations approved and a cancellation on it
-is being cancelled, not written. A wallet that meets a `stage` it does
-not know treats the transfer as held and offers no action, so a fifth
-stage added here cannot make it do the wrong thing.
+is being cancelled, not written. `locked` comes before `writing` for the
+same reason: a row with both attestations approved and its moment ahead is
+off the ready list until the moment passes, by the database's clock, the
+one the ready list reads. A wallet that meets a `stage` it does not know
+treats the transfer as held and offers no action, so the fifth stage,
+`locked`, added 2026-11-08, and any later one cannot make it do the wrong
+thing.
 
 ### 17.3 Notes from the build
 
@@ -2567,3 +2681,631 @@ no package file and no schema file changes; the doorman is not touched.
   the ready list. The slots are JSON columns with no time of their own, so
   an age limit there needs a time per slot. Not in this build; a
   testnet-month follow-up.
+
+## 22. The break-glass transfer (2026-11-08)
+
+Decided 2026-11-08 in a planning chat of five rounds, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/break-glass-plan-1.md`. Why: the two user
+pairs of every account (pair one and pair two) were wrapped under the
+anoPod encryption key, which the backup code also opens, so whoever rebuilt
+a backup code held the original signing keys, and pair one with pair two
+alone satisfies any two pairs. The recovery flow of 2026-10-26 handed a
+recovered person exactly those keys back, and the break-glass seed
+deposited with the keyholders for this very case was never used. From now
+on the wallet wraps the signing keys under a key from the passkey's PRF
+output alone: a lost passkey kills the old accounts' keys for good, and the
+break-glass key is what moves the money, to new accounts of the same type,
+through a new transaction type that two attestors sign like an assisted
+transfer, so that a stolen break-glass key is pointless on its own. Four
+repos in order, the validator (this step), the doorman (its spec, section
+5), the masterpod (its section 14) and the wallet (its section 11), then
+the architecture records; deployed after a reset of the testnet with a
+fresh genesis, every validator and its doorman before the masterpod and
+the wallet. This section is the validator's part, step 1 of the plan.
+
+### 22.1 The decisions, as they apply to the code
+
+- **A second signing rule.** `BREAK_GLASS_KEYS` and `BREAK_GLASS_PAIR` in
+  `src/accounts/account-signatures.js`: the break-glass pair alone, both
+  keys present and verifying against `break_glass_pk` and
+  `break_glass_pk_pq`, and no signature from the three signing pairs beside
+  them (`a breakGlassTransfer is signed by the break-glass pair alone`).
+  The break-glass pair is not among `SIGNING_PAIRS` and never counts toward
+  any two pairs; under any two pairs a stray break-glass signature is
+  ignored, as any unknown field is. The per-key checks moved into
+  `checkPair`, shared by the walk over the signing pairs and the
+  break-glass branch, so every reason string exists once. `findAccount`
+  (`src/transfer/transfer.queries.js`) returns the two break-glass keys as
+  well, so every caller verifies with eight keys.
+- **The sixth transfer type**, `breakGlassTransfer` (4.5), in
+  `TRANSFER_TYPES` of `src/transfer/transfer.service.js` with `accountType`
+  null (any of the four), `lockMinutes` null (the sender's type's, through
+  `lockMinutesFor`: `GUARDED_LOCK_MINUTES`, `VAULT_LOCK_MINUTES`, else 0),
+  held in `assisted_transfers`, rule `BREAK_GLASS_PAIR`.
+  `checkTransferSignaturesAndIds` resolves the lock from the account row it
+  reads in 2a and returns it; check 1b runs on it as for a guarded or vault
+  transfer, check 2b is skipped when the type's account type is null, and
+  a new check 6b, right after the receiver's existence, requires the
+  receiver to be of the sender's type. For that, `findExisting`'s first
+  `EXISTS` became a select of the receiver's type (`accountToType`), and
+  `accountToExists` is that type being non-null. The shape check's reason
+  names six types.
+- **The stakes row moves with the money.** `moveStake` in
+  `src/stakes/stakes.queries.js`: the whole row, all six purposes, added to
+  the receiver's row (created when it has none), the sender's row deleted;
+  a sender with no row moves nothing. `writeAnosTransfer` calls it after
+  the link, inside the batch, as a transferToFund adds stake; the replay's
+  `checkByType` (`src/garlic-chain/replay.service.js`) gives a break-glass
+  link the same side effect. The roles move with it; guardians return
+  stake to the new account with an ordinary proposal.
+- **The unlock moment.** `assisted_transfers.future_date TIMESTAMPTZ`,
+  NULL for an assisted transfer and for a move out of a spending or
+  assisted account; `insertAssisted` stores the `futureDate`
+  `verifyAnosTransfer` computes for a lock, which the registry's `insert`
+  already passed on, and `findReadyAssistedIds` requires it NULL or passed,
+  by the database's clock. The joiner's copy of a held row carries it
+  (`src/held-transactions/held-rows.service.js`: the column in the table's
+  spec, and a `nullable` list there so a null `TIME` passes the shape
+  check; `locked_transactions`' `future_date` is never null). The trigger
+  `garlic_chain_apply_anos_transfer` fires for the new type.
+- **The cancel, either key.** `breakGlassCancel` (5.7),
+  `src/assisted-transfers/break-glass-cancel.js`, in the shape of the
+  assisted cancel with a `rule` member, `BREAK_GLASS_PAIR`;
+  `checkAttachmentSignatures` (`src/attachments/attachments.service.js`)
+  verifies under `kind.rule ?? ANY_TWO_PAIRS`, so the other seven kinds are
+  untouched; `breakGlassCancel` is the eighth of `KINDS`.
+  `assistedTransferCancel` and `attestation` check nothing about the row's
+  type, so the owner's any-two-pairs cancel and the attestors' attestations
+  attach to a break-glass row as to an assisted one. Route
+  `POST /break-glass-cancel` on the assisted transfers router.
+- **The reads.** `src/auth/require-account.js` accepts the break-glass
+  pair as the signer when pair one does not verify, so the finish of a
+  recovery reads the old account's balance and latest transaction id with
+  the seed the bankers delivered; the nonce is recorded after, as before.
+  Every held-transfer read answers `type` (`payload.transactionType`),
+  `/list-assisted-transfers` included, which the attestor edition tells
+  trades and moves apart by; `/get-assisted-transfer` answers `unlocksAt`
+  and a fifth stage, `locked`, between `cancelling` and `writing` (17.2),
+  decided by the same database clock as the ready list.
+- **Not here.** No closed flag on an old account; no notification kinds;
+  no wallet page for either cancel; no migration of old key blobs (a fresh
+  genesis, decision 12 of the plan). The doorman's door, the masterpod's
+  cases and routes, and the wallet's three steps are steps 2 to 6 of the
+  plan.
+
+### 22.2 The rollout
+
+- **Every validator on the new code before the wallet is.** A validator on
+  the old code refuses a `breakGlassTransfer` at the shape check and a
+  `breakGlassCancel` as an unknown kind, so a counted validator left behind
+  would refuse every move; and a joiner on the old code can neither replay
+  such a link nor take a held row that carries `future_date`. The reset
+  gives a network where every validator starts on this code; the wallet,
+  deployed last, is the only thing that sends the new type.
+- **The schema column** needs a fresh database (`db/schema.sql`, which the
+  reset gives) or one `ALTER TABLE assisted_transfers ADD COLUMN IF NOT
+  EXISTS future_date TIMESTAMPTZ` on a database kept from before. Nothing
+  else in the schema changed but the trigger's `WHEN` list and the
+  comments, which `npm run db:setup` replaces on an existing database.
+- **No new npm package, no new environment variable**: the lock numbers of
+  `network/testnet.env` are reused through `env.locks`.
+
+### 22.3 Files
+
+Changed: `src/accounts/account-signatures.js`,
+`src/transfer/transfer.queries.js`, `src/transfer/transfer.service.js`,
+`src/stakes/stakes.queries.js`, `db/schema.sql`,
+`src/assisted-transfers/assisted-transfers.queries.js`,
+`src/assisted-transfers/assisted-transfers.router.js`,
+`src/attachments/attachments.service.js`,
+`src/held-transactions/held-rows.service.js`,
+`src/garlic-chain/replay.service.js`, `src/auth/require-account.js`,
+`src/reads/reads.queries.js`, `src/reads/reads.service.js`; comments only
+in `src/assisted-transfers/attestation.js`,
+`src/assisted-transfers/assisted-transfer-cancel.js`,
+`src/held-transactions/held-transactions.js`, `src/app.js`,
+`src/accounts/accounts.service.js` and `src/validators/validators.service.js`
+(a count each). New:
+`src/assisted-transfers/break-glass-cancel.js`. In the docs: the README's
+database list, endpoints, account-level reads, signing rules, transfer
+table, follow-ups, assisted transfers and layout; sections 1, 3, 4 (4.5),
+5 (5.1 to 5.3, 5.7), 6, 8, 9, 13.2 and 17.2 above, and this section. No
+file under `deploy/`, no package file, no change to `network/`.
+
+### 22.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 22.1 was changed.
+
+- **The build was made on main at 234bbd6**, the age-limit commit of
+  section 21. Every line the plan quotes was where it said.
+- **`accounts.type` is nullable in the schema**, so `accountToExists`
+  derived from the type select (1.2 of the plan) rests on every account
+  row having a type. It does: genesis writes `fund` and `spending`, a
+  creation is refused without one of the four, and the five local
+  databases hold no untyped row. The comment on `findExisting` says so.
+- **The nullable `TIME` column** is marked by a `nullable` list on the
+  table's spec in `held-rows.service.js`, read by `checkColumns` for `TIME`
+  columns only, as the plan's sentence says; a second column kind would
+  have touched `toWire` and `fromWire`, which already pass null through.
+- **`insertAssisted` writes `futureDate ?? null`**, so the undefined the
+  registry's `insert` passes for an assisted transfer lands as NULL
+  explicitly; the driver would have sent undefined as null anyway.
+- **The reason for a user-pair signature under the break-glass rule**
+  names the `breakGlassTransfer` even when the object is a
+  `breakGlassCancel`, as the plan gave it; the doorman mirrors the string
+  in step 2.
+- **`breakGlassCancel.verify` reads `row.ogTransaction?.payload?.transactionType`**
+  with optional chaining, defensive only: a held row's `og_transaction` is
+  always an object with a payload.
+- **Doc spots beyond the plan's list**, each a count or a field list the
+  change had made false: section 4's "Four kinds are added"; 5.1's "one of
+  the seven below" and its signatures line; `type` in the `/list-escrows`,
+  `/get-locked-transfer` and `/list-disputed-escrows` rows of 8 and 13.2
+  (every held-transfer read answers it, 1.8 of the plan); 17.2's closing
+  sentence on "a fifth stage"; the schema's `COMMENT ON TABLE` for
+  `assisted_transfers`; the README's database list, its follow-ups count
+  and signatures line, the `type` field in its reads list, the layout
+  lines for `transfer/` and `assisted-transfers.queries.js`, and the count
+  of kinds in its validator-to-validator section; and the two source
+  comments that said five transfer types (`accounts.service.js`
+  `writeTransactions`, `validators.service.js` the approval's check).
+- **Checks.** `node --check` passed on all seventeen source files. The SQL
+  ran by psql as the superuser against a throwaway database
+  `anos_bg_check` built from `db/schema.sql`, in one transaction rolled
+  back, the database then dropped: `PREPARE` without parameter types
+  inferred `{bytea, bytea}` for the stake move's statement, so the untyped
+  `$2` in its `INSERT ... SELECT` resolves against the target column as
+  the driver sends it; the move added to a receiver that had a row, moved
+  nothing from a sender with none and created a row for a receiver with
+  none, deleting the sender's each time it had one; `insertAssisted` took
+  a date and a null; `findReadyAssistedIds` listed the row with no moment
+  and the row whose moment had passed and left out the row whose moment
+  was ahead; `findAssistedFor`'s `due` was false for the latter; the
+  `findExisting` type select answered a type and null; and the trigger
+  moved 1000 from sender to receiver for a `breakGlassTransfer` link.
+  Beyond the plan, the whole app was imported once with dummy environment
+  values and a throwaway key file in the scratchpad, to catch a wrong
+  import name or an import cycle that a syntax check cannot: it imported.
+  No validator was booted, no test script was written, no rig was run.
+
+## 23. The DAO stake read (2026-11-08)
+
+Decided 2026-11-08 in the DAO voting planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/dao-voting-plan-1.md`. Why: `daoVote` has
+been one of the six stake purposes since 2026-10-23 (section 2), recorded
+only: a `transferToFund` for it adds to `stakes.dao_vote_stake`, and
+nothing read the column. The DAO voting ledger, plain-text proposals that
+collect support like a petition and then take two weeks of votes for and
+against, one staked anos one vote, lives on the masterpod (its spec,
+section 15): the proposals, the support and the votes are its tables and
+routes, and when a proposal is posted, and again when it goes to a vote,
+it takes one snapshot of every account's DAO stake from a validator and
+boils it down to one weight per anoPod through its `anos_accounts`
+mapping. The validators keep no proposals and no votes; they gain this one
+read, and nothing about the stakes, the fund proposals (sections 3 to 6, a
+different system) or the leader round changed. Four repos in order: the
+validator (this step), the doorman (its spec, section 6), the masterpod
+(its section 15) and the wallet (its section 11), then the architecture
+records; deployed validators and doormen first, then the masterpod, then
+the wallet, no reset, everything additive.
+
+### 23.1 The route
+
+Public: no envelope, no signature, no middleware, the first route of the
+kind. Everything it answers is already on the public chain (each
+`transferToFund` link names its purpose), so nothing is given away; the
+masterpod has no anos account and no validator key to sign with; the
+doorman's rate limit covers abuse. It joins `src/reads/` beside the other
+reads.
+
+| Method | Path | Answers |
+| ------ | ---- | ------- |
+| POST | `/list-dao-stakes` | body `{}`; `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }` |
+
+`stakes` is every `stakes` row with `dao_vote_stake > 0`: `accountId` hex,
+`daoVoteStake` millionths as a decimal string, account id ascending.
+`total` is their sum in millionths as a decimal string (`"0"` with no
+rows); `asOf` the server clock at the read, ISO 8601. The body must be an
+object (`400 bad request shape`); nothing in it is read. The 503 "not
+counted yet" of `src/app.js` applies as to every POST: a joiner answers
+503 and the caller moves to the next validator. The masterpod asks the
+validators of its `VALIDATOR_URLS` in order, five seconds each, and takes
+the first `200` of the right shape. Refusals are logged `failed:
+<reason>` like every other route.
+
+### 23.2 The rollout
+
+Read only and additive: a validator with the route and one without agree
+on everything else; no table, no env variable and no npm package changed.
+A doorman or a validator without the route answers 404 and the masterpod
+moves to the next URL, so the masterpod's `VALIDATOR_URLS` should name
+validators that have it; the rest follow at the next pull round (operator
+guide, the doorman's and the validator's pull lines). The doorman's
+validator door passes only the paths in its table (doormansoftware
+`src/doors/validator.routes.js`); `/list-dao-stakes` is added there in
+step 2 of the plan, with a body check of its own, and that doorman
+restarted, before the masterpod can reach the route.
+
+### 23.3 Files
+
+Changed: `src/stakes/stakes.queries.js` (`listDaoVoteStakes`),
+`src/reads/reads.service.js` (`listDaoStakes`),
+`src/reads/reads.handlers.js` (`listDaoStakesHandler`),
+`src/reads/reads.router.js` (the route after the attestor reads, no
+middleware); comments only in `src/app.js` (the `readsRouter` line) and
+`src/stakes/stake-purposes.js` (the header). In the docs: the README's
+endpoints table, account-level reads paragraph, stake purposes table and
+layout (two lines); sections 2 and 8 above, and this section. No schema
+change, no file under `deploy/`, no package file, no change to
+`network/`.
+
+### 23.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 23.1 was changed.
+
+- **The build was made on main at 1bf6d56**, the break-glass commit of
+  section 22. Every line the plan quotes was where it said.
+- **The query's SQL is the plan's**, the column written out as
+  `dao_vote_stake` rather than taken from `stake-purposes.js`, as the plan
+  gave it. `SUM(dao_vote_stake) OVER ()` is NUMERIC to PostgreSQL, which
+  pg hands over as a decimal string like the BIGINTs; it is read off the
+  first row and passed through `String()`, so a type parser set on the
+  pool one day could not turn it into a number.
+- **Where the new lines sit**: `listDaoVoteStakes` at the end of
+  `stakes.queries.js`, after `moveStake`; `listDaoStakes` after
+  `listDisputedEscrows` in `reads.service.js`, before the shared helpers;
+  the handler and the route line last in their files, the route under a
+  comment of its own after a blank line, as the attestor reads are set
+  apart from the account level.
+- **Section 8's paragraph is headed "Public, unsigned"**, since the
+  submission table above it is already headed "Public": those routes are
+  public too, but every object they take is signed.
+- **Two spots outside the plan's file list** said daoVote was still
+  recorded only and were fixed on the user's word, as 22.4 fixed the
+  comments the break-glass build had made false: the header comment of
+  `src/stakes/stake-purposes.js`, and the README's layout line for
+  `stakes.queries.js`, which now names `listDaoVoteStakes`.
+- **Checks.** `node --check` passed on the six source files. The SQL ran
+  by psql against the local `anos1` in one transaction rolled back, the
+  statement prepared with the query's exact text: the live table held six
+  `stakes` rows, none with DAO stake; two throwaway rows went in, one with
+  12 anos of DAO stake and one with guardian stake only; the query
+  answered the one row with DAO stake, `dao_vote_stake` `12000000` and
+  `total` `12000000`, and not the other; after the rollback the table held
+  its six rows and a DAO total of 0 again. No validator was booted, no
+  test script was written. The local PostgreSQL had to be brought back
+  first: a `postmaster.pid` left by the server that ran before the day's
+  reboot, its pid since reused by another process, was moved out of the
+  data directory, and the Homebrew launchd job started the server by
+  itself.
+
+## 24. Appointed stakes (2026-11-08)
+
+Decided 2026-11-08 in the appointments planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/appointments-plan-1.md`. Why: three
+different checks decided who is a moderator or an attestor, and none of
+them knew about the others. The masterpod admitted a pod whose username
+started with `moderator` or `attestor` and that any super seed had vouched
+for, and never looked at a stake; nothing reserved those usernames, so the
+rule was really "any super seed vouched for you", and at the production
+launch about a thousand pods will be super seeds. This validator knows
+nothing about pods: it admits the account that signs, with attestor stake
+of at least `STAKE_MIN_ATTESTOR_ANOS` for the two attestor reads, every
+attestation and every escrow verdict, and anyone with a spending account
+and 1,000 anos could stake for either purpose, since `verifyTransferToFund`
+checks the minimum, the account type and the balance and nothing about the
+person. The keyholders admit an account with 1,000 anos of moderator or
+attestor stake to the bucket key routes, read from a validator's database.
+So anyone with 1,000 anos could attest assisted transfers, decide escrow
+disputes and pull bucket key shares, and the masterpod was never asked.
+Moderator and attestor are positions of trust; the fix below is good
+enough for the production launch and is grown later. The fix: one list of
+appointed pods on the masterpod, an `appointments` table written only by
+the operator's scripts (its spec, section 16); the masterpod's gates read
+it instead of the username and the vouch; the validators ask the masterpod
+before they accept a stake for `moderator` or `attestor`, the way they
+already ask it at create-account whether a vouched pod made the account.
+Then only an appointed pod can hold the stake, and the stake checks of the
+validators and the keyholders stand unchanged. Three repos in order: the
+masterpod (its section 16: the table, the two scripts, `role` in the
+answers of `/get-anos-account` and `/check-anopod-status`), the validator
+(this step), the wallet (its Stake for list reads `role`, and the two
+refusals below are shown in words), then the architecture records.
+Everything lands at the Test Net 2 relaunch, the masterpod first (24.2).
+The keyholders, the doorman and the signing server are not touched.
+
+### 24.1 The check
+
+`receiveTransferToFund` (`src/fund/fund.service.js`) hands
+`receiveTransaction` a check that runs `verifyTransferToFund` and then,
+when `payload.stakeFor` is `moderator` or `attestor`
+(`src/stakes/stake-purposes.js` `APPOINTED_PURPOSES` and
+`isAppointedPurpose`), asks the masterpod for the sending account:
+`POST MASTERPOD_URL/get-anos-account { accountId }`
+(`src/masterpod/masterpod.client.js` `fetchAnosAccount`, 5-second
+timeout), the one call this server makes to the masterpod, the same the
+binding check of create-account makes. The masterpod answers
+`200 { accountId, anopodId, vouched, role }` with `role` `"moderator"`,
+`"attestor"` or `null`. The client returns `{ bound: true, anopodId, role }`
+on a 200 whose `anopodId` decodes to 32 bytes and whose `vouched` is true,
+`role` the answer's when it is one of the two names and `null` otherwise
+(a masterpod from before this change sends no `role` field at all), and
+`{ bound: false }` for anything else, as before; `receiveCreateAccount`
+ignores `role`. `checkAppointment(body, verified)`, with `verified` the
+verify result, then has three outcomes:
+
+- no answer, or not bound: `{ ok: false, reason: "the masterpod could not
+  confirm the sending account's anoPod" }`;
+- bound, `role` not equal to `stakeFor`: `{ ok: false, reason: "the
+  sending account's anoPod is not appointed as <stakeFor>" }`;
+- otherwise the verify result, and the stake goes to `pending` and round
+  the validators as before.
+
+For the other four purposes the masterpod is not asked. The handler logs
+`failed: <reason>` and answers `400 { error }` as for any refusal
+(`src/util/submission-response.js`); nothing is dropped silently, since
+the signer is the account's own holder and learns nothing they did not
+know. Only the receiving validator asks: `validators.service.js`
+`verifyTransaction` runs `verifyTransferToFund` alone and trusts the
+check, as it trusts the binding check of create-account;
+`replay.service.js` and `held-rows.service.js` run
+`checkTransferToFundSignaturesAndIds` alone, as before. Nothing else
+changed: the stake minimums and every other check of a `transferToFund`,
+the stake checks of the attestor reads, the attestations and the escrow
+verdicts, the fund proposals and the leader round. The appointment decides
+who may stake; the stake still decides who holds the role. Out, by
+decision: the peers asking the masterpod; a masterpod signature on
+appointments carried in the transaction; an expiry on an appointment; the
+validators returning a revoked pod's stake, which the guardians' fund
+proposal payout with `stakeFor` does, so that until the payout is written
+the stake still counts here and at the keyholders (a follow-up).
+
+### 24.2 The rollout
+
+The receiving validator alone asks, so a mixed set is not safe: an
+unappointed moderator or attestor stake sent to a validator on the old
+build goes to `pending` there, and the peers on this build approve it,
+since the approval path runs `verifyTransferToFund` alone. At the Test Net
+2 relaunch every validator is on this build, so the gap does not arise.
+The masterpod goes first: a validator on this build against a masterpod
+that sends no `role` reads it as `null` and refuses every moderator and
+attestor stake as not appointed, while a validator on the old build
+ignores `role`. No table, no env variable and no npm package changed;
+`MASTERPOD_URL` is asked once more, at a moderator or attestor stake. The
+wallet follows the validators (the plan's step 3); until it does, it
+offers all six purposes, and the two refusals reach it as any other `400`
+reason.
+
+### 24.3 Files
+
+Changed: `src/stakes/stake-purposes.js` (`APPOINTED_PURPOSES`,
+`isAppointedPurpose`, the header), `src/masterpod/masterpod.client.js`
+(`fetchAnosAccount` returns `role`; the header, one import),
+`src/fund/fund.service.js` (`checkAppointment`, `receiveTransferToFund`,
+the comments of `verifyTransferToFund` and `receiveTransferToFund`, two
+imports). In the docs: the README's env table (`MASTERPOD_URL`), stake
+purposes table (two rows), the `/transfer-to-fund` paragraph after it and
+the layout line for `masterpod.client.js`; sections 2, 4.3 and 10 above,
+and this section. No schema change, no file under `deploy/`, no package
+file, no change to `network/`; nothing in `accounts.service.js`,
+`validators.service.js`, `replay.service.js` or `held-rows.service.js`.
+
+### 24.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 24.1 was changed.
+
+- **The build was made on main at b8c8d32**, the DAO stake read commit of
+  section 23, against the masterpod's step 1 at its 775d901. Every line
+  the plan quotes was where it said.
+- **`checkAppointment` sits right after `receiveTransferToFund`**, the one
+  function that calls it, rather than among the shared helpers at the foot
+  of the file, so the two read together.
+- **The client decides what counts as a role with `isAppointedPurpose`**
+  from `stake-purposes.js`, so the two strings live in one place: the
+  masterpod spells its roles as the validator spells its two appointed
+  purposes, and the check compares them with `===`.
+- **`receiveCreateAccount` is untouched**: it reads `bound` and nothing
+  else, so the new `role` passes it by.
+- **One comment outside the plan's file list** still names
+  `MASTERPOD_URL` as the binding check alone: the `masterpodUrl` line of
+  `src/config/env.js`. Left for the user's word, as 22.4 and 23.4 handled
+  such lines.
+- **Checks.** `node --check` passed on the three source files; every
+  imported name was confirmed exported where it comes from by grep. No
+  validator was booted, no database touched, no rig run, as 2.4 says.
+
+## 25. The fund proposal reads (2026-11-08)
+
+Decided 2026-11-08 in the Guardians planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/wallet-guardians-plan-1.md`. Why: the
+guardian features sat on the wallet's account page as two folded panels, a
+vote on a proposal id pasted by hand and a payout form, and nothing in the
+wallet could show a fund proposal, because the validators had no read for
+one: a guardian learned a proposal's id from the one-time 202 or from
+somebody else, and nobody saw the votes or the result. The wallet gets a
+Guardians page under its DAO page (`/dao/guardians`), where everyone sees
+the fund's proposals, their payouts, the votes and the decided list, and an
+account with at least one guardian vote proposes and votes. The validators
+keep the guts as they were (the `fundProposal` transaction of 4.4, the
+`guardianVote` follow-up of 5.4, the tally of section 6, the tables of
+section 3, the archives of section 7) and gain the reading side: two public
+reads built like `/list-dao-stakes` (section 23), and two fields on
+`/get-account`. Read only and additive: no table, no env variable, no npm
+package; a validator with the routes and one without agree on everything
+else. Three repos in order: the validator (this step), the doorman (its
+spec, section 7: the two lines of its validator door), the wallet (its
+sections 8 and 10: the pages), then the architecture records; deployed
+validators and doormen first, then the wallet, no reset.
+
+### 25.1 The routes
+
+Public, like `/list-dao-stakes`: no envelope, no signature, no middleware;
+the body must be an object (`400 bad request shape`); the 503 "not counted
+yet" of a joiner applies as to every POST; refusals are logged `failed:
+<reason>` like every route. Everything they answer is the fund's business:
+a written proposal's payouts are on the public chain as `transferFromFund`
+links, and the votes are the guardians' public act on the fund's money.
+
+| Method | Path | Body | Answers |
+| ------ | ---- | ---- | ------- |
+| POST | `/list-fund-proposals` | `{ status: 'open' \| 'decided', limit?, offset?, from?, to? }` | `200 { settings, proposals: [ item ] }` |
+| POST | `/get-fund-proposal` | `{ transactionId: hex }` | `200 { settings, proposal }`, the item plus the payouts and the proposer's weight, else `404 unknown proposal` |
+
+`settings` is `{ anosPerVote, minimumStake, percent, minutes }`, the four
+env values: `GUARDIAN_VOTE_ANOS` and `STAKE_MIN_GUARDIAN_ANOS` in millionths
+as decimal strings like every amount, `GUARDIAN_VOTE_PERCENT` and
+`GUARDIAN_VOTE_MINUTES` as numbers, so the wallet's notice, its rule and its
+become-a-guardian sentence read the validator's own numbers.
+
+An `item`:
+
+```
+{
+  transactionId:  hex, the proposal's
+  guardianId:     hex, the proposer's account, as the payload names it
+  createdAt:      the payload's createdAt
+  voteClosesAt:   ISO 8601
+  status:         waiting | open | closing | written | failed (25.2)
+  approved:       boolean, the row's
+  payoutCount:    number
+  total:          millionths as a decimal string, the payouts summed
+  forWeight:      number, proposer_weight plus the approved votes for
+  againstWeight:  number, the approved votes against
+  passing:        boolean, the tally as it stands, by the round's own rule (fund.service.js votePasses)
+  decidedAt:      ISO 8601 | null, the archives row's created_at
+  votes:          [ { guardianId: hex, vote: for | against, weight, approved, votedAt } ], guardian id order
+}
+```
+
+The `proposal` of `/get-fund-proposal` is the item plus `proposerWeight`
+(the proposer's votes when the proposal was stored) and `payouts: [ {
+index, accountIdTo: hex, amount, reason, stakeFor: purpose | null } ]` in
+index order, the fields as the proposer sent them.
+
+`status: 'open'` lists the `fund_proposals` rows, at most one (the fund's
+`account_id` is unique there); `limit`, `offset`, `from` and `to` are not
+read. `status: 'decided'` lists the `archives` rows with `source =
+'fund_proposals'`, newest first by `created_at`, `limit` default 20 at most
+200, after `offset` rows (default 0), with `created_at` at or after `from`
+and before `to` when given (ISO 8601; either alone works; `to` is the first
+moment after the range, as `/list-transactions` takes them). Anything else
+in `status` is `400 invalid status`; a bad value is `400 invalid limit`,
+`invalid offset`, `invalid from` or `invalid to`. `/get-fund-proposal`
+looks in `fund_proposals` first, then in `archives` (the rows that left
+`fund_proposals` only; an escrow's id there is `404 unknown proposal`); a
+`transactionId` that is not 64 hex characters is `400 invalid
+transactionId`.
+
+The archive's `record` holds the row and its votes as PostgreSQL's JSON of
+the rows (`records.queries.js`, `to_jsonb`): bytes come out as hex text
+with a leading `\x`, timestamps as ISO 8601 with the server's offset. The
+read strips the `\x`, re-reads the timestamps as UTC, takes the proposer
+and the payouts from `record.row.og_transaction.payload` and the votes
+from `record.votes`, and adds the tally up as the round did
+(`proposer_weight` plus the approved votes for; the approved votes
+against), so an archived item has the same shape as an open one.
+
+`/get-account` (section 8) gains two fields after `createdAt`: `stakes`,
+`{ daoVote, moderator, attestor, guardian, validator, masterPod }`, each
+millionths as a decimal string, `"0"` each when the account has no `stakes`
+row; and `guardianVotes`, `floor(guardian / GUARDIAN_VOTE_ANOS)` as a
+number (`stakes.service.js guardianWeight`). One `findStake` per call. The
+wallet's `AccountAnswer` gains two optional fields; nothing that reads the
+answer today changes.
+
+### 25.2 The statuses
+
+The first line that matches:
+
+| Status | When |
+| ------ | ---- |
+| `waiting` | the `fund_proposals` row is not approved: not every validator has accepted the proposal yet, and no vote is accepted on it (5.1) |
+| `open` | approved, and `vote_closes_at` is ahead |
+| `closing` | approved, `vote_closes_at` has passed, and the row is still in `fund_proposals`: the next ready list tallies it (section 6, "no timer anywhere") |
+| `written` | an `archives` row with outcome `written`: the vote passed and the round wrote the payouts |
+| `failed` | an `archives` row with outcome `voteFailed` |
+
+The clock is the database's (`vote_closes_at <= now()` in the query), the
+one the ready list reads, so the wallet and the ready list agree. A wallet
+that meets a status it does not know shows the proposal and offers no
+button.
+
+### 25.3 Files
+
+Changed: `src/fund/fund.queries.js` (`findOpenProposals`,
+`findProposalVotes`, the header), `src/records/records.queries.js`
+(`findArchivedProposals`, `findArchivedProposal`, the `query` import, the
+header), `src/reads/reads.service.js` (`listFundProposals`,
+`getFundProposal`, `FUND_PROPOSAL_STATUSES`, the helpers `settingsOf`,
+`proposalItemOf`, `archivedItemOf` and what they share; `getAccount` and
+`stakesOf`; the header), `src/reads/reads.handlers.js`
+(`listFundProposalsHandler`, `getFundProposalHandler`, the header),
+`src/reads/reads.router.js` (the two routes after `/list-dao-stakes`, no
+middleware; the header); comments only in `src/app.js` (the `readsRouter`
+line). In the docs: the README's endpoints table (two rows, the
+`/get-account` row), its account-level reads paragraph, its `/get-account`
+bullet and three layout lines; section 8 above and this section. No schema
+change, no env variable, no npm package, no file under `deploy/`, no change
+to `network/`.
+
+### 25.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 25.1 was changed.
+
+- **The build was made on main at b62ac29**, the appointed stakes commit of
+  section 24. The plan called this section 24; that number was taken by the
+  appointed stakes, committed after the plan was written, so the fund
+  proposal reads are section 25 here and in every comment that names them.
+- **A bad `limit` or `offset`** on the decided list is refused, `400
+  invalid limit` and `400 invalid offset`, as `/list-transactions` refuses
+  its `limit`; the plan named the four other words only.
+- **The single read finds its open row through `findOpenProposals`** and
+  picks the row with the id asked for: the table holds one row at most, so
+  the one query with the sums serves both reads and nothing is tallied
+  twice.
+- **The tally of an archived proposal is added up in the code** from
+  `record.votes`, the approved votes only, the proposer's weight first, as
+  the round added it up in SQL while the proposal was open; the two agree
+  because the archive holds the very rows the round read.
+- **`closed` comes from the database's clock**, `vote_closes_at <= now()`
+  in `findOpenProposals`, as `due` does in the locked and assisted reads.
+  `guardian-vote.js` reads the process clock for its own check, as it did.
+- **An archive outcome the read does not know passes through as the
+  status**, so a wallet shows the row and offers no button, as 25.2 says
+  of an unknown status. Only `written` and `voteFailed` reach `archives`
+  from `fund_proposals` today.
+- **`findProposalVotes` leaves the signature out**: the item carries the
+  vote, the weight, the flag and the moment; the whole `guardianVote`
+  object is nobody's business on a public read.
+- **The timestamps of an archive record** come out of `to_jsonb` with
+  microseconds and the server's offset (`2026-11-08T19:07:59.442641-08:00`
+  on the build machine); `Date.parse` takes that form, and the read
+  answers them as UTC with milliseconds, the form every other read answers.
+- **Importing `votePasses` from `fund.service.js`** pulls the fund
+  feature's imports into the reads module, the signing module among them,
+  which reads the key file when it loads; the server loads them before the
+  reads router in any case (`src/app.js` mounts `fundRouter` first), so
+  nothing new happens at boot.
+- **Checks.** `node --check` passed on the six source files. No validator
+  runs on the build machine and none was booted, so the plan's curl step is
+  the user's. Instead the three reads were run as functions, the real
+  service, queries and pool, against a throwaway database made from
+  `db/schema.sql` on the local PostgreSQL (`anos_scratch_guardians`,
+  dropped afterwards) holding two accounts, one with 2,500 anos of guardian
+  stake, one open proposal with an approved vote for and an unapproved vote
+  against, two archived proposals moved with the exact statement of
+  `records.queries.js` (one `voteFailed`, dated two days back; one
+  `written`) and one archived escrow. The twenty calls answered as 25.1
+  says: the open item `open`, `forWeight` 5 (2 plus 3; the unapproved
+  against not counted), `total` `"6500000"`, `passing` true, its two
+  payouts with `index` and `stakeFor` null on the second; the decided list
+  newest first with `written` then `failed`, the failed one 5 for and 4
+  against and `passing` false, `decidedAt` from the archive row, every
+  timestamp in UTC; `from`, `to`, `limit` and `offset` cutting the list as
+  given; the escrow's id `404 unknown proposal`; the five 400 words and the
+  404; `/get-account` with `guardian` `"2500000000"` and `guardianVotes`
+  2, and all `"0"` with 0 for the account without a stakes row.

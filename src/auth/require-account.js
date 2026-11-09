@@ -6,7 +6,8 @@ import { parseSignedRequest, verifyBoth } from './signed-request.js';
 
 /**
  * The account level (wallet spec 5.3): a request signed by an account's pair
- * one, both signatures, for the reads (src/reads/). Runs the six steps in
+ * one, or since 2026-11-08 by its break-glass pair, both signatures, for
+ * the reads (src/reads/). Runs the six steps in
  * order and stops at the first failure; on success `req.account` is the
  * account's id as a 32-byte Buffer and `req.body` is `payload.body`, the
  * route's own object, so a handler reads the caller from req.account and
@@ -23,12 +24,17 @@ export async function requireAccount(req, res, next) {
   if (common) return answer(res, common);
 
   // 4. The account: its id decodes, it has a row, and both signatures are
-  //    by pair one (public_key1, public_key_pq1).
+  //    by pair one (public_key1, public_key_pq1) or, when that fails, by
+  //    the break-glass pair (break_glass_pk, break_glass_pk_pq): the signer
+  //    is the account's pair one, or its break-glass pair, so a recovered
+  //    person reads an account whose user keys are gone with the seed the
+  //    bankers delivered (docs/schemas.md section 22).
   const accountId = decodeDigest(payload.accountId);
   if (accountId === null) return answer(res, refuse(400, 'invalid accountId'));
   const account = await findAccount(accountId);
   if (account === null) return answer(res, refuse(401, 'unknown account'));
-  if (!verifyBoth(payload, signatures, account.publicKey1, account.publicKeyPq1)) {
+  if (!verifyBoth(payload, signatures, account.publicKey1, account.publicKeyPq1)
+    && !verifyBoth(payload, signatures, account.breakGlassPk, account.breakGlassPkPq)) {
     return answer(res, refuse(401, 'bad signature'));
   }
 

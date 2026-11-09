@@ -1,6 +1,7 @@
 import { ANY_TWO_PAIRS, verifyAccountSignatures } from '../accounts/account-signatures.js';
 import { assistedTransferCancel } from '../assisted-transfers/assisted-transfer-cancel.js';
 import { attestation } from '../assisted-transfers/attestation.js';
+import { breakGlassCancel } from '../assisted-transfers/break-glass-cancel.js';
 import { canonicalHash, canonicalize } from '../crypto/canonical.js';
 import { decodeDigest, digestMatches } from '../crypto/hash.js';
 import { escrowCancel } from '../escrow/escrow-cancel.js';
@@ -32,13 +33,15 @@ import { verifyPayloadSignature } from '../validators/validators.signing.js';
  * is waiting in a holding table. Every follow-up is { payload, signatures }:
  *
  *   payload: {
- *     type:          the kind, one of the seven KINDS
+ *     type:          the kind, one of the eight KINDS
  *     transactionId: the held transaction it attaches to
  *     <signer>:      the signer's account id, under the field the kind names
  *     signedAt:      ISO 8601, recorded, not compared with the clock
  *     ...the kind's own fields
  *   }
- *   signatures: the signer's account keys, any two pairs
+ *   signatures: the signer's account keys, any two pairs, or under the rule
+ *               the kind names (`rule`: the breakGlassCancel, the
+ *               break-glass pair alone; docs/schemas.md section 22)
  *
  * This module is the flow every kind shares: the checks of each follow-up,
  * in order, and its way round the validators, which mirrors a transaction's
@@ -53,10 +56,11 @@ import { verifyPayloadSignature } from '../validators/validators.signing.js';
  * canonical payload, which they compute; the signer does not send it.
  */
 
-/** The seven kinds, every one a peer accepts in an attachment approval. */
+/** The eight kinds, every one a peer accepts in an attachment approval. */
 export const KINDS = Object.freeze([
   attestation,
   assistedTransferCancel,
+  breakGlassCancel,
   guardianVote,
   escrowSuccess,
   escrowCancel,
@@ -131,7 +135,7 @@ export async function receiveAttachment(body, kinds) {
  *      approved receipt is answered again, as the first time, instead of
  *      "already present";
  *   4. the embedded follow-up passes every check the originating validator
- *      ran (verifyAttachment, any of the seven kinds), against this
+ *      ran (verifyAttachment, any of the eight kinds), against this
  *      validator's own database, and transactionId is the one it names;
  *   5. the kind stores it here, approved = false.
  * Returns { ok: true, receipt } with the signed attachment approved receipt
@@ -330,8 +334,9 @@ async function verifyAttachment(body, kinds) {
 /**
  * The shape and signature checks of a follow-up, nothing against the held
  * row: the shape, common and the kind's own (`kinds` the kinds allowed);
- * the ids decode; the signer's account exists; the signatures, any two
- * pairs, against that account's keys. Returns { ok: true, kind,
+ * the ids decode; the signer's account exists; the signatures, under the
+ * rule the kind names (`rule`) or any two pairs when it names none, against
+ * that account's keys. Returns { ok: true, kind,
  * transactionId, signerId, signer } with the ids as 32-byte Buffers and
  * the signer's account row, or { ok: false, reason }.
  */
@@ -350,7 +355,7 @@ export async function checkAttachmentSignatures(body, kinds) {
   if (!signer) return { ok: false, reason: `no account with this ${kind.signerField}` };
 
   const message = Buffer.from(canonicalize(payload), 'utf8');
-  const badSignatures = verifyAccountSignatures(signer, signatures, message, ANY_TWO_PAIRS);
+  const badSignatures = verifyAccountSignatures(signer, signatures, message, kind.rule ?? ANY_TWO_PAIRS);
   if (badSignatures) return { ok: false, reason: badSignatures };
 
   return { ok: true, kind, transactionId, signerId, signer };
