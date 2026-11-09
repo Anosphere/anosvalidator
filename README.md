@@ -267,12 +267,14 @@ multi-word URL segments.
 | POST   | `/break-glass-cancel` | The break-glass pair's cancellation of a break-glass transfer, answered the same way (added 2026-11-08, `docs/schemas.md` section 22) |
 | POST   | `/guardian-vote`  | A guardian's vote on a fund proposal, answered the same way |
 | POST   | `/escrow-signature` | The seller's success, the buyer's cancel, either side's dispute or an arbitrator's verdict on an escrow, by `payload.type`, answered the same way |
-| POST   | `/get-account`    | Account level (next section). The signer's `type`, `balance` (millionths, a decimal string), `latestTransactionId` and `createdAt`: `200`, else `400` or `401` + reason |
+| POST   | `/get-account`    | Account level (next section). The signer's `type`, `balance` (millionths, a decimal string), `latestTransactionId`, `createdAt` and, since 2026-11-08 (`docs/schemas.md` section 25), its `stakes` by purpose and its `guardianVotes`: `200`, else `400` or `401` + reason |
 | POST   | `/list-transactions` | Account level. The signer's garlic chain links, newest first, paged with `beforePosition` and `limit`, cut to a date range with `from` and `to`, and its pending transaction: `200`, else `400` or `401` + reason |
 | POST   | `/list-escrows`   | Account level. The signer's open escrow trades, as seller or buyer, newest first, each with its `stage`: `200 { escrows }`, else `400` or `401` + reason |
 | POST   | `/get-assisted-transfer` | Account level. The signer's own held assisted transfer or break-glass move, with its `type`, its `stage`, the number of attestations on it and its `unlocksAt`, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
 | POST   | `/get-locked-transfer` | Account level. The signer's own locked transfer, a guarded or vault transfer waiting out its time lock, with its `unlocksAt` and its `stage`, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
 | POST   | `/list-dao-stakes` | Public, no signature (added 2026-11-08, `docs/schemas.md` section 23). Every account's DAO vote stake, for the masterpod's snapshot of DAO voting weights, with their total and the server's clock: `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`, else `400 bad request shape` |
+| POST   | `/list-fund-proposals` | Public, no signature (added 2026-11-08, `docs/schemas.md` section 25). The fund's proposals with their status, their tally and their votes, for the wallet's Guardians page: body `{ status: 'open' }` the open proposal (at most one), `{ status: 'decided', limit?, offset?, from?, to? }` the decided ones from `archives`, newest first: `200 { settings, proposals }`, else `400` + reason |
+| POST   | `/get-fund-proposal` | Public, no signature (the same day, section 25). One proposal, open or decided, with its payouts and the proposer's weight: body `{ transactionId }`: `200 { settings, proposal }`, else `400` + reason or `404 unknown proposal` |
 | POST   | `/list-assisted-transfers` | Attestor level (account level plus attestor stake). The assisted transfers waiting for attestors on this validator, newest first: `200 { transfers }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/list-disputed-escrows` | Attestor level. The escrows in dispute that no verdict has decided on this validator, newest first: `200 { escrows }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/transaction-approval` | Validator to validator. `200` + a transaction approved receipt once the transaction checks out and is stored, else `400` + reason |
@@ -296,14 +298,17 @@ whatever the validators said.
 A fourth kind of caller, beside wallets submitting transactions, the other
 validators and nobody: an account signing with pair one, or since
 2026-11-08 with its break-glass pair, for reads about itself
-(`src/auth/require-account.js`, `src/reads/`). The one public read,
-`POST /list-dao-stakes` (added 2026-11-08, `docs/schemas.md` section 23),
-lives in `src/reads/` too but takes no envelope and no signature: body
-`{}`, `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`,
-every account's DAO vote stake with their total and the server's clock,
-read by the masterpod for its snapshot of DAO voting weights. The envelope
-of the signed reads is the masterpod's and the keyholder's, with
-`accountId` as the signer field:
+(`src/auth/require-account.js`, `src/reads/`). Three public reads live in
+`src/reads/` too but take no envelope and no signature, only a body that
+is an object: `POST /list-dao-stakes` (added 2026-11-08, `docs/schemas.md`
+section 23), body `{}`, `200 { asOf, total, stakes: [ { accountId,
+daoVoteStake } ] }`, every account's DAO vote stake with their total and
+the server's clock, read by the masterpod for its snapshot of DAO voting
+weights; and `POST /list-fund-proposals` and `POST /get-fund-proposal`
+(the same day, section 25), the fund's proposals with their statuses,
+tallies, votes and payouts, and the validator's guardian-vote `settings`,
+read by the wallet's Guardians page. The envelope of the signed reads is
+the masterpod's and the keyholder's, with `accountId` as the signer field:
 
 ```json
 {
@@ -344,10 +349,16 @@ failure:
 The five routes answer the signer's own account only:
 
 - `POST /get-account`, body `{}`: `200 { accountId, type, balance,
-  latestTransactionId, createdAt }`. `balance` is millionths as a decimal
-  string; `latestTransactionId` is the `transaction_id` of the garlic chain
-  link with the highest `position` whose `account_id` is the signer, what the
-  next transfer names as `previousTransactionId`, or `null`.
+  latestTransactionId, createdAt, stakes, guardianVotes }`. `balance` is
+  millionths as a decimal string; `latestTransactionId` is the
+  `transaction_id` of the garlic chain link with the highest `position`
+  whose `account_id` is the signer, what the next transfer names as
+  `previousTransactionId`, or `null`. Since 2026-11-08 (`docs/schemas.md`
+  section 25) `stakes` is the signer's `{ daoVote, moderator, attestor,
+  guardian, validator, masterPod }`, each millionths as a decimal string,
+  `"0"` each when it has no `stakes` row, and `guardianVotes` its votes on
+  fund proposals, one per `GUARDIAN_VOTE_ANOS` of guardian stake, rounded
+  down.
 - `POST /list-transactions`, body `{ beforePosition?, limit?, from?, to? }`
   (`limit` 1 to 200, default 50; `from` and `to` ISO 8601 strings, added
   2026-11-06, `docs/schemas.md` section 18.3): `200 { transactions,
@@ -1466,7 +1477,7 @@ src/
                          the attestor gate on top of it: require-attestor.js
   masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check of create-account and the appointment check of a moderator or attestor stake
   reads/                 feature: the five signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer, get-locked-transfer),
-                         the two attestor reads (list-assisted-transfers, list-disputed-escrows) and the one public read (list-dao-stakes)
+                         the two attestor reads (list-assisted-transfers, list-disputed-escrows) and the three public reads (list-dao-stakes, list-fund-proposals, get-fund-proposal)
     reads.router.js, reads.handlers.js, reads.service.js, reads.queries.js
   crypto/hash.js         SHA-256, digest decoding and constant-time comparison
   crypto/canonical.js    canonical JSON (canonicalize package) and its hash
@@ -1507,7 +1518,7 @@ src/
     fund-account.js      the fund's account id
     fund.router.js, fund.handlers.js
     fund.service.js      verifies, receives and writes transfers to the fund and fund proposals; the tally
-    fund.queries.js      the fund_proposals and guardian_votes SQL
+    fund.queries.js      the fund_proposals and guardian_votes SQL; the open proposals with their tally and their votes, for the reads
     guardian-vote.js     the guardianVote follow-up kind
   assisted-transfers/    feature: the assisted_transfers table and its follow-ups
     assisted-transfers.router.js  /attestation, /assisted-transfer-cancel, /break-glass-cancel
@@ -1523,7 +1534,7 @@ src/
     attachments.handlers.js the handler every follow-up endpoint is built from
     stored-attachments.js   finding a stored follow-up by its attachmentId
   records/               logs and archives
-    records.queries.js   moveToLogs, moveToArchives
+    records.queries.js   moveToLogs, moveToArchives; the decided fund proposals in archives, for the reads
   validators/            feature: the validator registry and validator-to-validator messages
     validators.queries.js  counted and member peers; one validator with its keys; the leader; the ignored flag; the next in the ring
     validators.client.js   POST one message to each peer, in parallel, and GET one validator's health, each with the timeout

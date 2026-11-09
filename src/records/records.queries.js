@@ -1,10 +1,15 @@
+import { query } from '../db/pool.js';
+
 /**
  * SQL for logs and archives: where a row goes when it leaves
  * assisted_transfers, escrow_transfers or fund_proposals (db/schema.sql).
  * The two tables have the same columns; a move is one database transaction
  * on `client`, a connection checked out of the pool: the insert of the row
  * and its child rows as one JSON record, then the deletes. Every validator
- * does every move for itself, so the copies stay identical.
+ * does every move for itself, so the copies stay identical. Since
+ * 2026-11-08 the archives are read too: findArchivedProposals and
+ * findArchivedProposal, the decided fund proposals the fund proposal reads
+ * answer (docs/schemas.md section 25).
  *
  * Ids are Buffers of 32 raw bytes, matching the BYTEA columns. Table names
  * come from SOURCES below, a fixed table, never from a request, so they are
@@ -100,4 +105,45 @@ async function move(client, target, source, outcome, transactionId) {
     await client.query('ROLLBACK');
     throw err;
   }
+}
+
+/** The source of a decided fund proposal's archives row: the table it left. */
+const FUND_PROPOSALS_SOURCE = 'fund_proposals';
+
+/**
+ * The fund proposals that have been decided, for the fund proposal reads
+ * (docs/schemas.md section 25): the archives rows with source
+ * fund_proposals (outcome WRITTEN or VOTE_FAILED), newest first by
+ * created_at, `offset` rows skipped, at most `limit` rows, with created_at
+ * at or after `from` and before `to` when each is not null (Date objects or
+ * null; either alone works, as reads.queries.js findTransactions takes
+ * them). Each row: transaction_id, outcome, record, created_at, as the
+ * columns are; record is { row, votes } as move built it.
+ */
+export async function findArchivedProposals({ limit, offset, from, to }) {
+  const { rows } = await query(
+    `SELECT transaction_id, outcome, record, created_at
+     FROM ${ARCHIVES}
+     WHERE source = $1
+       AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)
+       AND ($5::timestamptz IS NULL OR created_at < $5::timestamptz)
+     ORDER BY created_at DESC
+     LIMIT $2 OFFSET $3`,
+    [FUND_PROPOSALS_SOURCE, limit, offset, from, to],
+  );
+  return rows;
+}
+
+/**
+ * The archives row of one decided fund proposal (the columns as
+ * findArchivedProposals gives them), or null when there is none: the id is
+ * not in archives, or is there for an escrow.
+ */
+export async function findArchivedProposal(transactionId) {
+  const { rows } = await query(
+    `SELECT transaction_id, outcome, record, created_at FROM ${ARCHIVES}
+     WHERE transaction_id = $1 AND source = $2`,
+    [transactionId, FUND_PROPOSALS_SOURCE],
+  );
+  return rows.length === 0 ? null : rows[0];
 }

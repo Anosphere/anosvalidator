@@ -673,21 +673,26 @@ keyholder's). Every held-transfer read below answers `type`, the payload's
 
 | Method | Path                 | Answers |
 | ------ | -------------------- | ------- |
-| POST   | `/get-account`       | `200 { accountId, type, balance: millionths as a decimal string, latestTransactionId: hex \| null, createdAt }`; `latestTransactionId` is the link with the highest `position` whose `account_id` is the signer |
+| POST   | `/get-account`       | `200 { accountId, type, balance: millionths as a decimal string, latestTransactionId: hex \| null, createdAt, stakes: { daoVote, moderator, attestor, guardian, validator, masterPod }, guardianVotes }`; `latestTransactionId` is the link with the highest `position` whose `account_id` is the signer; `stakes` the signer's six amounts in millionths as decimal strings, `"0"` each when it has no `stakes` row, and `guardianVotes` its votes on fund proposals, `floor(guardian / GUARDIAN_VOTE_ANOS)`, a number (added 2026-11-08, section 25) |
 | POST   | `/list-transactions` | body `{ beforePosition?, limit? (default 50, at most 200), from?, to? (ISO 8601; added 2026-11-06, section 18.3) }`; `200 { transactions: [ { transactionId, position, type, accountId, accountIdTo, amount, createdAt } ], pending: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, approved } ] }`, the links where the signer sent or received, `position` descending, with `createdAt` at or after `from` and before `to` when given, and its pending row (at most one) read from `og_transaction.payload`, not cut by the dates |
 | POST   | `/list-escrows`      | body `{}`; `200 { escrows: [ { transactionId, type, accountId, accountIdTo, amount, createdAt, stage, disputedBy, verdicts: [ { verdict, approved } ] } ] }`, the signer's open escrow trades as seller or buyer, newest first, at most 200 (added 2026-11-05, section 16) |
 | POST   | `/get-assisted-transfer` | body `{}`; `200 { transfer: { transactionId, type, accountId, accountIdTo, amount, createdAt, stage, attestations, unlocksAt } \| null }`, the signer's own held assisted transfer or break-glass move, the `assisted_transfers` row whose `account_id` is the signer (at most one), or `null` when there is none (added 2026-11-06, section 17; `type`, `unlocksAt` and the `locked` stage 2026-11-08, section 22) |
 | POST   | `/get-locked-transfer` | body `{}`; `200 { transfer: { transactionId, type, accountId, accountIdTo, amount, createdAt, unlocksAt, stage } \| null }`, the signer's own locked transfer, the `locked_transactions` row whose `account_id` is the signer (at most one), a guarded or vault transfer waiting out its time lock, or `null` when there is none (added 2026-11-06, section 18) |
 
-Public, unsigned (added 2026-11-08 for the DAO voting ledger on the
-masterpod, section 23): one read with no envelope, no signature and no
-middleware, the first route of the kind. The body must be an object (`400
-bad request shape`); nothing in it is read. Everything it answers is
-already on the public chain, each `transferToFund` link naming its purpose.
+Public, unsigned (added 2026-11-08: one read for the DAO voting ledger on
+the masterpod, section 23, the first route of the kind, and two more the
+same day for the wallet's Guardians page, section 25): reads with no
+envelope, no signature and no middleware. The body must be an object (`400
+bad request shape`). Everything they answer is the fund's public business:
+each `transferToFund` link names its purpose on the chain, a written
+proposal's payouts are on the chain as `transferFromFund` links, and the
+votes are the guardians' public act on the fund's money.
 
 | Method | Path                 | Answers |
 | ------ | -------------------- | ------- |
 | POST   | `/list-dao-stakes`   | body `{}`; `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`: every `stakes` row with `dao_vote_stake > 0`, `accountId` hex, `daoVoteStake` millionths as a decimal string, account id ascending; `total` their sum as a decimal string (`"0"` with no rows); `asOf` the server clock at the read, ISO 8601. Read by the masterpod for its snapshot of DAO voting weights |
+| POST   | `/list-fund-proposals` | body `{ status: 'open' \| 'decided', limit?, offset?, from?, to? }`; `200 { settings, proposals: [ item ] }`: for `open` the `fund_proposals` rows (at most one), for `decided` the `archives` rows that left `fund_proposals`, newest first, `limit` default 20 at most 200, after `offset` rows, with `created_at` at or after `from` and before `to` when given; `settings` the validator's `{ anosPerVote, minimumStake, percent, minutes }`; an `item` the proposal with its status, its tally and its votes (section 25.1). Bad values are `400 invalid status`, `invalid limit`, `invalid offset`, `invalid from` and `invalid to` |
+| POST   | `/get-fund-proposal` | body `{ transactionId: hex }`; `200 { settings, proposal }`, the item plus `proposerWeight` and `payouts: [ { index, accountIdTo, amount, reason, stakeFor } ]`, looked for in `fund_proposals` first, then in `archives`; `400 invalid transactionId` unless 64 hex characters; `404 unknown proposal` |
 
 `/create-account` gained a fifth check after uniqueness, on the receiving
 validator only: the masterpod is asked `POST /get-anos-account { accountId }`
@@ -3111,3 +3116,196 @@ here; nothing in 24.1 was changed.
 - **Checks.** `node --check` passed on the three source files; every
   imported name was confirmed exported where it comes from by grep. No
   validator was booted, no database touched, no rig run, as 2.4 says.
+
+## 25. The fund proposal reads (2026-11-08)
+
+Decided 2026-11-08 in the Guardians planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/wallet-guardians-plan-1.md`. Why: the
+guardian features sat on the wallet's account page as two folded panels, a
+vote on a proposal id pasted by hand and a payout form, and nothing in the
+wallet could show a fund proposal, because the validators had no read for
+one: a guardian learned a proposal's id from the one-time 202 or from
+somebody else, and nobody saw the votes or the result. The wallet gets a
+Guardians page under its DAO page (`/dao/guardians`), where everyone sees
+the fund's proposals, their payouts, the votes and the decided list, and an
+account with at least one guardian vote proposes and votes. The validators
+keep the guts as they were (the `fundProposal` transaction of 4.4, the
+`guardianVote` follow-up of 5.4, the tally of section 6, the tables of
+section 3, the archives of section 7) and gain the reading side: two public
+reads built like `/list-dao-stakes` (section 23), and two fields on
+`/get-account`. Read only and additive: no table, no env variable, no npm
+package; a validator with the routes and one without agree on everything
+else. Three repos in order: the validator (this step), the doorman (its
+spec, section 7: the two lines of its validator door), the wallet (its
+sections 8 and 10: the pages), then the architecture records; deployed
+validators and doormen first, then the wallet, no reset.
+
+### 25.1 The routes
+
+Public, like `/list-dao-stakes`: no envelope, no signature, no middleware;
+the body must be an object (`400 bad request shape`); the 503 "not counted
+yet" of a joiner applies as to every POST; refusals are logged `failed:
+<reason>` like every route. Everything they answer is the fund's business:
+a written proposal's payouts are on the public chain as `transferFromFund`
+links, and the votes are the guardians' public act on the fund's money.
+
+| Method | Path | Body | Answers |
+| ------ | ---- | ---- | ------- |
+| POST | `/list-fund-proposals` | `{ status: 'open' \| 'decided', limit?, offset?, from?, to? }` | `200 { settings, proposals: [ item ] }` |
+| POST | `/get-fund-proposal` | `{ transactionId: hex }` | `200 { settings, proposal }`, the item plus the payouts and the proposer's weight, else `404 unknown proposal` |
+
+`settings` is `{ anosPerVote, minimumStake, percent, minutes }`, the four
+env values: `GUARDIAN_VOTE_ANOS` and `STAKE_MIN_GUARDIAN_ANOS` in millionths
+as decimal strings like every amount, `GUARDIAN_VOTE_PERCENT` and
+`GUARDIAN_VOTE_MINUTES` as numbers, so the wallet's notice, its rule and its
+become-a-guardian sentence read the validator's own numbers.
+
+An `item`:
+
+```
+{
+  transactionId:  hex, the proposal's
+  guardianId:     hex, the proposer's account, as the payload names it
+  createdAt:      the payload's createdAt
+  voteClosesAt:   ISO 8601
+  status:         waiting | open | closing | written | failed (25.2)
+  approved:       boolean, the row's
+  payoutCount:    number
+  total:          millionths as a decimal string, the payouts summed
+  forWeight:      number, proposer_weight plus the approved votes for
+  againstWeight:  number, the approved votes against
+  passing:        boolean, the tally as it stands, by the round's own rule (fund.service.js votePasses)
+  decidedAt:      ISO 8601 | null, the archives row's created_at
+  votes:          [ { guardianId: hex, vote: for | against, weight, approved, votedAt } ], guardian id order
+}
+```
+
+The `proposal` of `/get-fund-proposal` is the item plus `proposerWeight`
+(the proposer's votes when the proposal was stored) and `payouts: [ {
+index, accountIdTo: hex, amount, reason, stakeFor: purpose | null } ]` in
+index order, the fields as the proposer sent them.
+
+`status: 'open'` lists the `fund_proposals` rows, at most one (the fund's
+`account_id` is unique there); `limit`, `offset`, `from` and `to` are not
+read. `status: 'decided'` lists the `archives` rows with `source =
+'fund_proposals'`, newest first by `created_at`, `limit` default 20 at most
+200, after `offset` rows (default 0), with `created_at` at or after `from`
+and before `to` when given (ISO 8601; either alone works; `to` is the first
+moment after the range, as `/list-transactions` takes them). Anything else
+in `status` is `400 invalid status`; a bad value is `400 invalid limit`,
+`invalid offset`, `invalid from` or `invalid to`. `/get-fund-proposal`
+looks in `fund_proposals` first, then in `archives` (the rows that left
+`fund_proposals` only; an escrow's id there is `404 unknown proposal`); a
+`transactionId` that is not 64 hex characters is `400 invalid
+transactionId`.
+
+The archive's `record` holds the row and its votes as PostgreSQL's JSON of
+the rows (`records.queries.js`, `to_jsonb`): bytes come out as hex text
+with a leading `\x`, timestamps as ISO 8601 with the server's offset. The
+read strips the `\x`, re-reads the timestamps as UTC, takes the proposer
+and the payouts from `record.row.og_transaction.payload` and the votes
+from `record.votes`, and adds the tally up as the round did
+(`proposer_weight` plus the approved votes for; the approved votes
+against), so an archived item has the same shape as an open one.
+
+`/get-account` (section 8) gains two fields after `createdAt`: `stakes`,
+`{ daoVote, moderator, attestor, guardian, validator, masterPod }`, each
+millionths as a decimal string, `"0"` each when the account has no `stakes`
+row; and `guardianVotes`, `floor(guardian / GUARDIAN_VOTE_ANOS)` as a
+number (`stakes.service.js guardianWeight`). One `findStake` per call. The
+wallet's `AccountAnswer` gains two optional fields; nothing that reads the
+answer today changes.
+
+### 25.2 The statuses
+
+The first line that matches:
+
+| Status | When |
+| ------ | ---- |
+| `waiting` | the `fund_proposals` row is not approved: not every validator has accepted the proposal yet, and no vote is accepted on it (5.1) |
+| `open` | approved, and `vote_closes_at` is ahead |
+| `closing` | approved, `vote_closes_at` has passed, and the row is still in `fund_proposals`: the next ready list tallies it (section 6, "no timer anywhere") |
+| `written` | an `archives` row with outcome `written`: the vote passed and the round wrote the payouts |
+| `failed` | an `archives` row with outcome `voteFailed` |
+
+The clock is the database's (`vote_closes_at <= now()` in the query), the
+one the ready list reads, so the wallet and the ready list agree. A wallet
+that meets a status it does not know shows the proposal and offers no
+button.
+
+### 25.3 Files
+
+Changed: `src/fund/fund.queries.js` (`findOpenProposals`,
+`findProposalVotes`, the header), `src/records/records.queries.js`
+(`findArchivedProposals`, `findArchivedProposal`, the `query` import, the
+header), `src/reads/reads.service.js` (`listFundProposals`,
+`getFundProposal`, `FUND_PROPOSAL_STATUSES`, the helpers `settingsOf`,
+`proposalItemOf`, `archivedItemOf` and what they share; `getAccount` and
+`stakesOf`; the header), `src/reads/reads.handlers.js`
+(`listFundProposalsHandler`, `getFundProposalHandler`, the header),
+`src/reads/reads.router.js` (the two routes after `/list-dao-stakes`, no
+middleware; the header); comments only in `src/app.js` (the `readsRouter`
+line). In the docs: the README's endpoints table (two rows, the
+`/get-account` row), its account-level reads paragraph, its `/get-account`
+bullet and three layout lines; section 8 above and this section. No schema
+change, no env variable, no npm package, no file under `deploy/`, no change
+to `network/`.
+
+### 25.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 25.1 was changed.
+
+- **The build was made on main at b62ac29**, the appointed stakes commit of
+  section 24. The plan called this section 24; that number was taken by the
+  appointed stakes, committed after the plan was written, so the fund
+  proposal reads are section 25 here and in every comment that names them.
+- **A bad `limit` or `offset`** on the decided list is refused, `400
+  invalid limit` and `400 invalid offset`, as `/list-transactions` refuses
+  its `limit`; the plan named the four other words only.
+- **The single read finds its open row through `findOpenProposals`** and
+  picks the row with the id asked for: the table holds one row at most, so
+  the one query with the sums serves both reads and nothing is tallied
+  twice.
+- **The tally of an archived proposal is added up in the code** from
+  `record.votes`, the approved votes only, the proposer's weight first, as
+  the round added it up in SQL while the proposal was open; the two agree
+  because the archive holds the very rows the round read.
+- **`closed` comes from the database's clock**, `vote_closes_at <= now()`
+  in `findOpenProposals`, as `due` does in the locked and assisted reads.
+  `guardian-vote.js` reads the process clock for its own check, as it did.
+- **An archive outcome the read does not know passes through as the
+  status**, so a wallet shows the row and offers no button, as 25.2 says
+  of an unknown status. Only `written` and `voteFailed` reach `archives`
+  from `fund_proposals` today.
+- **`findProposalVotes` leaves the signature out**: the item carries the
+  vote, the weight, the flag and the moment; the whole `guardianVote`
+  object is nobody's business on a public read.
+- **The timestamps of an archive record** come out of `to_jsonb` with
+  microseconds and the server's offset (`2026-11-08T19:07:59.442641-08:00`
+  on the build machine); `Date.parse` takes that form, and the read
+  answers them as UTC with milliseconds, the form every other read answers.
+- **Importing `votePasses` from `fund.service.js`** pulls the fund
+  feature's imports into the reads module, the signing module among them,
+  which reads the key file when it loads; the server loads them before the
+  reads router in any case (`src/app.js` mounts `fundRouter` first), so
+  nothing new happens at boot.
+- **Checks.** `node --check` passed on the six source files. No validator
+  runs on the build machine and none was booted, so the plan's curl step is
+  the user's. Instead the three reads were run as functions, the real
+  service, queries and pool, against a throwaway database made from
+  `db/schema.sql` on the local PostgreSQL (`anos_scratch_guardians`,
+  dropped afterwards) holding two accounts, one with 2,500 anos of guardian
+  stake, one open proposal with an approved vote for and an unapproved vote
+  against, two archived proposals moved with the exact statement of
+  `records.queries.js` (one `voteFailed`, dated two days back; one
+  `written`) and one archived escrow. The twenty calls answered as 25.1
+  says: the open item `open`, `forWeight` 5 (2 plus 3; the unapproved
+  against not counted), `total` `"6500000"`, `passing` true, its two
+  payouts with `index` and `stakeFor` null on the second; the decided list
+  newest first with `written` then `failed`, the failed one 5 for and 4
+  against and `passing` false, `decidedAt` from the archive row, every
+  timestamp in UTC; `from`, `to`, `limit` and `offset` cutting the list as
+  given; the escrow's id `404 unknown proposal`; the five 400 words and the
+  404; `/get-account` with `guardian` `"2500000000"` and `guardianVotes`
+  2, and all `"0"` with 0 for the account without a stakes row.

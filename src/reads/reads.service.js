@@ -1,6 +1,12 @@
+import { env } from '../config/env.js';
+import { findOpenProposals, findProposalVotes } from '../fund/fund.queries.js';
+import { votePasses } from '../fund/fund.service.js';
+import { VOTE_FAILED, WRITTEN, findArchivedProposal, findArchivedProposals } from '../records/records.queries.js';
+import { PURPOSE_NAMES } from '../stakes/stake-purposes.js';
+import { findStake, listDaoVoteStakes } from '../stakes/stakes.queries.js';
+import { guardianWeight } from '../stakes/stakes.service.js';
 import { isObject } from '../util/is-object.js';
 import { ok, refuse } from '../util/result.js';
-import { listDaoVoteStakes } from '../stakes/stakes.queries.js';
 import {
   findAccountSummary,
   findAssistedFor,
@@ -18,11 +24,14 @@ import {
  * (wallet spec 5.4: its account, its transactions, its open escrow trades,
  * its held assisted transfer, its locked transfer), nothing about anyone
  * else; the two attestor reads (spec 13.2), the held transactions waiting
- * for an attestor; and the one public read (spec 23), every account's
- * daoVote stake for the masterpod's DAO voting snapshot. The caller of a
- * signed read is the verified signer, req.account from
- * src/auth/require-account.js (for the attestor reads the verified
- * attestor, src/auth/require-attestor.js); the public read has no caller.
+ * for an attestor; and the three public reads: every account's daoVote
+ * stake for the masterpod's DAO voting snapshot (spec 23), and the fund's
+ * proposals with their votes and payouts for the wallet's Guardians page
+ * (spec 25), which /get-account serves too with the account's stakes and
+ * guardian votes. The caller of a signed read is the verified signer,
+ * req.account from src/auth/require-account.js (for the attestor reads the
+ * verified attestor, src/auth/require-attestor.js); a public read has no
+ * caller.
  * The body is the route's own object. Each function returns ok(status,
  * body) or refuse(status, reason) (util/result.js), so the handlers only
  * log and answer.
@@ -33,6 +42,13 @@ const BAD_SHAPE = 'bad request shape';
 /** /list-transactions: the default and the most rows one call answers; /list-escrows answers at most MAX_LIMIT too. */
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+
+/** /list-fund-proposals with status decided: the default number of archived proposals one call answers; at most MAX_LIMIT, as every list. */
+const DECIDED_DEFAULT_LIMIT = 20;
+
+/** The two lists /list-fund-proposals answers, as body.status names them (spec 25.1): the open proposal from fund_proposals, or the decided ones from archives. */
+const OPEN_LIST = 'open';
+const DECIDED_LIST = 'decided';
 
 /**
  * The stages of an open escrow trade, as /list-escrows names them (spec
@@ -78,15 +94,47 @@ export const LOCKED_STAGES = Object.freeze({
   DUE: 'due',
 });
 
+/**
+ * The statuses of a fund proposal, as the two fund proposal reads name
+ * them (spec 25.2), the first line that matches: waiting while the row is
+ * not approved, so no vote is accepted on it yet (5.1); open while
+ * vote_closes_at is ahead; closing once it has passed and the row is still
+ * in fund_proposals, until the next ready list tallies it (section 6, "no
+ * timer anywhere"); written for an archive row with outcome written, the
+ * payouts on the chain; failed for outcome voteFailed. A wallet that meets
+ * a status it does not know shows the proposal and offers no button.
+ */
+export const FUND_PROPOSAL_STATUSES = Object.freeze({
+  WAITING: 'waiting',
+  OPEN: 'open',
+  CLOSING: 'closing',
+  WRITTEN: 'written',
+  FAILED: 'failed',
+});
+
+/** The status an archive row's outcome gives (spec 25.2): written stays written; voteFailed is failed. */
+const ARCHIVE_STATUSES = Object.freeze({
+  [WRITTEN]: FUND_PROPOSAL_STATUSES.WRITTEN,
+  [VOTE_FAILED]: FUND_PROPOSAL_STATUSES.FAILED,
+});
+
 const hex = (buffer) => (buffer === null || buffer === undefined ? null : buffer.toString('hex'));
 
 /**
  * POST /get-account. Body { }. The signer's type, balance as millionths in
  * a decimal string, latestTransactionId (the newest garlic chain link whose
- * account_id is the signer, hex, or null) and createdAt.
+ * account_id is the signer, hex, or null) and createdAt; since 2026-11-08
+ * (spec 25) also its stakes, the six amounts by purpose (stakesOf), and
+ * guardianVotes, its votes on fund proposals, floor(guardian /
+ * GUARDIAN_VOTE_ANOS) as a number (stakes.service.js guardianWeight). One
+ * findStake per call, beside the two reads it made already.
  */
 export async function getAccount(accountId) {
-  const [account, latest] = await Promise.all([findAccountSummary(accountId), findLatestTransactionId(accountId)]);
+  const [account, latest, stake] = await Promise.all([
+    findAccountSummary(accountId),
+    findLatestTransactionId(accountId),
+    findStake(accountId),
+  ]);
   if (account === null) return refuse(401, 'unknown account');
   return ok(200, {
     accountId: hex(accountId),
@@ -94,7 +142,24 @@ export async function getAccount(accountId) {
     balance: account.balance,
     latestTransactionId: hex(latest),
     createdAt: account.createdAt.toISOString(),
+    stakes: stakesOf(stake),
+    guardianVotes: guardianWeight(stake),
   });
+}
+
+/**
+ * An account's stakes as /get-account answers them (spec 25): one amount
+ * per purpose name, in the order of stake-purposes.js (daoVote, moderator,
+ * attestor, guardian, validator, masterPod), millionths as a decimal
+ * string; "0" each for an account with no stakes row (findStake null),
+ * which holds nothing.
+ */
+function stakesOf(stake) {
+  const stakes = {};
+  for (const name of PURPOSE_NAMES) {
+    stakes[name] = stake === null ? '0' : stake[name].toString();
+  }
+  return stakes;
 }
 
 /**
@@ -326,6 +391,241 @@ export async function listDaoStakes(body) {
 }
 
 /**
+ * POST /list-fund-proposals (spec 25). Public: no envelope, no signature,
+ * no caller; the body must be an object. Body { status: 'open' | 'decided',
+ * limit?, offset?, from?, to? }. settings: this validator's four
+ * guardian-vote numbers (settingsOf). proposals: one item per proposal
+ * (proposalItemOf, archivedItemOf), each with its votes. For 'open' the
+ * fund_proposals rows, at most one; the other fields are not read. For
+ * 'decided' the archives rows that left fund_proposals, newest first by
+ * created_at, limit rows (default 20, at most 200) after offset rows (default
+ * 0), with created_at at or after from and before to when given (ISO 8601;
+ * either alone works; to is the first moment after the range, as
+ * /list-transactions takes them). Anything else in status is 400 invalid
+ * status; a bad limit, offset, from or to is 400 invalid <field>.
+ * Everything answered is the fund's business: a written proposal's payouts
+ * are on the public chain as transferFromFund links, and the votes are the
+ * guardians' public act on the fund's money.
+ */
+export async function listFundProposals(body) {
+  if (!isObject(body)) return refuse(400, BAD_SHAPE);
+  if (body.status === OPEN_LIST) {
+    const proposals = await Promise.all((await findOpenProposals()).map(proposalItemOf));
+    return ok(200, { settings: settingsOf(), proposals });
+  }
+  if (body.status !== DECIDED_LIST) return refuse(400, 'invalid status');
+
+  const limit = body.limit === undefined ? DECIDED_DEFAULT_LIMIT : body.limit;
+  if (!(Number.isInteger(limit) && limit >= 1 && limit <= MAX_LIMIT)) return refuse(400, 'invalid limit');
+  const offset = body.offset === undefined ? 0 : body.offset;
+  if (!(Number.isInteger(offset) && offset >= 0)) return refuse(400, 'invalid offset');
+  if (body.from !== undefined && !(typeof body.from === 'string' && !Number.isNaN(Date.parse(body.from)))) return refuse(400, 'invalid from');
+  if (body.to !== undefined && !(typeof body.to === 'string' && !Number.isNaN(Date.parse(body.to)))) return refuse(400, 'invalid to');
+  const from = body.from === undefined ? null : new Date(body.from);
+  const to = body.to === undefined ? null : new Date(body.to);
+
+  const rows = await findArchivedProposals({ limit, offset, from, to });
+  return ok(200, { settings: settingsOf(), proposals: rows.map(archivedItemOf) });
+}
+
+/**
+ * POST /get-fund-proposal (spec 25). Public, as /list-fund-proposals. Body
+ * { transactionId: hex }, a proposal's id as 64 hex characters (else 400
+ * invalid transactionId). proposal: the item as the list answers it, plus
+ * proposerWeight, the proposer's votes when the proposal was stored, and
+ * payouts, the payload's payouts in index order (payoutsOf). The open row
+ * in fund_proposals is looked for first, then the archives row it became;
+ * neither is 404 unknown proposal. settings as the list.
+ */
+export async function getFundProposal(body) {
+  if (!isObject(body)) return refuse(400, BAD_SHAPE);
+  if (!(typeof body.transactionId === 'string' && /^[0-9a-f]{64}$/i.test(body.transactionId))) {
+    return refuse(400, 'invalid transactionId');
+  }
+  const transactionId = Buffer.from(body.transactionId, 'hex');
+
+  let fields;
+  const open = (await findOpenProposals()).find((row) => row.transactionId.equals(transactionId));
+  if (open) {
+    fields = await proposalFieldsOf(open);
+  } else {
+    const archive = await findArchivedProposal(transactionId);
+    if (archive === null) return refuse(404, 'unknown proposal');
+    fields = archivedFieldsOf(archive);
+  }
+  const proposal = { ...itemOf(fields), proposerWeight: fields.proposerWeight, payouts: payoutsOf(fields.payload) };
+  return ok(200, { settings: settingsOf(), proposal });
+}
+
+/**
+ * This validator's four guardian-vote numbers, answered as settings by both
+ * fund proposal reads (spec 25.1) so the wallet's notice, its rule and its
+ * become-a-guardian sentence read the validator's own values: anosPerVote
+ * (GUARDIAN_VOTE_ANOS) and minimumStake (STAKE_MIN_GUARDIAN_ANOS) in
+ * millionths as decimal strings like every amount; percent
+ * (GUARDIAN_VOTE_PERCENT) and minutes (GUARDIAN_VOTE_MINUTES) as numbers.
+ */
+function settingsOf() {
+  return {
+    anosPerVote: env.guardianVote.anosPerVote.toString(),
+    minimumStake: env.stakes.minimums.guardian.toString(),
+    percent: env.guardianVote.percent,
+    minutes: env.guardianVote.minutes,
+  };
+}
+
+/** A fund_proposals row (findOpenProposals) as an item (spec 25.1), its votes read with findProposalVotes. */
+async function proposalItemOf(row) {
+  return itemOf(await proposalFieldsOf(row));
+}
+
+/** An archives row that left fund_proposals (findArchivedProposals) as an item (spec 25.1), its votes from the record. */
+function archivedItemOf(archive) {
+  return itemOf(archivedFieldsOf(archive));
+}
+
+/**
+ * What itemOf and the single read need, from a fund_proposals row
+ * (findOpenProposals): the id as hex, the payload
+ * (og_transaction.payload), the row's created_at and vote_closes_at as ISO
+ * 8601, the status (openStatusOf), the proposer's weight, the tally as the
+ * row's sums give it, decidedAt null since the row is still open, and the
+ * votes (findProposalVotes) in wire form, guardian id order.
+ */
+async function proposalFieldsOf(row) {
+  const votes = await findProposalVotes(row.transactionId);
+  return {
+    transactionId: hex(row.transactionId),
+    payload: isObject(row.ogTransaction?.payload) ? row.ogTransaction.payload : {},
+    rowCreatedAt: row.createdAt.toISOString(),
+    voteClosesAt: row.voteClosesAt.toISOString(),
+    status: openStatusOf(row),
+    approved: row.approved,
+    proposerWeight: row.proposerWeight,
+    forWeight: row.forWeight,
+    againstWeight: row.againstWeight,
+    decidedAt: null,
+    votes: votes.map((vote) => ({
+      guardianId: hex(vote.guardianAccountId),
+      vote: vote.vote,
+      weight: vote.weight,
+      approved: vote.approved,
+      votedAt: vote.votedAt.toISOString(),
+    })),
+  };
+}
+
+/**
+ * Where an open proposal is (spec 25.2), the first line that matches: not
+ * approved is waiting; its vote closed by the database's clock (row.closed,
+ * the clock the ready list reads, so the wallet and the ready list agree) is
+ * closing, until the next round tallies it; else open.
+ */
+function openStatusOf(row) {
+  if (!row.approved) return FUND_PROPOSAL_STATUSES.WAITING;
+  if (row.closed) return FUND_PROPOSAL_STATUSES.CLOSING;
+  return FUND_PROPOSAL_STATUSES.OPEN;
+}
+
+/**
+ * The same fields from an archives row (findArchivedProposals). record is
+ * { row, votes } as records.queries.js built it with to_jsonb: bytes as hex
+ * text with a leading \x, timestamps in PostgreSQL's ISO 8601 form with the
+ * server's offset. The \x is stripped (hexOf) and the timestamps re-read
+ * (isoOf), so an archived item has the same shape as an open one. The
+ * payload comes from record.row.og_transaction.payload, the tally from
+ * record.votes as the round tallied it (proposer_weight plus the approved
+ * votes for; the approved votes against), the status from the outcome
+ * (ARCHIVE_STATUSES: written, or failed for voteFailed; any other outcome
+ * passes through as it is), decidedAt from the archive row's created_at.
+ */
+function archivedFieldsOf(archive) {
+  const record = isObject(archive.record) ? archive.record : {};
+  const row = isObject(record.row) ? record.row : {};
+  const votes = (Array.isArray(record.votes) ? record.votes : []).filter(isObject).map((vote) => ({
+    guardianId: hexOf(vote.guardian_account_id),
+    vote: stringOrNull(vote.vote),
+    weight: Number(vote.weight) || 0,
+    approved: vote.approved === true,
+    votedAt: isoOf(vote.created_at),
+  }));
+  const proposerWeight = Number(row.proposer_weight) || 0;
+  return {
+    transactionId: hex(archive.transaction_id),
+    payload: isObject(row.og_transaction?.payload) ? row.og_transaction.payload : {},
+    rowCreatedAt: isoOf(row.created_at),
+    voteClosesAt: isoOf(row.vote_closes_at),
+    status: ARCHIVE_STATUSES[archive.outcome] ?? archive.outcome,
+    approved: row.approved === true,
+    proposerWeight,
+    forWeight: proposerWeight + weightOf(votes, 'for'),
+    againstWeight: weightOf(votes, 'against'),
+    decidedAt: archive.created_at.toISOString(),
+    votes,
+  };
+}
+
+/** The weight of the approved votes on one side, 'for' or 'against', as the tally counts them (section 6): a vote not yet approved counts for nothing. */
+function weightOf(votes, side) {
+  return votes.filter((vote) => vote.approved && vote.vote === side).reduce((sum, vote) => sum + vote.weight, 0);
+}
+
+/**
+ * An item, the fund proposal in wire form both reads answer (spec 25.1),
+ * from the fields proposalFieldsOf or archivedFieldsOf made: the proposer
+ * (guardianId) and createdAt from the payload (createdAt falls back to the
+ * row's when the payload has none, as pendingOf does), the payouts counted
+ * and summed (total, millionths as a decimal string), the tally and whether
+ * it passes as it stands (fund.service.js votePasses, the round's own
+ * rule), and the votes.
+ */
+function itemOf(fields) {
+  const { payload } = fields;
+  const payouts = Array.isArray(payload.payouts) ? payload.payouts : [];
+  return {
+    transactionId: fields.transactionId,
+    guardianId: stringOrNull(payload.guardianId),
+    createdAt: typeof payload.createdAt === 'string' ? payload.createdAt : fields.rowCreatedAt,
+    voteClosesAt: fields.voteClosesAt,
+    status: fields.status,
+    approved: fields.approved,
+    payoutCount: payouts.length,
+    total: totalOf(payouts),
+    forWeight: fields.forWeight,
+    againstWeight: fields.againstWeight,
+    passing: votePasses({ forWeight: fields.forWeight, againstWeight: fields.againstWeight }),
+    decidedAt: fields.decidedAt,
+    votes: fields.votes,
+  };
+}
+
+/** The payouts' amounts summed, millionths as a decimal string: each a positive integer in a decimal string, as the proposal's checks made sure (fund.service.js); anything else counts as 0. */
+function totalOf(payouts) {
+  return payouts
+    .reduce((sum, payout) => sum + (isObject(payout) && typeof payout.amount === 'string' && /^[0-9]+$/.test(payout.amount) ? BigInt(payout.amount) : 0n), 0n)
+    .toString();
+}
+
+/**
+ * The payload's payouts in wire form for the single read (spec 25.1), index
+ * order: { index, accountIdTo, amount, reason, stakeFor }, the fields as the
+ * proposer sent them, stakeFor null when the payout returns no stake.
+ */
+function payoutsOf(payload) {
+  const payouts = Array.isArray(payload.payouts) ? payload.payouts : [];
+  return payouts.map((payout, index) => {
+    const fields = isObject(payout) ? payout : {};
+    return {
+      index,
+      accountIdTo: stringOrNull(fields.accountIdTo),
+      amount: typeof fields.amount === 'string' ? fields.amount : '0',
+      reason: stringOrNull(fields.reason),
+      stakeFor: stringOrNull(fields.stakeFor),
+    };
+  });
+}
+
+/**
  * A held transfer in wire form (every held-transfer read): its id and, read
  * from og_transaction.payload as pendingOf reads them, its type (since
  * 2026-11-08: an assisted_transfers row is an assistedAnosTransfer or a
@@ -347,4 +647,16 @@ function heldTransferOf(row) {
 /** A payload field that should be a string, or null when it is not there. */
 function stringOrNull(value) {
   return typeof value === 'string' ? value : null;
+}
+
+/** Bytes as to_jsonb wrote them into an archive record, hex text with a leading \x, as plain hex; null when the value is not such a string. */
+function hexOf(value) {
+  if (typeof value !== 'string') return null;
+  return value.startsWith('\\x') ? value.slice(2) : value;
+}
+
+/** A timestamp as to_jsonb wrote it into an archive record (PostgreSQL's ISO 8601 form, with the server's offset) as ISO 8601 in UTC, the form every other read answers; null when it is not a date. */
+function isoOf(value) {
+  if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) return null;
+  return new Date(value).toISOString();
 }
