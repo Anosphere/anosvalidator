@@ -20,6 +20,7 @@
     { "id": 17, "publicKey": "03b4008182296d34a302438b90d312c92fb22a81c17fdb3dcc8d298715a5467755", "url": "https://136.86.195.76:3000", "active": true },
     { "id": 18, "publicKey": "02c4a2d8e4feb4d7bcfc3825d1b73f64c6929609b45a1ff177cfdfd4450492215e", "url": "https://34.52.251.127:3000", "active": true },
     { "id": 19, "publicKey": "0234b36b4eab08a755add2a13164e8e08dea8d7bcf2ca80e1ef20179c3c4146f81", "url": "https://34.19.143.37:3000", "active": true },
-    { "id": 20, "publicKey": "0321f2c0add712a6f6c2b114a3c47a4cbe828e9f798ee67038d474a0bb85f50d2e", "url": "https://35.203.73.245:3000", "active": true }
+    { "id": 20, "publicKey": "0321f2c0add712a6f6c2b114a3c47a4cbe828e9f798ee67038d474a0bb85f50d2e", "url": "https://35.203.73.245:3000", "active": true },
+    { "id": 21, "publicKey": "0310aa248a7c6b6e4fe5e606349d6563003eb9379764cb5520c4be7672269bb18a", "url": "https://8.235.79.70:3000", "active": true }
   ]
 }
