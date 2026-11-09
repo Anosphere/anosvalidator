@@ -72,7 +72,7 @@ Shared values, in `network/testnet.env`:
 | `GUARDIAN_VOTE_ANOS`       | `1000`         | Guardian stake behind one vote on a fund proposal, in whole anos |
 | `GUARDIAN_VOTE_PERCENT`    | `70`           | Share of the votes cast a proposal needs to pass              |
 | `GUARDIAN_VOTE_MINUTES`    | `60`           | How long a proposal is open for votes (a week, 10080, in production) |
-| `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) |
+| `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) and for every moderator or attestor stake (the appointment check, `docs/schemas.md` section 24) |
 | `WEB_ORIGIN`               | `<fill in>`    | The wallet's origin for CORS, scheme, host and port, no path; a comma-separated list when there is more than one |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`          | Allowed clock difference on a signed account-level request, each way; nonces are kept twice this long |
 | `VALIDATOR_CALL_TIMEOUT_SECONDS` | `10`     | How long a call to another validator waits for its answer; past it, no answer (section "Ignoring and joining") |
@@ -597,8 +597,8 @@ purpose:
 | `stakeFor`  | `stakes` column    | Minimum                     | Role today |
 | ----------- | ------------------ | --------------------------- | ---------- |
 | `daoVote`   | `dao_vote_stake`   | `STAKE_MIN_DAO_VOTE_ANOS`   | read by the masterpod for DAO votes (`docs/schemas.md` section 23) |
-| `moderator` | `moderator_stake`  | `STAKE_MIN_MODERATOR_ANOS`  | recorded only |
-| `attestor`  | `attestor_stake`   | `STAKE_MIN_ATTESTOR_ANOS`   | attests assisted transfers, arbitrates escrow disputes |
+| `moderator` | `moderator_stake`  | `STAKE_MIN_MODERATOR_ANOS`  | recorded only; the pod must be appointed to stake (`docs/schemas.md` section 24) |
+| `attestor`  | `attestor_stake`   | `STAKE_MIN_ATTESTOR_ANOS`   | attests assisted transfers, arbitrates escrow disputes; the pod must be appointed to stake (`docs/schemas.md` section 24) |
 | `guardian`  | `guardian_stake`   | `STAKE_MIN_GUARDIAN_ANOS`   | proposes and votes on fund proposals |
 | `validator` | `validator_stake`  | `STAKE_MIN_VALIDATOR_ANOS`  | recorded only; the `validators` table is unchanged |
 | `masterPod` | `master_pod_stake` | `STAKE_MIN_MASTER_POD_ANOS` | recorded only |
@@ -606,13 +606,26 @@ purpose:
 The sender must be a spending account; the signing rule is any two pairs;
 `createdAt` is not checked. On top of the transfer checks: `accountIdTo` is
 the fund, `stakeFor` is one of the six, and `amount` is at least the
-purpose's minimum. The stake is held in `pending` like a plain transfer and
-written at the next round as a link of type `transferToFund`; in the same
-database transaction the sender's `stakes` row gets the amount added to the
-purpose's column, the row created if the account has none
-(`src/stakes/`). Nothing else happens: a role is held while the column is at
-or above the minimum, and a fund proposal that returns stake reduces it. The
-row is deleted when every amount in it is zero.
+purpose's minimum. A stake for `moderator` or `attestor` passes one more
+check, on the receiving validator only: it asks the masterpod
+`POST MASTERPOD_URL/get-anos-account { accountId }` for the sending account
+(`src/masterpod/masterpod.client.js`, 5-second timeout, the same call as
+the binding check above) and goes on only when the answer binds the account
+to a vouched anoPod whose `role` is the `stakeFor`. No answer, or an
+account not bound, is refused with
+`the masterpod could not confirm the sending account's anoPod`; a bound
+anoPod whose `role` is anything else with
+`the sending account's anoPod is not appointed as <stakeFor>`; both are
+logged `failed: <reason>` and answered `400` like any refusal. The
+validator-to-validator approval path trusts the check, as it does the
+binding (`docs/schemas.md` section 24). The stake is held in `pending` like
+a plain transfer and written at the next round as a link of type
+`transferToFund`; in the same database transaction the sender's `stakes`
+row gets the amount added to the purpose's column, the row created if the
+account has none (`src/stakes/`). Nothing else happens: a role is held
+while the column is at or above the minimum, and a fund proposal that
+returns stake reduces it. The row is deleted when every amount in it is
+zero.
 
 Guardian votes: one vote per `GUARDIAN_VOTE_ANOS` of guardian stake, rounded
 down. An account with at least one vote may propose and vote.
@@ -1451,7 +1464,7 @@ src/
   util/version.js        the commit and tag git reports, read once at boot, for /health
   auth/                  the account level: require-account.js, signed-request.js, common-checks.js, nonces.queries.js;
                          the attestor gate on top of it: require-attestor.js
-  masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check
+  masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check of create-account and the appointment check of a moderator or attestor stake
   reads/                 feature: the five signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer, get-locked-transfer),
                          the two attestor reads (list-assisted-transfers, list-disputed-escrows) and the one public read (list-dao-stakes)
     reads.router.js, reads.handlers.js, reads.service.js, reads.queries.js

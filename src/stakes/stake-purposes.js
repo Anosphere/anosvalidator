@@ -10,7 +10,10 @@ import { env } from '../config/env.js';
  * guardian (proposes and votes on fund proposals) do something on the
  * validator; daoVote is read by the masterpod for DAO votes
  * (/list-dao-stakes, docs/schemas.md section 23); the rest are recorded
- * only.
+ * only. Two of the six, moderator and attestor, are positions of trust: a
+ * pod must be appointed for the role on the masterpod before an account of
+ * its may stake for it (APPOINTED_PURPOSES below, fund.service.js
+ * checkAppointment, docs/schemas.md section 24).
  */
 export const DAO_VOTE = 'daoVote';
 export const MODERATOR = 'moderator';
@@ -31,11 +34,25 @@ export const STAKE_PURPOSES = Object.freeze([
 /** The six names, in the order above, for messages and shape checks. */
 export const PURPOSE_NAMES = Object.freeze(STAKE_PURPOSES.map(({ name }) => name));
 
+/**
+ * The two purposes a pod must be appointed for on the masterpod before an
+ * account of its may stake: the receiving validator asks the masterpod at
+ * every transferToFund for one of them (fund.service.js checkAppointment,
+ * docs/schemas.md section 24). The masterpod spells its two roles as these
+ * two names.
+ */
+export const APPOINTED_PURPOSES = Object.freeze([MODERATOR, ATTESTOR]);
+
 const BY_NAME = new Map(STAKE_PURPOSES.map((purpose) => [purpose.name, purpose]));
 
 /** True when `name` is one of the six purposes. */
 export function isPurpose(name) {
   return BY_NAME.has(name);
+}
+
+/** True when `name` is moderator or attestor, the two purposes a pod must be appointed for (section 24). */
+export function isAppointedPurpose(name) {
+  return APPOINTED_PURPOSES.includes(name);
 }
 
 /** The stakes column that holds the amount staked for `name`. Throws for anything else. */

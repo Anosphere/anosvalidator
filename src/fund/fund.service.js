@@ -13,8 +13,9 @@ import {
   LOCKED_TRANSACTIONS,
   PENDING,
 } from '../held-transactions/held-transactions.js';
+import { fetchAnosAccount } from '../masterpod/masterpod.client.js';
 import { VOTE_FAILED, moveToArchives } from '../records/records.queries.js';
-import { PURPOSE_NAMES, isPurpose, minimumFor } from '../stakes/stake-purposes.js';
+import { PURPOSE_NAMES, isAppointedPurpose, isPurpose, minimumFor } from '../stakes/stake-purposes.js';
 import { addStake, findStake, subtractStake } from '../stakes/stakes.queries.js';
 import { guardianWeight } from '../stakes/stakes.service.js';
 import { findAccount, findExisting, findLatestTransactionId } from '../transfer/transfer.queries.js';
@@ -86,7 +87,12 @@ const HELD_CONFLICTS = [
  *
  * Returns { ok: true, accountId, transactionId, accountIdTo, heldIn } with
  * the ids as 32-byte Buffers and heldIn 'pending', the shape every verify
- * function gives, or { ok: false, reason }. Storing is receiveTransferToFund's job.
+ * function gives, or { ok: false, reason }. Storing is receiveTransferToFund's job,
+ * and so is the appointment check of a moderator or attestor stake
+ * (checkAppointment, docs/schemas.md section 24), run after this passed on
+ * the receiving validator only: this function is what the approval path
+ * runs on every peer (validators.service.js verifyTransaction), and it
+ * never asks the masterpod.
  */
 export async function verifyTransferToFund(body) {
   const checked = await checkTransferToFundSignaturesAndIds(body);
@@ -180,11 +186,56 @@ export async function checkTransferToFundSignaturesAndIds(body, { client } = {})
 
 /**
  * What the initial validator does with a transferToFund: verify it
- * (verifyTransferToFund), store it in pending and send it round, exactly as
- * transfer.service.js receiveAnosTransfer does. Returns what that returns.
+ * (verifyTransferToFund), then, for a moderator or attestor stake, ask the
+ * masterpod whether the sending account's anoPod is appointed for the role
+ * (checkAppointment, docs/schemas.md section 24), store it in pending and
+ * send it round, exactly as transfer.service.js receiveAnosTransfer does.
+ * Returns what that returns.
  */
 export function receiveTransferToFund(body) {
-  return receiveTransaction(body, verifyTransferToFund);
+  return receiveTransaction(body, async (b) => {
+    const r = await verifyTransferToFund(b);
+    return r.ok ? checkAppointment(b, r) : r;
+  });
+}
+
+/**
+ * The appointment check of a moderator or attestor stake (docs/schemas.md
+ * section 24), the way receiveCreateAccount's binding check works
+ * (accounts.service.js): run by receiveTransferToFund once
+ * verifyTransferToFund passed, with `verified` its result. When
+ * payload.stakeFor is moderator or attestor (stake-purposes.js
+ * isAppointedPurpose) the masterpod is asked for the sending account
+ * (masterpod.client.js fetchAnosAccount, five seconds), and the stake passes
+ * only when the anoPod that made the account holds the appointment stakeFor
+ * names. No answer, or an account not bound to a vouched anoPod, refuses
+ * with "the masterpod could not confirm the sending account's anoPod"; a
+ * bound anoPod whose role is not stakeFor (the other role, none, or a
+ * masterpod from before the appointments, which sends no role) refuses with
+ * "the sending account's anoPod is not appointed as <stakeFor>". For the
+ * other four purposes `verified` comes back without a call. The handler
+ * logs the reason and answers 400 like any refusal
+ * (util/submission-response.js): the signer is the account's own holder and
+ * learns nothing they did not know. Only the receiving validator asks: the
+ * validator-to-validator approval path (validators.service.js
+ * verifyTransaction) runs verifyTransferToFund alone and trusts the check,
+ * as it trusts the binding; the replay of a chain chunk
+ * (garlic-chain/replay.service.js) and the held-row checks
+ * (held-transactions/held-rows.service.js) run
+ * checkTransferToFundSignaturesAndIds alone, as before.
+ */
+async function checkAppointment(body, verified) {
+  const { stakeFor } = body.payload;
+  if (!isAppointedPurpose(stakeFor)) return verified;
+
+  const binding = await fetchAnosAccount(verified.accountId);
+  if (!binding.bound) {
+    return { ok: false, reason: "the masterpod could not confirm the sending account's anoPod" };
+  }
+  if (binding.role !== stakeFor) {
+    return { ok: false, reason: `the sending account's anoPod is not appointed as ${stakeFor}` };
+  }
+  return verified;
 }
 
 /**
