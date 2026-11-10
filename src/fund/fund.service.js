@@ -186,11 +186,11 @@ export async function checkTransferToFundSignaturesAndIds(body, { client } = {})
 
 /**
  * What the initial validator does with a transferToFund: verify it
- * (verifyTransferToFund), then, for a moderator or attestor stake, ask the
- * masterpod whether the sending account's anoPod is appointed for the role
- * (checkAppointment, docs/schemas.md section 24), store it in pending and
- * send it round, exactly as transfer.service.js receiveAnosTransfer does.
- * Returns what that returns.
+ * (verifyTransferToFund), then, for a moderator, attestor, validator or
+ * masterPod stake, ask the masterpod whether the sending account's anoPod
+ * is appointed for it (checkAppointment, docs/schemas.md sections 24 and
+ * 26), store it in pending and send it round, exactly as
+ * transfer.service.js receiveAnosTransfer does. Returns what that returns.
  */
 export function receiveTransferToFund(body) {
   return receiveTransaction(body, async (b) => {
@@ -200,21 +200,24 @@ export function receiveTransferToFund(body) {
 }
 
 /**
- * The appointment check of a moderator or attestor stake (docs/schemas.md
- * section 24), the way receiveCreateAccount's binding check works
- * (accounts.service.js): run by receiveTransferToFund once
+ * The appointment check of a moderator, attestor, validator or masterPod
+ * stake (docs/schemas.md section 24; validator and masterPod since
+ * 2026-11-10, section 26), the way receiveCreateAccount's binding check
+ * works (accounts.service.js): run by receiveTransferToFund once
  * verifyTransferToFund passed, with `verified` its result. When
- * payload.stakeFor is moderator or attestor (stake-purposes.js
+ * payload.stakeFor is one of those four (stake-purposes.js
  * isAppointedPurpose) the masterpod is asked for the sending account
  * (masterpod.client.js fetchAnosAccount, five seconds), and the stake passes
  * only when the anoPod that made the account holds the appointment stakeFor
  * names. No answer, or an account not bound to a vouched anoPod, refuses
  * with "the masterpod could not confirm the sending account's anoPod"; a
- * bound anoPod whose role is not stakeFor (the other role, none, or a
- * masterpod from before the appointments, which sends no role) refuses with
- * "the sending account's anoPod is not appointed as <stakeFor>". For the
- * other four purposes `verified` comes back without a call. The handler
- * logs the reason and answers 400 like any refusal
+ * bound anoPod whose role is not stakeFor (another role, none, or a
+ * masterpod that does not send the role: one from before the appointments
+ * sends none, one from before 2026-11-10 never sends validator or
+ * masterPod) refuses with "the sending account's anoPod is not appointed
+ * as <stakeFor>". For the other two purposes, daoVote and guardian,
+ * `verified` comes back without a call. The handler logs the reason and
+ * answers 400 like any refusal
  * (util/submission-response.js): the signer is the account's own holder and
  * learns nothing they did not know. Only the receiving validator asks: the
  * validator-to-validator approval path (validators.service.js

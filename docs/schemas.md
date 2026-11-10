@@ -69,8 +69,8 @@ amount is zero.
 | `moderator` | `moderator_stake`  | `STAKE_MIN_MODERATOR_ANOS`  |   1,000 | recorded only; the pod must be appointed to stake (section 24) |
 | `attestor`  | `attestor_stake`   | `STAKE_MIN_ATTESTOR_ANOS`   |   1,000 | attests assisted transfers, arbitrates escrow disputes; the pod must be appointed to stake (section 24) |
 | `guardian`  | `guardian_stake`   | `STAKE_MIN_GUARDIAN_ANOS`   |   1,000 | proposes and votes on fund proposals |
-| `validator` | `validator_stake`  | `STAKE_MIN_VALIDATOR_ANOS`  |  50,000 | recorded only; the `validators` table is unchanged |
-| `masterPod` | `master_pod_stake` | `STAKE_MIN_MASTER_POD_ANOS` | 500,000 | recorded only |
+| `validator` | `validator_stake`  | `STAKE_MIN_VALIDATOR_ANOS`  |  50,000 | recorded only; the `validators` table is unchanged; the pod must be appointed to stake (section 26) |
+| `masterPod` | `master_pod_stake` | `STAKE_MIN_MASTER_POD_ANOS` | 500,000 | recorded only; the pod must be appointed to stake (section 26) |
 
 Minimums are in anos in the env file and apply to the amount of one
 `transferToFund`.
@@ -321,7 +321,8 @@ the row created if the account has none. Nothing else happens: the role
 follows from the amount.
 
 Since 2026-11-08 (section 24) a `transferToFund` for `moderator` or
-`attestor` passes one more check, on the receiving validator only, after
+`attestor`, and since 2026-11-10 (section 26) one for `validator` or
+`masterPod`, passes one more check, on the receiving validator only, after
 the checks above: it asks the masterpod
 `POST MASTERPOD_URL/get-anos-account { accountId }` for the sending account
 (`src/masterpod/masterpod.client.js`, 5-second timeout, the same call as
@@ -823,7 +824,7 @@ need no edit:
 
 | Variable                   | Default                 | Meaning |
 | -------------------------- | ----------------------- | ------- |
-| `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked: the binding check of create-account and, since 2026-11-08, the appointment check of a moderator or attestor stake (section 24) |
+| `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked: the binding check of create-account and, since 2026-11-08, the appointment check of a moderator or attestor stake (section 24), since 2026-11-10 also of a validator or masterPod stake (section 26) |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`                   | the window of a signed account-level request, each way; nonces live twice this long |
 
 Since the testnet build (2026-10-27) these live in two files, the committed
@@ -3309,3 +3310,148 @@ here; nothing in 25.1 was changed.
   given; the escrow's id `404 unknown proposal`; the five 400 words and the
   404; `/get-account` with `guardian` `"2500000000"` and `guardianVotes`
   2, and all `"0"` with 0 for the account without a stakes row.
+
+## 26. Appointed stakes: validator and masterPod (2026-11-10)
+
+Decided 2026-11-10 in a planning chat of one round, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/validator-masterpod-stake-plan-1.md`. It
+grows section 24. Why: the wallet's Stake for list offered validator and
+masterPod to everyone. The user, 2026-11-10: "Send stake should only be to
+dao vote or guardian. Right now it also include validator and masterpod.
+We'll actually need to build a list for those, like we did with moderator
+and attestor. Unless the user is on that list, then those option should
+not show." The list is the masterpod's `appointments` table: `validator`
+and `masterPod` are two more roles on it, spelled as this validator spells
+the two purposes. Hiding two options in the wallet would not be enough,
+since a stake posted by hand would still pass. So this validator refuses a
+validator or masterPod stake from an account whose anoPod is not appointed
+for it: the check of section 24 with two more names, on the receiving
+validator only. Such a stake is still recorded only: nothing here, on the
+masterpod or on the keyholders reads it. One live role per anoPod stays on
+the masterpod: a moderator or an attestor works from an anoPod made for
+that work, a banker stakes for validator from the personal anoPod, and the
+masterPod stake comes from one anoPod made for it. Three repos in order:
+the masterpod (its section 16.7: the role check of `appointments` widened
+to the four roles, the script's role list), the validator (this step), the
+wallet (its Stake for list offers daoVote and guardian to everyone and
+each other purpose only to the anoPod appointed for it), then the
+architecture records. The keyholders, the doormen and the signing server
+are not touched.
+
+### 26.1 The check
+
+`APPOINTED_PURPOSES` (`src/stakes/stake-purposes.js`) is `moderator`,
+`attestor`, `validator` and `masterPod`. That one list is the whole change
+in the code. The two places that decide go through `isAppointedPurpose`
+and follow it:
+
+- `checkAppointment` (`src/fund/fund.service.js`, 24.1) asks the masterpod
+  when `payload.stakeFor` is one of the four. So a `transferToFund` for
+  `validator` or `masterPod` now passes the check of 24.1 as well, after
+  `verifyTransferToFund`, on the receiving validator.
+- `fetchAnosAccount` (`src/masterpod/masterpod.client.js`) keeps the
+  answer's `role` when it is one of the four names, and returns `null`
+  for anything else, as before. So a `role` of `"validator"` or
+  `"masterPod"` reaches the check.
+
+The masterpod answers `200 { accountId, anopodId, vouched, role }` with
+`role` `"moderator"`, `"attestor"`, `"validator"`, `"masterPod"` or `null`
+(its spec, 16.7). The refusals are the two of 24.1:
+
+- no answer, or not bound: `the masterpod could not confirm the sending
+  account's anoPod`;
+- bound, `role` not equal to `stakeFor`: `the sending account's anoPod is
+  not appointed as validator`, or the same sentence ending `masterPod`.
+
+The check compares with `===`, so an anoPod appointed as `validator` may
+stake for `validator` and for none of the three other appointed purposes.
+For `daoVote` and `guardian` the masterpod is not asked. Only the
+receiving validator asks, as in 24.1: the peers (`validators.service.js`
+`verifyTransaction`), the replay of a chain chunk (`replay.service.js`)
+and the held-row checks (`held-rows.service.js`) do not. Nothing else
+changed: the minimums (50,000 and 500,000 anos in `network/testnet.env`),
+every other check of a `transferToFund`, the `stakes` table, and the fund
+proposal's payout with `stakeFor`, which is how a stake comes back, a
+revoked anoPod's too. Out, by decision: this validator doing anything
+with a validator or masterPod stake; a link between a validator
+appointment and the registry file (14.1); the peers asking the masterpod.
+
+### 26.2 The rollout
+
+As 24.2, with the two names. The receiving validator alone asks, so a
+mixed set still lets such a stake in: a validator or masterPod stake from
+an anoPod that is not appointed, sent to a validator on the old build,
+goes to `pending` there, and the peers on this build approve it, since
+the approval path runs `verifyTransferToFund` alone. The validators take
+this build at their next pull, which the phase 3 list places at the
+production launch. Until every validator runs it, a validator or
+masterPod stake that somebody posts by hand is still accepted, as before
+this section; the wallet no longer offers it (the plan's decision 9). The
+masterpod goes first: a validator on this build against a masterpod from
+before its step 1 never hears `validator` or `masterPod` as a role, since
+that masterpod's table cannot hold them, and refuses every validator and
+masterPod stake as not appointed. A validator on the old build ignores
+the two new roles and accepts the two stakes from anyone. No table, no
+env variable and no npm package changed; `MASTERPOD_URL` is asked at a
+validator or masterPod stake too.
+
+### 26.3 Files
+
+Changed: `src/stakes/stake-purposes.js` (`APPOINTED_PURPOSES`; the header
+and the comments of `APPOINTED_PURPOSES` and `isAppointedPurpose`).
+Comments only: `src/fund/fund.service.js` (`checkAppointment`,
+`receiveTransferToFund`) and `src/masterpod/masterpod.client.js` (the
+header, `fetchAnosAccount`). In the docs: the README's env table
+(`MASTERPOD_URL`), stake purposes table (the `validator` and `masterPod`
+rows), the paragraph after it and the layout line for
+`masterpod.client.js`; sections 2, 4.3 and 10 above, and this section. No
+schema change, no file under `deploy/`, no package file, no change to
+`network/`; nothing in `accounts.service.js`, `validators.service.js`,
+`replay.service.js` or `held-rows.service.js`.
+
+### 26.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 26.1 was changed.
+
+- **The build was made on main at 0d9d26f**, the merge that brought
+  validator 23 into the registry, against the masterpod's step 1 at its
+  4472d39. Every line the plan quotes was where it said, and the last
+  section was 25, so this is 26, as the plan expected.
+- **The two names stand at the end of the list**, in the plan's order:
+  `[MODERATOR, ATTESTOR, VALIDATOR, MASTER_POD]`.
+- **The comments name both sections**, 24 for the check and 26 for the
+  two new names, and say since when each pair needs the appointment. In
+  the comment of `checkAppointment`, "the other four purposes" became
+  "the other two purposes, daoVote and guardian" and "the other role"
+  became "another role"; it also says now why a masterpod from before
+  2026-11-10 refuses the two new stakes.
+- **Section 2's two rows keep their words** and gain "the pod must be
+  appointed to stake (section 26)", as the rows of `moderator` and
+  `attestor` name section 24. In 4.3 the dated pointer is a clause in the
+  paragraph's first sentence. The `MASTERPOD_URL` rows, here and in the
+  README, name the four stakes.
+- **In the README the paragraph after the stake purposes table was
+  wrapped again** from its last changed sentence to its end; its words
+  changed only in the purposes and the section numbers.
+- **One comment the plan does not name** still says two purposes: the
+  comment of `verifyTransferToFund` in `fund.service.js` ("the
+  appointment check of a moderator or attestor stake"). Left for the
+  user's word. The `masterpodUrl` line of `src/config/env.js` is as 24.4
+  left it, and section 24 is as written on 2026-11-08.
+- **Checks.** `node --check` passed on the three source files. No
+  validator was booted and no database touched, as 2.3 says. Beyond the
+  plan, a scratch script outside the repo loaded the real
+  `stake-purposes.js` and `masterpod.client.js` with a stub in place of
+  `src/config/env.js` and of `fetch`, so no env file was read and nothing
+  went over the network. `isAppointedPurpose` is true for the four names
+  and false for `daoVote`, `guardian` and a misspelled `masterpod`; the
+  client keeps a `role` of `validator` or `masterPod` and answers `null`
+  for any other role or none. `checkAppointment` is not exported and its
+  code did not change, so it was not run: its two comparisons were
+  written out in the script with the real list and the real client, and
+  gave the outcomes of 26.1 (a validator stake passes with the role
+  `validator` and is refused as not appointed with `null`, `masterPod`,
+  `moderator` or no role; a 404 is the other refusal; `daoVote` and
+  `guardian` are not asked). A real stake against a real masterpod is
+  the user's run-through.

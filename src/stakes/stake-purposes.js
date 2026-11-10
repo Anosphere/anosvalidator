@@ -10,10 +10,12 @@ import { env } from '../config/env.js';
  * guardian (proposes and votes on fund proposals) do something on the
  * validator; daoVote is read by the masterpod for DAO votes
  * (/list-dao-stakes, docs/schemas.md section 23); the rest are recorded
- * only. Two of the six, moderator and attestor, are positions of trust: a
- * pod must be appointed for the role on the masterpod before an account of
- * its may stake for it (APPOINTED_PURPOSES below, fund.service.js
- * checkAppointment, docs/schemas.md section 24).
+ * only. Four of the six need an appointment: a pod must be appointed for
+ * the purpose on the masterpod before an account of its may stake for it
+ * (APPOINTED_PURPOSES below, fund.service.js checkAppointment,
+ * docs/schemas.md sections 24 and 26). Moderator and attestor are positions
+ * of trust (since 2026-11-08). Validator and masterPod are recorded only
+ * and, since 2026-11-10, need the appointment too.
  */
 export const DAO_VOTE = 'daoVote';
 export const MODERATOR = 'moderator';
@@ -35,13 +37,14 @@ export const STAKE_PURPOSES = Object.freeze([
 export const PURPOSE_NAMES = Object.freeze(STAKE_PURPOSES.map(({ name }) => name));
 
 /**
- * The two purposes a pod must be appointed for on the masterpod before an
+ * The four purposes a pod must be appointed for on the masterpod before an
  * account of its may stake: the receiving validator asks the masterpod at
  * every transferToFund for one of them (fund.service.js checkAppointment,
- * docs/schemas.md section 24). The masterpod spells its two roles as these
- * two names.
+ * docs/schemas.md sections 24 and 26). Moderator and attestor since
+ * 2026-11-08; validator and masterPod, which are recorded only, since
+ * 2026-11-10. The masterpod spells its four roles as these four names.
  */
-export const APPOINTED_PURPOSES = Object.freeze([MODERATOR, ATTESTOR]);
+export const APPOINTED_PURPOSES = Object.freeze([MODERATOR, ATTESTOR, VALIDATOR, MASTER_POD]);
 
 const BY_NAME = new Map(STAKE_PURPOSES.map((purpose) => [purpose.name, purpose]));
 
@@ -50,7 +53,7 @@ export function isPurpose(name) {
   return BY_NAME.has(name);
 }
 
-/** True when `name` is moderator or attestor, the two purposes a pod must be appointed for (section 24). */
+/** True when `name` is moderator, attestor, validator or masterPod, the four purposes a pod must be appointed for (sections 24 and 26). */
 export function isAppointedPurpose(name) {
   return APPOINTED_PURPOSES.includes(name);
 }
