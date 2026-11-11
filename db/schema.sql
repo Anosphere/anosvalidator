@@ -344,9 +344,17 @@ COMMENT ON COLUMN pending.account_id     IS 'The account this transaction belong
 -- garlic_chain.og_transaction, so one canonicalise-and-verify path serves all
 -- three.
 --
--- transaction_id is the last column because it was added once the table was
--- in use (ALTER TABLE ADD COLUMN appends), so a database built from this file
--- matches one that was altered.
+-- transaction_id comes after the columns the table began with because it was
+-- added once the table was in use (ALTER TABLE ADD COLUMN appends), so a
+-- database built from this file matches one that was altered.
+--
+-- Since 2026-11-11 the sender may cancel the transfer until it is written
+-- (lockedTransferCancel, docs/schemas.md section 28). cancellation holds
+-- the signed object, { payload, signatures } as received, while its round
+-- runs, with its own approved flag. A row with a cancellation on it,
+-- approved or not, is not ready: no leader round writes it. Once the
+-- cancellation is approved the row moves to logs. The two columns stand
+-- after transaction_id, appended in their turn for the same reason.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS locked_transactions (
@@ -369,7 +377,14 @@ CREATE TABLE IF NOT EXISTS locked_transactions (
 
   -- Identifies the submitted transaction. SHA-256 digest, 32 raw bytes.
   transaction_id   BYTEA   PRIMARY KEY
-                           CHECK (octet_length(transaction_id) = 32)
+                           CHECK (octet_length(transaction_id) = 32),
+
+  -- The sender's lockedTransferCancel, the whole signed object. NULL while
+  -- there is none.
+  cancellation           JSONB,
+
+  -- true once every validator accepted the cancellation.
+  cancellation_approved  BOOLEAN NOT NULL DEFAULT false
 );
 
 CREATE OR REPLACE TRIGGER locked_transactions_set_updated_at
@@ -386,6 +401,8 @@ COMMENT ON COLUMN locked_transactions.approved       IS 'true/false flag, defaul
 COMMENT ON COLUMN locked_transactions.created_at     IS 'When the row was inserted. Set by default, never changed.';
 COMMENT ON COLUMN locked_transactions.updated_at     IS 'When the row last changed. Maintained by the locked_transactions_set_updated_at trigger.';
 COMMENT ON COLUMN locked_transactions.transaction_id IS 'SHA-256 digest, 32 raw bytes.';
+COMMENT ON COLUMN locked_transactions.cancellation          IS 'The sender''s lockedTransferCancel, { payload, signatures } as received. NULL while none.';
+COMMENT ON COLUMN locked_transactions.cancellation_approved IS 'true once every validator accepted the cancellation; the row then moves to logs. Default false.';
 
 
 -- ---------------------------------------------------------------------------
@@ -737,21 +754,23 @@ COMMENT ON COLUMN guardian_votes.updated_at          IS 'When the row last chang
 
 
 -- ---------------------------------------------------------------------------
--- logs and archives: where rows go when they leave assisted_transfers,
--- escrow_transfers or fund_proposals (src/records/records.queries.js). The
--- two tables have the same columns. source is the table the row left,
--- outcome why (written, userCancelled, receiverCancelled, arbitratedSuccess,
--- arbitratedCancel or voteFailed), record the whole row as JSON plus its
--- child rows: { row }, { row, arbitrations } or { row, votes }. Each move is
--- one database transaction: the insert here, then the deletes there. Every
--- validator does every move for itself, at the same logical moment, so the
--- copies stay identical. Logs may be purged after a time:
+-- logs and archives: where rows go when they leave locked_transactions,
+-- assisted_transfers, escrow_transfers or fund_proposals
+-- (src/records/records.queries.js). The two tables have the same columns.
+-- source is the table the row left, outcome why (written, userCancelled,
+-- receiverCancelled, arbitratedSuccess, arbitratedCancel or voteFailed),
+-- record the whole row as JSON plus its child rows: { row },
+-- { row, arbitrations } or { row, votes }. Each move is one database
+-- transaction: the insert here, then the deletes there. Every validator
+-- does every move for itself, at the same logical moment, so the copies
+-- stay identical. Logs may be purged after a time:
 --
 --   DELETE FROM logs WHERE created_at < now() - interval '1 month';
 --
 -- Archives are kept. Rows here never change, so there is no updated_at and no
--- trigger. Nothing from pending or locked_transactions is logged: the chain
--- holds everything they had.
+-- trigger. A written row of pending or locked_transactions is not logged: the
+-- chain holds everything it had. A cancelled locked transfer is: its row
+-- moves to logs, outcome userCancelled (2026-11-11).
 -- Stand-alone tables: no foreign keys.
 -- ---------------------------------------------------------------------------
 
@@ -776,7 +795,7 @@ CREATE TABLE IF NOT EXISTS logs (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-COMMENT ON TABLE  logs                IS 'Rows that left assisted_transfers or escrow_transfers for an everyday reason. May be purged after a time. Stand-alone; no foreign keys.';
+COMMENT ON TABLE  logs                IS 'Rows that left locked_transactions, assisted_transfers or escrow_transfers for an everyday reason. May be purged after a time. Stand-alone; no foreign keys.';
 COMMENT ON COLUMN logs.transaction_id IS 'SHA-256 digest, 32 raw bytes.';
 COMMENT ON COLUMN logs.source         IS 'The holding table the row left.';
 COMMENT ON COLUMN logs.outcome        IS 'Why the row left: written, userCancelled or receiverCancelled.';

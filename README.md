@@ -182,7 +182,9 @@ Tables:
   highest for an account is that account's newest transaction.
 - `pending`: transactions received but not yet on the chain, one per account.
 - `locked_transactions`: guarded and vault transfers waiting out their time
-  lock, one per account, with `future_date`, the moment each may be written.
+  lock, one per account, with `future_date`, the moment each may be written,
+  and since 2026-11-11 a slot for the sender's cancellation
+  (`cancellation`, with its flag `cancellation_approved`).
 - `assisted_transfers`: transfers out of assisted accounts and, since
   2026-11-08, break-glass moves, waiting for two attestations, one per
   account, with slots for the two attestations and the sender's
@@ -199,8 +201,10 @@ Tables:
 - `stakes`: per account, the amount staked with the fund for each of the six
   purposes.
 - `logs` and `archives`: where rows go when they leave `assisted_transfers`,
-  `escrow_transfers` or `fund_proposals`, with the whole row and its child
-  rows as one JSON record.
+  `escrow_transfers` or `fund_proposals`, and since 2026-11-11 where the
+  row of a cancelled locked transfer goes when it leaves
+  `locked_transactions`, with the whole row and its child rows as one JSON
+  record.
 - `validators`: the registry of validators, this one included: `id`,
   `public_key`, `url` and `active`, filled from
   `network/testnet.registry.json` at boot. Rows are never deleted; a
@@ -264,6 +268,7 @@ multi-word URL segments.
 | POST   | `/fund-proposal`  | `202` + `{ transactionId }` once verified, stored in `fund_proposals` and sent round, else `400` + reason |
 | POST   | `/attestation`    | An attestor's attestation to an assisted transfer: `202` + `{ transactionId }` (the transfer's) once stored and sent round, else `400` + reason |
 | POST   | `/assisted-transfer-cancel` | The sender's cancellation of an assisted transfer, or of a break-glass transfer, answered the same way |
+| POST   | `/locked-transfer-cancel` | The sender's cancellation of a guarded or vault transfer that is waiting out its lock, answered the same way (added 2026-11-11, `docs/schemas.md` section 28) |
 | POST   | `/break-glass-cancel` | The break-glass pair's cancellation of a break-glass transfer, answered the same way (added 2026-11-08, `docs/schemas.md` section 22) |
 | POST   | `/guardian-vote`  | A guardian's vote on a fund proposal, answered the same way |
 | POST   | `/escrow-signature` | The seller's success, the buyer's cancel, either side's dispute or an arbitrator's verdict on an escrow, by `payload.type`, answered the same way |
@@ -271,7 +276,7 @@ multi-word URL segments.
 | POST   | `/list-transactions` | Account level. The signer's garlic chain links, newest first, paged with `beforePosition` and `limit`, cut to a date range with `from` and `to`, and its pending transaction: `200`, else `400` or `401` + reason |
 | POST   | `/list-escrows`   | Account level. The signer's open escrow trades, as seller or buyer, newest first, each with its `stage`: `200 { escrows }`, else `400` or `401` + reason |
 | POST   | `/get-assisted-transfer` | Account level. The signer's own held assisted transfer or break-glass move, with its `type`, its `stage`, the number of attestations on it and its `unlocksAt`, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
-| POST   | `/get-locked-transfer` | Account level. The signer's own locked transfer, a guarded or vault transfer waiting out its time lock, with its `unlocksAt` and its `stage`, or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
+| POST   | `/get-locked-transfer` | Account level. The signer's own locked transfer, a guarded or vault transfer waiting out its time lock, with its `unlocksAt` and its `stage`, one of four since 2026-11-11 (`waiting`, `cancelling`, `locked`, `due`), or `null` when there is none: `200 { transfer }`, else `400` or `401` + reason |
 | POST   | `/list-dao-stakes` | Public, no signature (added 2026-11-08, `docs/schemas.md` section 23). Every account's DAO vote stake, for the masterpod's snapshot of DAO voting weights, with their total and the server's clock: `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`, else `400 bad request shape` |
 | POST   | `/list-fund-proposals` | Public, no signature (added 2026-11-08, `docs/schemas.md` section 25). The fund's proposals with their status, their tally and their votes, for the wallet's Guardians page: body `{ status: 'open' }` the open proposal (at most one), `{ status: 'decided', limit?, offset?, from?, to? }` the decided ones from `archives`, newest first: `200 { settings, proposals }`, else `400` + reason |
 | POST   | `/get-fund-proposal` | Public, no signature (the same day, section 25). One proposal, open or decided, with its payouts and the proposer's weight: body `{ transactionId }`: `200 { settings, proposal }`, else `400` + reason or `404 unknown proposal` |
@@ -412,9 +417,13 @@ The five routes answer the signer's own account only:
   transfer only: nothing from `logs` or `archives`; a written transfer is
   in the signer's transactions. `unlocksAt` is the moment the transfer may
   be written; `stage` is one of `waiting` (not every validator has accepted
-  the transfer), `locked` (waiting out its lock) or `due` (unlocked; the
-  next leader round writes it). Nothing can be done with a locked transfer
-  meanwhile: no follow-up exists for it.
+  the transfer), `cancelling` (the sender's cancel is on it; since
+  2026-11-11, `docs/schemas.md` section 28), `locked` (waiting out its
+  lock) or `due` (unlocked; the next leader round writes it). The sender
+  can cancel a locked transfer until it is written
+  (`POST /locked-transfer-cancel`, section "Transfer submission"); the
+  row of a cancelled transfer moves to `logs`, and this read then answers
+  `null`.
 
 Refusals are logged `failed: <reason>` like every other route.
 
@@ -601,6 +610,25 @@ in the same database transaction. A transfer that becomes ready between
 rounds waits for the next round, which the next transaction of any kind
 starts.
 
+A guarded or vault transfer can be taken back while it waits in
+`locked_transactions`, by a follow-up (section "Follow-ups";
+`src/locked-transactions/`; added 2026-11-11, `docs/schemas.md` section
+28): `POST /locked-transfer-cancel`, `payload: { type:
+"lockedTransferCancel", transactionId, accountId, signedAt }`. The signer
+is `accountId`, the sender, under any two pairs. Own checks: the signer is
+the sender, the wait, and no cancellation present. The wait: a guarded or
+vault transfer cannot be cancelled while the validators would still take
+the same signed transfer in again, that is while its `createdAt` is still
+at least its lock ahead of the validator's clock; such a cancel is refused
+with `this transfer cannot be cancelled yet`. So a cancelled transfer can
+never be sent in again. The web app dates a transfer the lock plus
+`LOCK_OFFSET_MINUTES` ahead, so the wait is the offset after sending.
+After the wait the cancel is accepted until the transfer is written,
+through its lock and after it until a leader round writes it. Stored in
+`cancellation`. Effect on acceptance: the row moves to `logs`, outcome
+`userCancelled`. A locked transfer with a cancellation on it, approved or
+not, is not ready for a leader round.
+
 ## Stakes and transfer to fund
 
 An account takes a role by staking anos with the fund, the genesis account
@@ -657,7 +685,7 @@ or a verdict. Every one is `{ payload, signatures }`:
 
 ```
 payload: {
-  type:          the kind, one of the eight below
+  type:          the kind, one of nine: the eight below and the lockedTransferCancel of "Transfer submission" above
   transactionId: the held transaction it attaches to
   <signer>:      the signer's account id, under the field the kind names
   signedAt:      ISO 8601, recorded, not compared with the clock
@@ -878,7 +906,7 @@ declaration. Each validator's ready list, in id order:
 | Table                 | Ready when |
 | --------------------- | ---------- |
 | `pending`             | approved |
-| `locked_transactions` | approved, `future_date <= now()` |
+| `locked_transactions` | approved, `future_date <= now()`, `cancellation IS NULL` |
 | `assisted_transfers`  | approved, `attestation_1_approved`, `attestation_2_approved`, `cancellation IS NULL` |
 | `escrow_transfers`    | approved, `cancel_signature IS NULL`, and `success_signature_approved` or (`dispute_signature_approved` and at least two approved `success` verdicts) |
 | `fund_proposals`      | approved, `vote_closes_at <= now()`, and the tally passes |
@@ -1104,6 +1132,7 @@ repeatable as they were.
 
 | Table      | Source               | Outcome             | When |
 | ---------- | -------------------- | ------------------- | ---- |
+| `logs`     | `locked_transactions` | `userCancelled`    | the sender's cancellation approved (since 2026-11-11, `docs/schemas.md` section 28) |
 | `logs`     | `assisted_transfers` | `written`           | after the round wrote it |
 | `logs`     | `assisted_transfers` | `userCancelled`     | the sender's cancellation approved |
 | `logs`     | `escrow_transfers`   | `written`           | written with no dispute |
@@ -1118,8 +1147,10 @@ the insert into `logs` or `archives` of the row and its children as one JSON
 record (`{ row }`, `{ row, arbitrations }` or `{ row, votes }`, every value
 the database row as `to_jsonb` gives it), then their deletion. Every
 validator does every move for itself, at the same logical moment, so the
-copies stay identical. Nothing from `pending` or `locked_transactions` is
-logged: the chain holds everything they had.
+copies stay identical. A written row of `pending` or `locked_transactions`
+is not logged: the chain holds everything it had. A cancelled locked
+transfer is, since 2026-11-11 (`docs/schemas.md` section 28): its row
+moves to `logs`, source `locked_transactions`, outcome `userCancelled`.
 
 Logs may be purged after a time; how that runs is not decided yet. The
 statement is:
@@ -1516,8 +1547,10 @@ src/
     genesis.service.js, genesis.queries.js, fund-account.json, og-account.json
   pending/               feature: the pending table
     pending.queries.js   insert, look up and approve pending rows
-  locked-transactions/   feature: the locked_transactions table, pending's twin for guarded and vault transfers
-    locked-transactions.queries.js  insert, look up, approve, list due and delete locked rows
+  locked-transactions/   feature: the locked_transactions table, pending's twin for guarded and vault transfers, and its follow-up
+    locked-transactions.router.js   /locked-transfer-cancel
+    locked-transactions.queries.js  insert, look up, approve, list due and delete locked rows; the cancellation slot
+    locked-transfer-cancel.js       the lockedTransferCancel follow-up kind
   held-transactions/     the registry of the five holding tables
     held-transactions.js one entry per table (insert, find, markApproved, findApproved, conflictReasons); findHeld
     held-rows.service.js the held rows a joiner pulls: readHeldRows (the leader), storeHeldRows (the joiner)

@@ -84,12 +84,14 @@ export const ASSISTED_STAGES = Object.freeze({
 /**
  * The stages of a locked transfer, a guarded or vault account's transfer
  * waiting out its time lock, as /get-locked-transfer names them (spec
- * 18.2): waiting until every validator accepted the transfer; locked
- * while its unlock moment is ahead; due once that moment has passed,
- * until the next leader round writes it.
+ * 18.2): waiting until every validator accepted the transfer; cancelling
+ * with the sender's cancel on it (since 2026-11-11, spec section 28);
+ * locked while its unlock moment is ahead; due once that moment has
+ * passed, until the next leader round writes it.
  */
 export const LOCKED_STAGES = Object.freeze({
   WAITING: 'waiting',
+  CANCELLING: 'cancelling',
   LOCKED: 'locked',
   DUE: 'due',
 });
@@ -302,10 +304,12 @@ function assistedStageOf(row) {
  * locked transfer, the locked_transactions row whose account_id is the
  * signer (there is at most one), a guarded or vault transfer waiting out
  * its time lock, or null when there is none: the held transfer only,
- * nothing from logs or archives. The transfer fields as the other
- * held-transfer reads answer them (heldTransferOf); unlocksAt the row's
- * future_date, the moment the transfer may be written; stage from
- * lockedStageOf.
+ * nothing from logs or archives, so a cancelled transfer, whose row moved
+ * to logs (spec section 28), answers null. The transfer fields as the
+ * other held-transfer reads answer them (heldTransferOf); unlocksAt the
+ * row's future_date, the moment the transfer may be written; stage from
+ * lockedStageOf, one of four since 2026-11-11. The answer's fields are as
+ * they were.
  */
 export async function getLockedTransfer(accountId) {
   const row = await findLockedFor(accountId);
@@ -320,14 +324,20 @@ export async function getLockedTransfer(accountId) {
 
 /**
  * Where a locked transfer is, from its row (spec 18.2), the first line
- * that matches: not approved is waiting; approved with its unlock moment
- * ahead is locked; approved with that moment passed is due, until the next
- * leader round writes it. row.due is decided by the database's clock, the
+ * that matches: not approved is waiting; a cancellation present is
+ * cancelling (since 2026-11-11, spec section 28); approved with its unlock
+ * moment ahead is locked; approved with that moment passed is due, until
+ * the next leader round writes it. A cancel is accepted until the
+ * transfer is written, through its lock and after it, and a cancellation
+ * present keeps the row off the ready list (5.8, section 6), so cancelling
+ * is decided before locked and due; the order is a definition, as
+ * assistedStageOf's is. row.due is decided by the database's clock, the
  * one findDueIds (section 6) reads, so the wallet and the ready list
  * agree.
  */
 function lockedStageOf(row) {
   if (!row.approved) return LOCKED_STAGES.WAITING;
+  if (row.has_cancellation) return LOCKED_STAGES.CANCELLING;
   if (!row.due) return LOCKED_STAGES.LOCKED;
   return LOCKED_STAGES.DUE;
 }

@@ -64,11 +64,17 @@ const CHILD_COMMON = Object.freeze({
  * besides a slot (`nullable`; assisted_transfers' future_date, a TIME that
  * only a break-glass move out of a guarded or vault account fills, since
  * 2026-11-08), the slots that hold a whole follow-up, and the child table
- * whose rows ride with each row.
+ * whose rows ride with each row. Since 2026-11-11 (docs/schemas.md section
+ * 28) a locked_transactions row carries its cancellation slot, the
+ * sender's lockedTransferCancel, and that slot's approved flag.
  */
 const TABLES = Object.freeze({
   [PENDING]: { columns: COMMON, slots: [], children: null },
-  [LOCKED_TRANSACTIONS]: { columns: { ...COMMON, future_date: TIME }, slots: [], children: null },
+  [LOCKED_TRANSACTIONS]: {
+    columns: { ...COMMON, future_date: TIME, cancellation: JSON_VALUE, cancellation_approved: BOOL },
+    slots: ['cancellation'],
+    children: null,
+  },
   [ASSISTED_TRANSFERS]: {
     columns: {
       ...COMMON,
