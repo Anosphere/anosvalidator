@@ -62,7 +62,7 @@ Shared values, in `network/testnet.env`:
 | `PORT`                     | `3000`         | Port the server listens on, behind the doorman                |
 | `GUARDED_LOCK_MINUTES`     | `10`           | Time lock on a guarded account, in minutes (a week, 10080, in production) |
 | `VAULT_LOCK_MINUTES`       | `20`           | Time lock on a vault account, in minutes (a month, 43200, in production) |
-| `LOCK_OFFSET_MINUTES`      | `5`            | How much more than its lock a guarded or vault transfer may be dated ahead, and how far a fund proposal's `createdAt` may be from the validator's clock (10 in production) |
+| `LOCK_OFFSET_MINUTES`      | `5`            | How much more than its lock a guarded or vault transfer may be dated ahead, and how far the `createdAt` of a fund proposal and, since 2026-11-11, of every transfer without a lock may be from the validator's clock, before or after; so also how long a cancel of an assisted transfer or an escrow trade waits (10 in production) |
 | `STAKE_MIN_DAO_VOTE_ANOS`  | `10`           | Least `transferToFund` for `daoVote`, in whole anos           |
 | `STAKE_MIN_MODERATOR_ANOS` | `1000`         | For `moderator`                                               |
 | `STAKE_MIN_ATTESTOR_ANOS`  | `1000`         | For `attestor`; also the stake an attestor or arbitrator must hold |
@@ -563,12 +563,17 @@ an account, of one of six types:
   `LOCK_OFFSET_MINUTES` ahead of its own clock. The web app dates it the lock
   plus the offset ahead, so a transfer that takes a while to reach a
   validator still passes. A break-glass transfer out of a guarded or vault
-  account is dated and checked the same way, by the sender's type; the
-  other types' `createdAt`, and a break-glass transfer out of a spending or
-  assisted account, are not checked.
+  account is dated and checked the same way, by the sender's type.
+  `createdAt` of every other transfer, a plain, an assisted and an escrow
+  transfer and a break-glass transfer out of a spending or assisted
+  account, is the moment it is sent: since 2026-11-11 the validator
+  requires it to be within `LOCK_OFFSET_MINUTES` of its own clock, before
+  or after (`payload.createdAt must be within <offset> minutes of now`),
+  so nothing older than the offset is taken in (`docs/schemas.md` section
+  27).
 
 The server checks, in order: the shape; that the sender exists; the
-signatures; `transactionId`; for a locked transfer, the date; that the sender
+signatures; `transactionId`; the date; that the sender
 is of the type the transfer type is for (a break-glass transfer may leave
 an account of any type; the first four are
 `checkTransferSignaturesAndIds`, which the replay of a chain chunk runs on
@@ -615,11 +620,13 @@ purpose:
 | `masterPod` | `master_pod_stake` | `STAKE_MIN_MASTER_POD_ANOS` | recorded only; the pod must be appointed to stake (`docs/schemas.md` section 26) |
 
 The sender must be a spending account; the signing rule is any two pairs;
-`createdAt` is not checked. On top of the transfer checks: `accountIdTo` is
-the fund, `stakeFor` is one of the six, and `amount` is at least the
-purpose's minimum. A stake for `moderator`, `attestor`, `validator` or
-`masterPod` (the last two since 2026-11-10) passes one more check, on the
-receiving validator only: it asks the masterpod
+`createdAt` must be within `LOCK_OFFSET_MINUTES` of the validator's clock,
+before or after (since 2026-11-11, `docs/schemas.md` section 27). On top
+of the transfer checks: `accountIdTo` is the fund, `stakeFor` is one of
+the six, and `amount` is at least the purpose's minimum. A stake for
+`moderator`, `attestor`, `validator` or `masterPod` (the last two since
+2026-11-10) passes one more check, on the receiving validator only: it
+asks the masterpod
 `POST MASTERPOD_URL/get-anos-account { accountId }` for the sending account
 (`src/masterpod/masterpod.client.js`, 5-second timeout, the same call as
 the binding check above) and goes on only when the answer binds the account
@@ -698,10 +705,16 @@ effect beyond readiness.
 
 `POST /assisted-transfer-cancel`, `payload: { type: "assistedTransferCancel",
 transactionId, accountId, signedAt }`. The signer is `accountId`, the
-sender. Own check: no cancellation present. Accepted until the transfer is
-written, even when both attestations are approved. Stored in
-`cancellation`. Effect on acceptance: the row moves to `logs`, outcome
-`userCancelled`.
+sender. Own checks: the wait, and no cancellation present. The wait (since
+2026-11-11, `docs/schemas.md` section 27): an assisted transfer cannot be
+cancelled while the validators would still take the same signed transfer
+in again, that is while its `createdAt` is no more than
+`LOCK_OFFSET_MINUTES` behind the validator's clock; such a cancel is
+refused with `this transfer cannot be cancelled yet`. So a cancelled
+transfer can never be sent in again. After the wait the cancel is accepted
+until the transfer is written, even when both attestations are approved.
+Stored in `cancellation`. Effect on acceptance: the row moves to `logs`,
+outcome `userCancelled`.
 
 The transfer is ready for a leader round when approved, both attestations
 approved, and no cancellation present. After the write the row moves to
@@ -738,9 +751,15 @@ in `escrow_transfers` until one of four follow-ups at
   signed by the seller. Own checks: no dispute, cancel or success signature
   present. Stored in `success_signature`. Approved, it makes the escrow
   ready.
-- `escrowCancel`, the same payload signed by the buyer. Own checks: no
-  dispute, success or cancel present. Stored in `cancel_signature`. Effect
-  on acceptance: the row moves to `logs`, outcome `receiverCancelled`.
+- `escrowCancel`, the same payload signed by the buyer. Own checks: the
+  wait, and no dispute, success or cancel present. The wait (since
+  2026-11-11, `docs/schemas.md` section 27): the trade cannot be cancelled
+  while the validators would still take the same signed escrow transfer in
+  again, that is while its `createdAt` is no more than
+  `LOCK_OFFSET_MINUTES` behind the validator's clock; such a cancel is
+  refused with `this trade cannot be cancelled yet`. Stored in
+  `cancel_signature`. Effect on acceptance: the row moves to `logs`,
+  outcome `receiverCancelled`.
 - `escrowDispute`, the same payload signed by the seller or the buyer. Own
   checks: no success, cancel or dispute present. Stored in
   `dispute_signature`. From then on only verdicts move the escrow.

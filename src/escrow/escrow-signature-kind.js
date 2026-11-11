@@ -13,7 +13,8 @@ import { ESCROW_SLOTS, findEscrow, markEscrowSlotApproved, setEscrowSlot } from 
  * of each is the same: no success, cancel or dispute signature present yet,
  * so between success and cancel the first stored wins, since each blocks
  * the other, and a dispute blocks both. What differs is who may sign
- * (`signerOf`) and the effect on acceptance (`onAccepted`).
+ * (`signerOf`), one more check of the kind's own when it has one (`check`:
+ * the escrowCancel's wait) and the effect on acceptance (`onAccepted`).
  *
  * The interface built here is described in attestation.js.
  */
@@ -26,10 +27,14 @@ function describe(slot) {
 /**
  * Builds one escrow signature kind: `type` the payload.type, `slot` its
  * escrow_transfers column, `signerOf(row, signerId)` null when the signer
- * may sign for this escrow or a reason, `onAccepted(transactionId)` the
- * effect once approved on this validator.
+ * may sign for this escrow or a reason, `check(row)`, which a kind may
+ * leave out, one more check of its own against the row, null or a reason
+ * (2026-11-11: the escrowCancel's wait, escrow-cancel.js), and
+ * `onAccepted(transactionId)` the effect once approved on this validator.
+ * `verify` runs `check` after `signerOf` and before it walks over the
+ * slots; a kind that passes none is checked as before.
  */
-export function escrowSignatureKind({ type, slot, signerOf, onAccepted }) {
+export function escrowSignatureKind({ type, slot, signerOf, check, onAccepted }) {
   return Object.freeze({
     type,
     table: ESCROW_TRANSFERS,
@@ -43,6 +48,8 @@ export function escrowSignatureKind({ type, slot, signerOf, onAccepted }) {
     verify(payload, { row, signerId }) {
       const bad = signerOf(row, signerId);
       if (bad) return bad;
+      const own = check ? check(row) : null;
+      if (own) return own;
       for (const other of ESCROW_SLOTS) {
         if (row.slots[other].object !== null) return `${describe(other)} is already present`;
       }

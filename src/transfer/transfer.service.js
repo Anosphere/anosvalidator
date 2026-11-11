@@ -50,8 +50,10 @@ export const BREAK_GLASS_TRANSFER = 'breakGlassTransfer';
  * how far) and waits in locked_transactions until that moment. An assisted
  * transfer waits in assisted_transfers for two attestations, an escrow
  * transfer in escrow_transfers for the seller's success signature or the
- * arbitrators' verdicts; neither has a lock, and their createdAt is not
- * checked.
+ * arbitrators' verdicts; neither has a lock. A transfer with no lock is
+ * dated now: since 2026-11-11 (docs/schemas.md section 27) its createdAt
+ * must be within LOCK_OFFSET_MINUTES of the validator's clock, before or
+ * after (verifyAnosTransfer, check 1b).
  *
  * The sixth type, breakGlassTransfer (2026-11-08, section 22), may be sent
  * from an account of any of the four types (accountType null), to a new
@@ -59,9 +61,10 @@ export const BREAK_GLASS_TRANSFER = 'breakGlassTransfer';
  * (lockMinutes null: lockMinutesFor decides from the account row), so a
  * move out of a guarded or vault account is dated that lock ahead like the
  * account's own transfers, and one out of a spending or assisted account
- * is not checked. It is held with the assisted transfers, waiting for two
- * attestations and, when it has a lock, for its moment (future_date), under
- * the break-glass rule: the break-glass pair alone.
+ * is dated now like a transfer with no lock. It is held with the assisted
+ * transfers, waiting for two attestations and, when it has a lock, for its
+ * moment (future_date), under the break-glass rule: the break-glass pair
+ * alone.
  */
 const TRANSFER_TYPES = new Map([
   [ANOS_TRANSFER, { accountType: SPENDING, lockMinutes: 0, heldIn: PENDING, rule: ANY_TWO_PAIRS }],
@@ -85,6 +88,23 @@ export function isTransferType(transactionType) {
 }
 
 const MS_PER_MINUTE = 60_000;
+
+/**
+ * True while check 1b would still accept a transfer with this payload, so
+ * that the same signed transfer could be sent in again: a guarded or vault
+ * transfer while its date is at least its lock ahead, a plain, assisted or
+ * escrow transfer while its date is no more than LOCK_OFFSET_MINUTES
+ * behind. A cancel waits until this is false (assisted-transfer-cancel.js,
+ * escrow-cancel.js, locked-transfer-cancel.js), so a cancelled transfer can
+ * never come back. Not for a breakGlassTransfer, whose lock is its
+ * sender's type's.
+ */
+export function canBeSentInAgain(payload) {
+  const { lockMinutes } = TRANSFER_TYPES.get(payload.transactionType);
+  const createdAt = Date.parse(payload.createdAt);
+  if (lockMinutes > 0) return createdAt - Date.now() >= lockMinutes * MS_PER_MINUTE;
+  return Date.now() - createdAt <= env.locks.offsetMinutes * MS_PER_MINUTE;
+}
 
 /** The largest value a BIGINT column holds. */
 const MAX_BIGINT = 2n ** 63n - 1n;
@@ -116,9 +136,16 @@ const MAX_BIGINT = 2n ** 63n - 1n;
  *      LOCK_OFFSET_MINUTES (env.js), the slack the wallet adds so a
  *      transfer that takes a while to arrive still passes. A
  *      breakGlassTransfer out of a guarded or vault account is checked
- *      the same way against the sender's type's lock (lockMinutesFor);
- *      the other types' createdAt, and a break-glass move out of a
- *      spending or assisted account, are not checked here;
+ *      the same way against the sender's type's lock (lockMinutesFor).
+ *      Every other transfer has no lock and is dated now: since
+ *      2026-11-11 (docs/schemas.md section 27) the createdAt of a plain,
+ *      an assisted and an escrow transfer, and of a break-glass move out
+ *      of a spending or assisted account, is within LOCK_OFFSET_MINUTES
+ *      of now, before or after, the check a fund proposal has
+ *      (fund.service.js verifyFundProposal). So nothing older than the
+ *      offset is taken in. The date is checked here and not in
+ *      checkTransferSignaturesAndIds, so the replay of a chain chunk and
+ *      the held rows a joiner pulls are never refused for their age;
  *   2b. the account is of the type this transfer type is for
  *      (TRANSFER_TYPES); skipped for a breakGlassTransfer, which an
  *      account of any type may send;
@@ -173,6 +200,12 @@ export async function verifyAnosTransfer(body) {
       };
     }
     futureDate = new Date(createdAt);
+  } else {
+    // 1b, the other half: a transfer with no lock is dated now.
+    const createdAt = Date.parse(payload.createdAt);
+    if (!(Math.abs(createdAt - Date.now()) <= env.locks.offsetMinutes * MS_PER_MINUTE)) {
+      return { ok: false, reason: `payload.createdAt must be within ${env.locks.offsetMinutes} minutes of now` };
+    }
   }
 
   // 2b. The sending account is of the type this transfer type is for; a
