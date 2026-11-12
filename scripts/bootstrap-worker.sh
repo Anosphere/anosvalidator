@@ -597,11 +597,19 @@ REGISTRY_ACTIVE=${REGISTRY_LINE#*, }
 REGISTRY_ACTIVE=${REGISTRY_ACTIVE%% active*}
 say "$VALIDATOR_POINT validator: $VALIDATOR_ACTION; $WHO_LINE; $REGISTRY_LINE; 3000: 200"
 
-# 10.3 The keyholder, only once all five lines are filled: the same enable
-#      or restart, up to ninety seconds for its first KMS round trip.
+# 10.3 The keyholder, only once all five lines are filled. First the
+#      SHARE_COPIES_BUCKET line of its .env, the bucket its shares are also
+#      copied to: written by the keyholder's own script, as anos, which
+#      reads the project id from the metadata server and prints "written"
+#      or "already" with the bucket's name; a line that names another
+#      bucket fails this point with the script's message. Then the same
+#      enable or restart, a keyholder that was running when the line was
+#      written restarted as one whose software changed is, and up to ninety
+#      seconds for its first KMS round trip.
 at 10.3 keyholder
 KEYHOLDER_WAITING=0
 if [ "$FILLED" -eq 1 ]; then
+  COPIES_LINE=$(sudo -u anos sh "$KEYHOLDER/scripts/set-copies-bucket.sh")
   if [ "$(systemctl is-active anos-keyholder || true)" != active ]; then
     systemctl enable --now anos-keyholder
     KEYHOLDER_ACTION=started
@@ -611,7 +619,15 @@ if [ "$FILLED" -eq 1 ]; then
     KEYHOLDER_ACTION='restarted (software changed)'
     KEYHOLDER_POINT=11.3
   else
-    KEYHOLDER_ACTION=active
+    case $COPIES_LINE in
+      'SHARE_COPIES_BUCKET: written '*)
+        systemctl restart anos-keyholder
+        KEYHOLDER_ACTION='restarted (SHARE_COPIES_BUCKET written)'
+        ;;
+      *)
+        KEYHOLDER_ACTION=active
+        ;;
+    esac
     KEYHOLDER_POINT=10.3
   fi
   wait_unit anos-keyholder 3200 90
@@ -619,7 +635,7 @@ if [ "$FILLED" -eq 1 ]; then
   # line may be rotated out of the journal of a keyholder up for weeks.
   KMS_LINE=$(unit_log anos-keyholder | grep -Fx 'KMS ok' | tail -n 1)
   [ -n "$KMS_LINE" ] || KMS_LINE='KMS ok at boot (the line is no longer in the journal)'
-  say "$KEYHOLDER_POINT keyholder: $KEYHOLDER_ACTION; $KMS_LINE; 3200: 200"
+  say "$KEYHOLDER_POINT keyholder: $KEYHOLDER_ACTION; $KMS_LINE; $COPIES_LINE; 3200: 200"
 else
   KEYHOLDER_WAITING=1
   KEYHOLDER_ACTION=waiting

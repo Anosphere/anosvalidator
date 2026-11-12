@@ -4289,3 +4289,68 @@ not touched.
   the live network before this build
   (`~/Desktop/Z-TestNet/forclaude/validators-record.md`); both ran on the
   rig of 2026-11-07 (19.5).
+
+## 30. The worker script writes the keyholder's bucket line (2026-11-12)
+
+One change to `scripts/bootstrap-worker.sh`, at point 10.3, from section
+3.6 of `~/Desktop/Z-TestNet/forclaude/keyholder-share-copies-plan-1.md`
+(FINAL, 2026-11-12). The keyholder now also writes every share it saves
+to a bucket in the banker's own project (keyholdersoftware
+`docs/schemas.md` section 16; the bucket is step 15 of the Cloud Shell
+line, doormansoftware `docs/schemas.md` section 11), and it does not
+start without the line `SHARE_COPIES_BUCKET` in its `.env`. The
+keyholder's own script, `scripts/set-copies-bucket.sh`, writes that line.
+The 25 workers that exist get it from the worker paste of the last
+validator pull; this change is for a validator set up later, and for
+every run of the worker line after it. Nothing else in the script
+changed, and nothing in the validator: no route, no table, no setting, no
+message.
+
+### 30.1 The change
+
+- **At point 10.3, before the keyholder is started or restarted**, and
+  only once all five lines of 7.3 are filled, the script runs
+  `sudo -u anos sh /opt/anos/keyholdersoftware/scripts/set-copies-bucket.sh`
+  and keeps the one line it prints: `SHARE_COPIES_BUCKET: written
+  <project id>-share-copies` or `SHARE_COPIES_BUCKET: already <project
+  id>-share-copies`. The keyholder's script reads the project id from the
+  metadata server itself; the worker script hands it nothing.
+- **A keyholder that is running when the line is written is restarted**,
+  as it is when its software changed: `10.3 keyholder: restarted
+  (SHARE_COPIES_BUCKET written)`. A keyholder that is not active is
+  started, and one whose repo moved in this run is restarted as `11.3`,
+  both as before.
+- **The 10.3 line shows what the script printed**, after the KMS line:
+  `10.3 keyholder: started; KMS ok; SHARE_COPIES_BUCKET: written <project
+  id>-share-copies; 3200: 200`.
+- **A line that names another bucket**, a missing `.env` or a metadata
+  server that does not answer ends the keyholder's script with its
+  message, and this point with it: `failed at step 10.3 (keyholder)`,
+  the message among the five log lines above it.
+- **Point 7.3 and its five lines are not touched.** `fill` still only
+  replaces a line that is already in `.env`.
+
+### 30.2 Notes from the build
+
+- **The build was made on main at 6118cb9**, with a clean working tree.
+  `sh -n` passed on the script. Nothing was run.
+- **The script runs as `sudo -u anos`, without the login shell**, like
+  show-key at 7.2, so that only its one line is captured. The guide and
+  the paste of the last pull run the same script through `sudo -iu anos`.
+- **The keyholder's repository must hold the script** by the time the
+  worker script reaches 10.3, so both repositories go to GitHub
+  together. The worker script pulls the keyholder's repository at 9.1,
+  before 10.3.
+- **Left as it was: `boot_error`.** It reads a unit's journal for
+  `Registry failed`, `Genesis failed`, `Could not connect`, `KMS self-test
+  failed` and `Error:`. A keyholder without the line stops with Node's
+  `Error: Missing required environment variable: SHARE_COPIES_BUCKET`,
+  which it catches. The keyholder's other new stop line, `Share copies
+  could not start: <message>`, for a database without the
+  `waiting_copies` table, is not in that list: such a keyholder is
+  reported after the ninety seconds, without that line. On this script's
+  own path the table is there: the 9.1 pull runs the database scripts
+  again when `db/` changed.
+- **The keyholder's two new boot lines**, `Share copies: bucket <name>,
+  <n> waiting` and `Share copies: test file ok` or the reason, are not
+  shown by this script. They are in the keyholder's journal.
