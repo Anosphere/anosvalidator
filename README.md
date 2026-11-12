@@ -60,9 +60,9 @@ Shared values, in `network/testnet.env`:
 | `PGUSER`                   | `anossoftware` | Application role                                              |
 | `PGDATABASE`               | `anos`         | Database name                                                 |
 | `PORT`                     | `3000`         | Port the server listens on, behind the doorman                |
-| `GUARDED_LOCK_MINUTES`     | `10`           | Time lock on a guarded account, in minutes (a week, 10080, in production) |
-| `VAULT_LOCK_MINUTES`       | `20`           | Time lock on a vault account, in minutes (a month, 43200, in production) |
-| `LOCK_OFFSET_MINUTES`      | `5`            | How much more than its lock a guarded or vault transfer may be dated ahead, and how far the `createdAt` of a fund proposal and, since 2026-11-11, of every transfer without a lock may be from the validator's clock, before or after; so also how long a cancel of an assisted transfer or an escrow trade waits (10 in production) |
+| `GUARDED_LOCK_MINUTES`     | `10080`        | Time lock on a guarded account, in minutes: a week (10 on the testnet until 2026-11-12) |
+| `VAULT_LOCK_MINUTES`       | `43200`        | Time lock on a vault account, in minutes: 30 days (20 on the testnet until 2026-11-12) |
+| `LOCK_OFFSET_MINUTES`      | `10`           | How much more than its lock a guarded or vault transfer may be dated ahead, and how far the `createdAt` of a fund proposal and, since 2026-11-11, of every transfer without a lock may be from the validator's clock, before or after; so also how long a cancel of an assisted transfer or an escrow trade waits (5 on the testnet until 2026-11-12) |
 | `STAKE_MIN_DAO_VOTE_ANOS`  | `10`           | Least `transferToFund` for `daoVote`, in whole anos           |
 | `STAKE_MIN_MODERATOR_ANOS` | `1000`         | For `moderator`                                               |
 | `STAKE_MIN_ATTESTOR_ANOS`  | `1000`         | For `attestor`; also the stake an attestor or arbitrator must hold |
@@ -71,7 +71,7 @@ Shared values, in `network/testnet.env`:
 | `STAKE_MIN_MASTER_POD_ANOS`| `500000`       | For `masterPod`                                               |
 | `GUARDIAN_VOTE_ANOS`       | `1000`         | Guardian stake behind one vote on a fund proposal, in whole anos |
 | `GUARDIAN_VOTE_PERCENT`    | `70`           | Share of the votes cast a proposal needs to pass              |
-| `GUARDIAN_VOTE_MINUTES`    | `60`           | How long a proposal is open for votes (a week, 10080, in production) |
+| `GUARDIAN_VOTE_MINUTES`    | `10080`        | How long a proposal is open for votes, in minutes: a week (60 on the testnet until 2026-11-12) |
 | `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) and for every moderator, attestor, validator or masterPod stake (the appointment check, `docs/schemas.md` sections 24 and 26) |
 | `WEB_ORIGIN`               | `<fill in>`    | The wallet's origin for CORS, scheme, host and port, no path; a comma-separated list when there is more than one |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`          | Allowed clock difference on a signed account-level request, each way; nonces are kept twice this long |
