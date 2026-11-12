@@ -1,9 +1,6 @@
 import { env } from '../config/env.js';
 import { decodeDigest, digestMatches } from '../crypto/hash.js';
 import { pool } from '../db/pool.js';
-import { findTailRow } from '../garlic-chain/garlic-chain.queries.js';
-import { isObject } from '../util/is-object.js';
-import { getHealth } from '../validators/validators.client.js';
 import { setLeaderOn } from '../validators/registry.queries.js';
 import {
   findActiveValidator,
@@ -31,6 +28,7 @@ import {
   checkIgnoreVotedShape,
   checkNoAnswerReportShape,
   checkProofOfIgnoreVoteShape,
+  checkReachable,
   sendIgnoreVote,
   sendProofOfIgnoreVote,
   voteIdOf,
@@ -42,11 +40,12 @@ import { findIgnoreVote, insertIgnoreVote } from './votes.queries.js';
  * every counted validator answers or the network stops, and a validator
  * leaves the counted set only by a vote. The leader (or the next counted
  * validator in the ring, when the leader itself is named) starts an ignore
- * vote naming the validators that gave no answer; every other counted
- * validator checks each named validator's health itself and votes; with
- * every vote yes, a proof carrying every receipt goes round and the named
- * are ignored everywhere. An include vote is the same in the other
- * direction, started by the leader for a joiner (validators/join.service.js).
+ * vote naming the validators that gave no answer, or that refused and fail
+ * the health check; every other counted validator checks each named
+ * validator's health itself and votes; with every vote yes, a proof
+ * carrying every receipt goes round and the named are ignored everywhere.
+ * An include vote is the same in the other direction, started by the
+ * leader for a joiner (validators/join.service.js).
  *
  * This file is the receiving side of the three messages (the voter, the
  * proof's receiver, the report's receiver), the starter's side (runVote)
@@ -153,29 +152,6 @@ async function checkRequest(request, { receiverNamed = false } = {}) {
 async function aboveFloor(count) {
   const { active, counted } = await findCounts();
   return (counted - count) * 100 >= env.network.ignoreFloorPercent * active;
-}
-
-/**
- * This validator's own check of a named validator (a registry row): its
- * health within the timeout (validators.client.js getHealth), reachable
- * when it answered 200 with chain.position, chain.recordHash and leader
- * equal to this validator's own. Returns { reachable: true } or
- * { reachable: false, reason }.
- */
-export async function checkReachable(validator) {
-  const answer = await getHealth(validator);
-  if (answer.noAnswer) return { reachable: false, reason: `no answer: ${answer.reason}` };
-  if (answer.status !== 200) return { reachable: false, reason: `health answered ${answer.status}` };
-  const { body } = answer;
-  if (!isObject(body) || !isObject(body.chain)) return { reachable: false, reason: 'health carries no chain' };
-
-  const own = (await findTailRow()) ?? { position: 0, recordHash: null };
-  if (body.chain.position !== own.position || body.chain.recordHash !== own.recordHash) {
-    return { reachable: false, reason: `tail at position ${body.chain.position}, own ${own.position}` };
-  }
-  const leaderId = await findLeaderId();
-  if (body.leader !== leaderId) return { reachable: false, reason: `names leader ${body.leader}, own ${leaderId}` };
-  return { reachable: true };
 }
 
 /**
@@ -293,11 +269,12 @@ async function applyProof(request, receipts) {
  * validator except this one and the named; the vote passed when every one
  * answered yes. Otherwise it failed: the row is stored with outcome failed
  * and the receipts got, each result logged. A voter that gave no answer to
- * an ignore vote fails it, and one new vote names that voter as well; a
- * second no answer ends it with a line. A passed vote is applied to the own
- * table first (applyProof), then the proof goes to every counted validator
- * except this one, the named of an include vote now among them. Resolves
- * with { passed: true } or { passed: false, reason }.
+ * an ignore vote, or refused it, fails it, and one new vote names that
+ * voter as well (one that passes this validator's own check is dropped from
+ * it again, as above); a second time ends it with a line. A passed vote is
+ * applied to the own table first (applyProof), then the proof goes to every
+ * counted validator except this one, the named of an include vote now among
+ * them. Resolves with { passed: true } or { passed: false, reason }.
  */
 export async function runVote(validatorIds, action, { retried = false } = {}) {
   let ids = [...new Set(validatorIds)].sort((a, b) => a - b);
@@ -338,11 +315,12 @@ export async function runVote(validatorIds, action, { retried = false } = {}) {
 
   const receipts = [];
   const silent = [];
+  const refusing = [];
   let failure = null;
   for (const answer of answers) {
     if (answer.reason) {
       console.log(`validator ${answer.id} ${answer.noAnswer ? 'gave no answer to the vote' : 'refused the vote'}: ${answer.reason}`);
-      if (answer.noAnswer) silent.push(answer.id);
+      (answer.noAnswer ? silent : refusing).push(answer.id);
       failure ??= `validator ${answer.id}: ${answer.reason}`;
       continue;
     }
@@ -362,12 +340,13 @@ export async function runVote(validatorIds, action, { retried = false } = {}) {
       record: { request, receipts },
     });
     console.log(`${action} vote ${short} failed: ${failure}`);
-    if (action === IGNORE && silent.length > 0) {
+    const added = [...silent, ...refusing].sort((a, b) => a - b);
+    if (action === IGNORE && added.length > 0) {
       if (retried) {
-        console.log(`no answer to the vote twice from validator${plural(silent)} ${silent.join(', ')}; no further vote`);
+        console.log(`no vote twice from validator${plural(added)} ${added.join(', ')}; no further vote`);
       } else {
-        console.log(`one new vote naming validator${plural(silent)} ${silent.join(', ')} as well`);
-        return runVote([...ids, ...silent], IGNORE, { retried: true });
+        console.log(`one new vote naming validator${plural(added)} ${added.join(', ')} as well`);
+        return runVote([...ids, ...added], IGNORE, { retried: true });
       }
     }
     return { passed: false, reason: failure };

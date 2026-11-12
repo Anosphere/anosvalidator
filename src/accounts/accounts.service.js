@@ -180,8 +180,9 @@ export async function receiveCreateAccount(body) {
     return { ok: false, reason: PENDING_CONFLICT_REASONS[stored.conflict] };
   }
 
-  // No answer from a peer: the report, the wait, the one re-send
-  // (src/votes/votes.messages.js settleNoAnswers); a refusal is a refusal.
+  // No answer from a peer, or a refusal from one that fails the health
+  // check: the report, the wait, the one re-send (src/votes/votes.messages.js
+  // settleNoAnswers); any other refusal is a refusal.
   const approvals = await settleNoAnswers(
     await sendTransactionApproval({ transaction: body, transactionId }),
     (peers) => sendTransactionApproval({ transaction: body, transactionId, peers }),

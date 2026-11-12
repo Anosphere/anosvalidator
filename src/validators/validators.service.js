@@ -399,16 +399,18 @@ const RESTART = Symbol('restart');
  *      findNextCounted), so an announcement from the new leader is never
  *      refused here; then the final declaration naming it goes to every
  *      counted peer.
- * A peer that gives no answer at step 1 or 3 is voted on inside this busy
- * section (settleRoundAnswers): a passed vote starts the round again from
- * step 1 with the ignored peer out of the sends (the peers that already
- * wrote have those ids out of their lists and the official list is the
- * overlap, so nothing is written twice; this validator's own write of step
- * 3 comes before the vote, so it stands with theirs); a failed vote sends
- * that step's call once more to that peer, and a second no answer ends
- * the round with a line, as a refusal does. No answer to the final
- * declaration is logged only: the leadership has moved, and the new
- * leader meets the silent validator on its next call.
+ * A peer that gives no answer at step 1 or 3, or refuses, is voted on
+ * inside this busy section (settleRoundAnswers; the vote drops a refusing
+ * peer that passes the health check, and its refusal then ends the round):
+ * a passed vote starts the round again from step 1 with the ignored peer
+ * out of the sends (the peers that already wrote have those ids out of
+ * their lists and the official list is the overlap, so nothing is written
+ * twice; this validator's own write of step 3 comes before the vote, so it
+ * stands with theirs); a failed vote sends that step's call once more to a
+ * peer that gave no answer, and a second no answer ends the round with a
+ * line, as a refusal does. No answer to the final declaration is logged
+ * only: the leadership has moved, and the new leader meets the silent
+ * validator on its next call.
  */
 async function leadRound() {
   for (;;) {
@@ -459,23 +461,28 @@ async function leadRound() {
 }
 
 /**
- * The answers of a round's step, settled. The peers that gave no answer
- * are voted on (votes.service.js runVote, an ignore vote, in this busy
- * section): a passed vote answers RESTART; a failed one sends the step's
- * call once more to those peers through `resend(peers)`, and a second no
- * answer, logged, answers null. Then a refusal among the answers, logged
- * `validator N <what>: <reason>`, answers null. Otherwise the answers, the
- * second ones in place of the first, in id order.
+ * The answers of a round's step, settled. The peers that gave no answer,
+ * and the peers that refused, are voted on (votes.service.js runVote, an
+ * ignore vote, in this busy section; the vote drops a peer that passes
+ * this validator's health check): a passed vote answers RESTART. After a
+ * failed one the step's call goes once more to the peers that gave no
+ * answer, through `resend(peers)`, and a second no answer, logged, answers
+ * null. Then a refusal among the answers, logged `validator N <what>:
+ * <reason>`, answers null. Otherwise the answers, the second ones in place
+ * of the first, in id order.
  */
 async function settleRoundAnswers(answers, resend, what) {
   let settled = answers;
   const silent = answers.filter((answer) => answer.noAnswer).map((answer) => answer.id);
-  if (silent.length > 0) {
-    const vote = await runVote(silent, IGNORE);
+  const refusing = answers.filter((answer) => answer.reason && !answer.noAnswer).map((answer) => answer.id);
+  if (silent.length > 0 || refusing.length > 0) {
+    const vote = await runVote([...silent, ...refusing], IGNORE);
     if (vote.passed) {
       console.log('the round starts again');
       return RESTART;
     }
+  }
+  if (silent.length > 0) {
     const peers = (await findCountedPeers(env.validator.id)).filter((peer) => silent.includes(peer.id));
     const again = await resend(peers);
     for (const answer of again) {
