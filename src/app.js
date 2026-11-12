@@ -6,6 +6,7 @@ import { assistedTransfersRouter } from './assisted-transfers/assisted-transfers
 import { escrowRouter } from './escrow/escrow.router.js';
 import { fundRouter } from './fund/fund.router.js';
 import { healthRouter } from './health/health.router.js';
+import { lockedTransactionsRouter } from './locked-transactions/locked-transactions.router.js';
 import { transferRouter } from './transfer/transfer.router.js';
 import { isCounted } from './validators/join.service.js';
 import { validatorsRouter } from './validators/validators.router.js';
@@ -52,6 +53,7 @@ export function createApp() {
   app.use(transferRouter); // owns /anos-transfer
   app.use(fundRouter); // owns /transfer-to-fund, /fund-proposal and /guardian-vote
   app.use(assistedTransfersRouter); // owns /attestation, /assisted-transfer-cancel and /break-glass-cancel
+  app.use(lockedTransactionsRouter); // owns /locked-transfer-cancel
   app.use(escrowRouter); // owns /escrow-signature
   app.use(readsRouter); // the account level: /get-account, /list-transactions, /list-escrows, /get-assisted-transfer and /get-locked-transfer; the attestor reads: /list-assisted-transfers and /list-disputed-escrows; the public reads: /list-dao-stakes, /list-fund-proposals and /get-fund-proposal
   app.use(validatorsRouter); // validator-to-validator messages: /transaction-approval and the rest, the chunk read, the votes, the join

@@ -7,6 +7,12 @@ import { query } from '../db/pool.js';
  * one transaction per account, the same approved flag, plus future_date,
  * the moment the transaction may be written. Written to by the transfer and
  * validators features, so it has its own feature folder like pending.
+ * Since 2026-11-11 (docs/schemas.md section 28) a row also has one slot,
+ * cancellation, for the sender's lockedTransferCancel
+ * (locked-transfer-cancel.js): the whole signed object with its own
+ * approved flag, as assisted_transfers has it. A row with a cancellation
+ * on it, approved or not, is off the ready list (findDueIds), and once
+ * the cancellation is approved the row moves to logs.
  *
  * Ids are Buffers of 32 raw bytes, matching the BYTEA columns; pg sends a
  * Buffer parameter as bytea.
@@ -54,16 +60,29 @@ export async function insertLocked({ transactionId, accountId, futureDate, ogTra
 }
 
 /**
- * The locked transaction with this id, as { approved, ogTransaction } (the
- * flag and the submission as received), or null when there is no such
- * transaction.
+ * The locked transaction with this id, as { accountId, approved,
+ * ogTransaction, slots } (the sender, the flag, the submission as received,
+ * and slots.cancellation as { object, approved }: the sender's signed
+ * lockedTransferCancel, null while there is none, and its approved flag),
+ * or null when there is no such transaction. `approved` and
+ * `ogTransaction` are as they always were, which is all findHeld and the
+ * transfer flows read; `slots` has the shape findAssisted gives
+ * (assisted-transfers.queries.js), which stored-attachments.js findInSlots
+ * reads.
  */
 export async function findLocked(transactionId) {
   const { rows } = await query(
-    'SELECT approved, og_transaction FROM locked_transactions WHERE transaction_id = $1',
+    `SELECT account_id, approved, og_transaction, cancellation, cancellation_approved
+     FROM locked_transactions WHERE transaction_id = $1`,
     [transactionId],
   );
-  return rows.length === 0 ? null : { approved: rows[0].approved, ogTransaction: rows[0].og_transaction };
+  if (rows.length === 0) return null;
+  return {
+    accountId: rows[0].account_id,
+    approved: rows[0].approved,
+    ogTransaction: rows[0].og_transaction,
+    slots: { cancellation: { object: rows[0].cancellation, approved: rows[0].cancellation_approved } },
+  };
 }
 
 /**
@@ -80,13 +99,44 @@ export async function markLockedApproved(transactionId) {
 }
 
 /**
+ * Stores `object` (the sender's whole signed lockedTransferCancel,
+ * { payload, signatures }) in the cancellation slot, if the slot is still
+ * empty. Returns true when it was stored, false when the slot was taken in
+ * the meantime or there is no such row: the backstop for two cancels racing
+ * past the check that runs first.
+ */
+export async function setLockedCancellation(transactionId, object) {
+  const { rowCount } = await query(
+    `UPDATE locked_transactions SET cancellation = $2::jsonb
+     WHERE transaction_id = $1 AND cancellation IS NULL`,
+    [transactionId, JSON.stringify(object)],
+  );
+  return rowCount === 1;
+}
+
+/**
+ * Marks the cancellation approved. Returns true when a row changed, false
+ * when the slot is empty, there is no such row, or it was approved already.
+ */
+export async function markLockedCancellationApproved(transactionId) {
+  const { rowCount } = await query(
+    `UPDATE locked_transactions SET cancellation_approved = true
+     WHERE transaction_id = $1 AND cancellation IS NOT NULL AND cancellation_approved = false`,
+    [transactionId],
+  );
+  return rowCount === 1;
+}
+
+/**
  * The ids of every approved locked transaction whose future_date has
- * passed, in id order, as hex strings: the ones a leader round may write.
+ * passed and that has no cancellation on it (approved or not; present
+ * blocks, as findReadyAssistedIds has it), in id order, as hex strings: the
+ * ones a leader round may write.
  */
 export async function findDueIds() {
   const { rows } = await query(
     `SELECT transaction_id FROM locked_transactions
-     WHERE approved AND future_date <= now()
+     WHERE approved AND future_date <= now() AND cancellation IS NULL
      ORDER BY transaction_id`,
   );
   return rows.map((row) => row.transaction_id.toString('hex'));

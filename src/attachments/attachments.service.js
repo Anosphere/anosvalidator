@@ -10,6 +10,7 @@ import { escrowSuccess } from '../escrow/escrow-success.js';
 import { escrowVerdict } from '../escrow/escrow-verdict.js';
 import { guardianVote } from '../fund/guardian-vote.js';
 import { HELD_TABLES, findHeld } from '../held-transactions/held-transactions.js';
+import { lockedTransferCancel } from '../locked-transactions/locked-transfer-cancel.js';
 import { findStake } from '../stakes/stakes.queries.js';
 import { findAccount } from '../transfer/transfer.queries.js';
 import { isObject } from '../util/is-object.js';
@@ -33,7 +34,7 @@ import { verifyPayloadSignature } from '../validators/validators.signing.js';
  * is waiting in a holding table. Every follow-up is { payload, signatures }:
  *
  *   payload: {
- *     type:          the kind, one of the eight KINDS
+ *     type:          the kind, one of the nine KINDS
  *     transactionId: the held transaction it attaches to
  *     <signer>:      the signer's account id, under the field the kind names
  *     signedAt:      ISO 8601, recorded, not compared with the clock
@@ -56,11 +57,12 @@ import { verifyPayloadSignature } from '../validators/validators.signing.js';
  * canonical payload, which they compute; the signer does not send it.
  */
 
-/** The eight kinds, every one a peer accepts in an attachment approval. */
+/** The nine kinds, every one a peer accepts in an attachment approval. */
 export const KINDS = Object.freeze([
   attestation,
   assistedTransferCancel,
   breakGlassCancel,
+  lockedTransferCancel,
   guardianVote,
   escrowSuccess,
   escrowCancel,
@@ -135,7 +137,7 @@ export async function receiveAttachment(body, kinds) {
  *      approved receipt is answered again, as the first time, instead of
  *      "already present";
  *   4. the embedded follow-up passes every check the originating validator
- *      ran (verifyAttachment, any of the eight kinds), against this
+ *      ran (verifyAttachment, any of the nine kinds), against this
  *      validator's own database, and transactionId is the one it names;
  *   5. the kind stores it here, approved = false.
  * Returns { ok: true, receipt } with the signed attachment approved receipt

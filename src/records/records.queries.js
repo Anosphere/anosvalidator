@@ -2,7 +2,9 @@ import { query } from '../db/pool.js';
 
 /**
  * SQL for logs and archives: where a row goes when it leaves
- * assisted_transfers, escrow_transfers or fund_proposals (db/schema.sql).
+ * assisted_transfers, escrow_transfers or fund_proposals (db/schema.sql),
+ * and since 2026-11-11 where a cancelled locked transfer's row goes when
+ * it leaves locked_transactions (docs/schemas.md section 28).
  * The two tables have the same columns; a move is one database transaction
  * on `client`, a connection checked out of the pool: the insert of the row
  * and its child rows as one JSON record, then the deletes. Every validator
@@ -23,7 +25,8 @@ export const ARCHIVES = 'archives';
 /**
  * Why a row left, as logs.outcome and archives.outcome hold it. Logs take
  * WRITTEN (an assisted or undisputed escrow transfer the round wrote),
- * USER_CANCELLED (the sender cancelled an assisted transfer) and
+ * USER_CANCELLED (the sender cancelled an assisted transfer or, since
+ * 2026-11-11, a locked transfer, a guarded or vault one) and
  * RECEIVER_CANCELLED (the buyer cancelled an escrow). Archives take WRITTEN
  * (a fund proposal the round wrote), ARBITRATED_SUCCESS (a disputed escrow
  * the round wrote), ARBITRATED_CANCEL (two verdicts cancelled a disputed
@@ -39,12 +42,14 @@ export const VOTE_FAILED = 'voteFailed';
 /**
  * The tables a row may leave, each with its child table, whose rows go into
  * the record under `key` and are deleted with the row. `record` is
- * { row } for an assisted transfer, { row, arbitrations } for an escrow and
- * { row, votes } for a proposal; every value is the database row as JSON
- * (to_jsonb), so bytes come out in PostgreSQL's hex text form and
- * timestamps as ISO 8601.
+ * { row } for a cancelled locked transfer (locked_transactions, since
+ * 2026-11-11; a written one is deleted, not moved) and for an assisted
+ * transfer, { row, arbitrations } for an escrow and { row, votes } for a
+ * proposal; every value is the database row as JSON (to_jsonb), so bytes
+ * come out in PostgreSQL's hex text form and timestamps as ISO 8601.
  */
 const SOURCES = Object.freeze({
+  locked_transactions: Object.freeze({ children: null }),
   assisted_transfers: Object.freeze({ children: null }),
   escrow_transfers: Object.freeze({
     children: Object.freeze({ table: 'escrow_arbitrations', key: 'arbitrations', orderBy: 'arbitrator_account_id' }),

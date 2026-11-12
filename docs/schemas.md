@@ -40,16 +40,19 @@ disagree before then, this file wins.
   account id is found in any holding table or on the chain is refused.
 - A **follow-up** is a signed object attached to a transaction that is
   waiting in a holding table: an attestation, a cancellation (the sender's
-  `assistedTransferCancel` or, since 2026-11-08, the break-glass pair's
-  `breakGlassCancel`), a vote, an escrow signature or verdict. Each is
-  stored in or next to the row with its
-  own approved flag and goes round the validators the way a transaction does
-  (section 9).
+  `assistedTransferCancel`, since 2026-11-08 the break-glass pair's
+  `breakGlassCancel`, or since 2026-11-11 the sender's
+  `lockedTransferCancel` of a guarded or vault transfer, section 28), a
+  vote, an escrow signature or verdict. Each is stored in or next to the
+  row with its own approved flag and goes round the validators the way a
+  transaction does (section 9).
 - A row that leaves a holding table is deleted (`pending`,
   `locked_transactions`) or moved whole to `logs` or `archives` (the other
-  three; section 7). A row still unapproved `UNAPPROVED_AGE_LIMIT_SECONDS`
-  after it was stored is dropped by the validator holding it, a plain
-  delete in any of the five (section 21).
+  three; section 7). Since 2026-11-11 a locked transfer that its sender
+  cancelled is not deleted: its row moves whole to `logs` (section 28). A
+  row still unapproved `UNAPPROVED_AGE_LIMIT_SECONDS` after it was stored
+  is dropped by the validator holding it, a plain delete in any of the
+  five (section 21).
 - Every validator keeps its own copy of every table and does every move to
   logs or archives for itself, at the same logical moment, so the copies
   stay identical.
@@ -240,10 +243,11 @@ CREATE TABLE IF NOT EXISTS logs (
 ```
 
 Where rows go when they leave `assisted_transfers`, `escrow_transfers` or
-`fund_proposals`. `source` is the table the row left, `outcome` why
-(section 7), `record` the whole row as JSON plus its child rows:
-`{ row }`, `{ row, arbitrations }` or `{ row, votes }`. Logs may be purged
-after a time; archives are kept.
+`fund_proposals`, and since 2026-11-11 where the row of a cancelled locked
+transfer goes when it leaves `locked_transactions` (section 28). `source`
+is the table the row left, `outcome` why (section 7), `record` the whole
+row as JSON plus its child rows: `{ row }`, `{ row, arbitrations }` or
+`{ row, votes }`. Logs may be purged after a time; archives are kept.
 
 ### Changes to existing tables
 
@@ -276,26 +280,36 @@ approval and proof messages, with every validator storing the transaction
 in the same holding table. Every transfer kind is written as one chain link
 with the sender as `account_id`, the receiver as `account_id_to`, the
 amount, and the kind as `type`, and the balance trigger moves the amount.
+Since 2026-11-11 (section 27) every transfer's date is checked against the
+validator's clock when it comes in: `createdAt` of a guarded or vault
+transfer is the lock ahead, at least the lock and at most the lock plus
+`LOCK_OFFSET_MINUTES`, as before; `createdAt` of every other transfer is
+within `LOCK_OFFSET_MINUTES` of now, before or after, where until then it
+was not checked at all.
 
 ### 4.1 assistedAnosTransfer
 
 Sent from an **assisted** account at `POST /anos-transfer`. Signing rule
-**any two pairs**, like every other transfer (section 20). No time lock:
-`createdAt` is not checked. Held in `assisted_transfers`. Ready for a leader
-round when approved, both attestations approved, and no cancellation
-present. After the write the row moves to `logs` with outcome `written`,
-attestations included; the attestations are not written to the chain.
+**any two pairs**, like every other transfer (section 20). No time lock.
+Since 2026-11-11 `createdAt` must be within `LOCK_OFFSET_MINUTES` of the
+validator's clock, before or after (section 27); until then it was not
+checked. Held in `assisted_transfers`. Ready for a leader round when
+approved, both attestations approved, and no cancellation present. After
+the write the row moves to `logs` with outcome `written`, attestations
+included; the attestations are not written to the chain.
 
 ### 4.2 escrowTransfer
 
 Sent from a **spending** account, the seller, to the buyer at
-`POST /anos-transfer`. `createdAt` is not checked. Held in
-`escrow_transfers` with `account_id_to` filled from the payload. Ready when
-approved, no cancel signature present, and either the seller's success
-signature is approved, or the dispute signature is approved and two approved
-verdicts say `success`. After the write the row moves to `logs`, outcome
-`written`, when there was no dispute, or to `archives`, outcome
-`arbitratedSuccess`, with its arbitrations, when there was.
+`POST /anos-transfer`. Since 2026-11-11 `createdAt` must be within
+`LOCK_OFFSET_MINUTES` of the validator's clock, before or after (section
+27); until then it was not checked. Held in `escrow_transfers` with
+`account_id_to` filled from the payload. Ready when approved, no cancel
+signature present, and either the seller's success signature is approved,
+or the dispute signature is approved and two approved verdicts say
+`success`. After the write the row moves to `logs`, outcome `written`,
+when there was no dispute, or to `archives`, outcome `arbitratedSuccess`,
+with its arbitrations, when there was.
 
 ### 4.3 transferToFund
 
@@ -313,12 +327,14 @@ signatures: the sender's, any two pairs
 ```
 
 Extra checks: `accountIdTo` is the fund; `stakeFor` is one of the six;
-`amount` is at least the minimum for that purpose. `createdAt` is not
-checked. Held in `pending` like a plain transfer and written at the next
-round as a link of type `transferToFund`. In the same database transaction
-the sender's `stakes` row gets the amount added to the purpose's column,
-the row created if the account has none. Nothing else happens: the role
-follows from the amount.
+`amount` is at least the minimum for that purpose. Since 2026-11-11
+`createdAt` must be within `LOCK_OFFSET_MINUTES` of the validator's clock,
+before or after (section 27); until then it was not checked. Held in
+`pending` like a plain transfer and written at the next round as a link of
+type `transferToFund`. In the same database transaction the sender's
+`stakes` row gets the amount added to the purpose's column, the row
+created if the account has none. Nothing else happens: the role follows
+from the amount.
 
 Since 2026-11-08 (section 24) a `transferToFund` for `moderator` or
 `attestor`, and since 2026-11-10 (section 26) one for `validator` or
@@ -425,7 +441,9 @@ filed. It follows the sender's type's lock: from a guarded or vault account
 `createdAt` is checked as the account's own transfers are, at least the
 lock and at most the lock plus `LOCK_OFFSET_MINUTES` ahead, and that moment
 is kept as `future_date`; from a spending or assisted account `createdAt`
-is not checked and `future_date` is NULL. Held in `assisted_transfers`.
+is, since 2026-11-11 (section 27), checked as every transfer without a
+lock is, within `LOCK_OFFSET_MINUTES` of the validator's clock, before or
+after, and `future_date` stays NULL. Held in `assisted_transfers`.
 Ready for a leader round as 4.1, approved, both attestations approved, no
 cancellation present, and, when it has one, its moment passed
 (`future_date IS NULL OR future_date <= now()`). The write is one link of
@@ -446,7 +464,7 @@ Every follow-up is `{ payload, signatures }`:
 
 ```
 payload: {
-  type:          the kind, one of the eight below
+  type:          the kind, one of the nine below
   transactionId: the held transaction it attaches to
   <signer>:      the signer's account id, under the field the kind names
   signedAt:      ISO 8601, recorded, not compared with the clock
@@ -495,14 +513,20 @@ effect on acceptance beyond readiness.
 payload: { type: "assistedTransferCancel", transactionId, accountId, signedAt }
 ```
 
-Signer: `accountId`, the row's `account_id`, the sender. Own checks: no
-cancellation present. Accepted until the transfer is written, even when both
-attestations are approved; readiness excludes rows with a cancellation
-present. Stored in `cancellation`. Effect on acceptance: the validator moves
-the row to `logs`, outcome `userCancelled`. Accepted on a break-glass row
-(4.5) as on an assisted one: nothing checks the row's type, so an owner who
-still has their device stops a false move with the account's own keys under
-any two pairs (section 22).
+Signer: `accountId`, the row's `account_id`, the sender. Own checks: the
+wait, since 2026-11-11 (section 27.2); no cancellation present. The wait:
+an `assistedAnosTransfer` cannot be cancelled while the validators would
+still take the same signed transfer in again, that is while its
+`createdAt` is no more than `LOCK_OFFSET_MINUTES` behind the validator's
+clock. Such a cancel is refused with
+`this transfer cannot be cancelled yet`. After the wait the cancel is
+accepted until the transfer is written, even when both attestations are
+approved; readiness excludes rows with a cancellation present. Stored in
+`cancellation`. Effect on acceptance: the validator moves the row to
+`logs`, outcome `userCancelled`. Accepted on a break-glass row (4.5) as on
+an assisted one, without the wait, which is for an assisted transfer
+alone, so an owner who still has their device stops a false move with the
+account's own keys under any two pairs (section 22).
 
 ### 5.4 guardianVote
 
@@ -528,9 +552,15 @@ For an `escrowTransfer`. Signer: `accountId`.
 - `escrowSuccess`: the seller, `account_id`. Own checks: no dispute, cancel
   or success present. Stored in `success_signature`. Approved, it makes the
   escrow ready.
-- `escrowCancel`: the buyer, `account_id_to`. Own checks: no dispute,
-  success or cancel present. Stored in `cancel_signature`. Effect on
-  acceptance: the row moves to `logs`, outcome `receiverCancelled`.
+- `escrowCancel`: the buyer, `account_id_to`. Own checks: the wait, since
+  2026-11-11 (section 27.2); no dispute, success or cancel present. The
+  wait: the trade cannot be cancelled while the validators would still
+  take the same signed `escrowTransfer` in again, that is while its
+  `createdAt` is no more than `LOCK_OFFSET_MINUTES` behind the validator's
+  clock. Such a cancel is refused with
+  `this trade cannot be cancelled yet`. Stored in `cancel_signature`.
+  Effect on acceptance: the row moves to `logs`, outcome
+  `receiverCancelled`.
 - `escrowDispute`: the seller or the buyer. Own checks: no success, cancel
   or dispute present. Stored in `dispute_signature`. From then on only
   verdicts move the escrow.
@@ -569,6 +599,31 @@ move is written, even when both attestations are approved. Stored in
 moves the row to `logs`, outcome `userCancelled`. No wallet page offers it
 yet; the owner's dispute path is a later plan.
 
+### 5.8 lockedTransferCancel
+
+```
+payload: { type: "lockedTransferCancel", transactionId, accountId, signedAt }
+```
+
+Added 2026-11-11 (section 28), at `POST /locked-transfer-cancel`. For a
+`guardedAnosTransfer` or a `vaultAnosTransfer` waiting in
+`locked_transactions`. Signer: `accountId`, the row's `account_id`, the
+sender, under any two pairs. No stake. Own checks, in this order: the
+signer is the sender (`payload.accountId is not the transfer's sender`);
+the wait (section 27.2); no cancellation present
+(`a cancellation is already present`). The wait: the transfer cannot be
+cancelled while the validators would still take the same signed transfer
+in again, that is while its `createdAt` is still at least its lock ahead
+of the validator's clock. Such a cancel is refused with
+`this transfer cannot be cancelled yet`. The wallet dates a transfer the
+lock plus `LOCK_OFFSET_MINUTES` ahead, so the wait is the offset after
+sending. After the wait the cancel is accepted until the transfer is
+written: through its lock, and after it until a leader round writes the
+transfer; readiness excludes rows with a cancellation present. Stored in
+`cancellation`, a column of `locked_transactions` since this section, with
+its flag `cancellation_approved`. Effect on acceptance: the validator
+moves the row to `logs`, outcome `userCancelled`.
+
 ## 6. The leader round
 
 Unchanged in shape: ready announcement, every validator's ready list, the
@@ -580,7 +635,7 @@ Each validator's ready list, in id order:
 | Table                 | Ready when |
 | --------------------- | ---------- |
 | `pending`             | approved |
-| `locked_transactions` | approved, `future_date <= now()` |
+| `locked_transactions` | approved, `future_date <= now()`, `cancellation IS NULL` (since 2026-11-11, section 28) |
 | `assisted_transfers`  | approved, `attestation_1_approved`, `attestation_2_approved`, `cancellation IS NULL`, and `future_date IS NULL OR future_date <= now()` (a break-glass move's moment, section 22) |
 | `escrow_transfers`    | approved, `cancel_signature IS NULL`, and `success_signature_approved` or (`dispute_signature_approved` and at least two approved `success` verdicts) |
 | `fund_proposals`      | approved, `vote_closes_at <= now()`, and the tally passes |
@@ -619,6 +674,7 @@ waits for the next round, which the next transaction of any kind starts.
 
 | Table      | Source               | Outcome             | When |
 | ---------- | -------------------- | ------------------- | ---- |
+| `logs`     | `locked_transactions` | `userCancelled`    | the sender's cancellation approved (since 2026-11-11, section 28) |
 | `logs`     | `assisted_transfers` | `written`           | after the round wrote it |
 | `logs`     | `assisted_transfers` | `userCancelled`     | the sender's cancellation approved |
 | `logs`     | `escrow_transfers`   | `written`           | written with no dispute |
@@ -629,8 +685,10 @@ waits for the next round, which the next transaction of any kind starts.
 | `archives` | `fund_proposals`     | `voteFailed`        | the vote closed and failed; with the votes |
 
 Each move is one database transaction: the insert into `logs` or `archives`
-from the row and its children, then their deletion. Nothing from `pending`
-or `locked_transactions` is logged: the chain holds everything they had.
+from the row and its children, then their deletion. A written row of
+`pending` or `locked_transactions` is not logged: the chain holds
+everything it had. A cancelled locked transfer is, since 2026-11-11: its
+row moves to `logs` (section 28).
 
 Purging logs is not built. The README gives the one-line delete for rows
 older than a month; how it runs is decided later. Archives are never purged.
@@ -648,6 +706,7 @@ through their wallets:
 | POST   | `/fund-proposal`           | `fundProposal` |
 | POST   | `/attestation`             | `attestation` |
 | POST   | `/assisted-transfer-cancel`| `assistedTransferCancel` |
+| POST   | `/locked-transfer-cancel`  | `lockedTransferCancel` (5.8, since 2026-11-11) |
 | POST   | `/break-glass-cancel`      | `breakGlassCancel` (5.7) |
 | POST   | `/guardian-vote`           | `guardianVote` |
 | POST   | `/escrow-signature`        | `escrowSuccess`, `escrowCancel`, `escrowDispute`, `escrowVerdict`, by `payload.type` |
@@ -816,7 +875,13 @@ at boot by `src/config/env.js` as positive integers.
 
 The existing `GUARDED_LOCK_MINUTES`, `VAULT_LOCK_MINUTES` and
 `LOCK_OFFSET_MINUTES` keep their meaning; `LOCK_OFFSET_MINUTES` also bounds
-how far a proposal's `createdAt` may be from the validator's clock.
+how far a proposal's `createdAt` may be from the validator's clock. Since
+2026-11-11 (section 27) it also bounds the date of every transfer without
+a lock: the `createdAt` of a plain, an assisted and an escrow transfer, of
+a `transferToFund` and of a break-glass move out of a spending or assisted
+account must be within `LOCK_OFFSET_MINUTES` of the validator's clock,
+before or after. Through that it is also how long the sender's cancel of
+an assisted transfer and the buyer's cancel of an escrow trade wait.
 
 Added 2026-10-25 for the wallet, both optional, read through
 `optionalInteger` and a default like the masterpod's, so the five env files
@@ -1612,8 +1677,9 @@ is UNIQUE there, and a transfer is refused while the account has anything
 held (one held transaction per account). A guarded or vault transfer sits
 there from the moment the validator accepts it until the first leader
 round after its unlock moment writes it; nothing can be done with it
-meanwhile, since no follow-up exists for a locked transfer. Sender only:
-the receiver sees it in the history when it lands. The held transfer
+meanwhile, since no follow-up exists for a locked transfer (so it was
+until 2026-11-11: since then the sender can cancel it, section 28). Sender
+only: the receiver sees it in the history when it lands. The held transfer
 only: a written transfer is on the chain under the same `transaction_id`,
 and the row is deleted when written (section 6), so nothing comes from
 `logs` or `archives`.
@@ -1636,6 +1702,7 @@ only. The first line that matches wins:
 | `stage` | The row | What it means |
 | ------- | ------- | ------------- |
 | `waiting` | `approved` false | not every validator has accepted the transfer yet |
+| `cancelling` | `cancellation IS NOT NULL` | the sender's cancel is on it (5.8; since 2026-11-11, section 28); it is off the ready list, and once the cancel is approved the row moves to `logs` |
 | `locked` | `approved`, `future_date > now()` | waiting out its lock; the first leader round after `unlocksAt` writes it |
 | `due` | `approved`, `future_date <= now()` | unlocked; the next leader round writes it (a round starts with the next transaction of any kind) |
 
@@ -2679,9 +2746,10 @@ no package file and no schema file changes; the doorman is not touched.
   attestation, a cancellation, a vote, an escrow signature or a verdict
   that one validator refuses stays in its slot or row unapproved on the
   others, and a cancellation stuck that way keeps an assisted transfer off
-  the ready list. The slots are JSON columns with no time of their own, so
-  an age limit there needs a time per slot. Not in this build; a
-  testnet-month follow-up.
+  the ready list, and since 2026-11-11 a locked transfer too, a guarded or
+  vault one (section 28): it is then never written and never removed. The
+  slots are JSON columns with no time of their own, so an age limit there
+  needs a time per slot. Not in this build; a testnet-month follow-up.
 
 ## 22. The break-glass transfer (2026-11-08)
 
@@ -3455,3 +3523,619 @@ here; nothing in 26.1 was changed.
   `moderator` or no role; a 404 is the other refusal; `daoVote` and
   `guardian` are not asked). A real stake against a real masterpod is
   the user's run-through.
+
+## 27. The time check on every transfer (2026-11-11)
+
+Decided 2026-11-11 in a planning chat of three rounds, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/locked-transfer-cancel-plan-1.md`. This is
+its step 1 of five, its section 0. Why: a plain, an assisted and an escrow
+transfer, the stake transfer and a break-glass move out of a spending or
+assisted account carried a date, `createdAt`, that the validators never
+compared with their clock; it only had to be a string. So a signed
+transfer stayed good for as long as nothing else was written for its
+account. That is what let a cancelled transfer be sent in again. The
+validators refuse a transfer whose id is in a holding table or on the
+chain, but they do not look in `logs`, where a cancelled row goes. Whoever
+kept a copy of the signed object, the wallet's proxy, a doorman or a
+validator, could post it again, and the row was back. A second cancel was
+then accepted, but its move to `logs` failed, because `logs` already had
+that transaction id as its primary key. The row then stayed for good with
+a cancellation on it, and the account could send nothing more. The user,
+2026-11-11: "So you're saying with an assited transfer, there is no time
+check when it comes in? There's no timestamp? That can't be right. Why
+doesn't the rule just check the timestamp. Has it been 5 minutes or not?
+That's the easieset thing in the world." The planning chat had begun with
+a cancel for a guarded or vault transfer, which is the plan's step 2 and
+builds on this step. The user on putting the two together: "While you're
+digging in there, knock it all out." Two things are built here: every
+transfer's date is checked when it comes in (27.1), and the two cancels
+that exist today wait until their transfer can no longer be sent in
+(27.2). No table, no route, no setting and no npm package. The doorman,
+the wallet, the masterpod, the keyholders and the signing server are not
+touched by this step.
+
+### 27.1 The check
+
+One rule for every transfer that had no date check: `createdAt` is within
+`LOCK_OFFSET_MINUTES` of the validator's clock, before or after. It is the
+check a fund proposal has (4.4), the same three lines, with its reason
+word for word: `payload.createdAt must be within <n> minutes of now`, `<n>`
+the offset, 5 on the testnet. A date that does not parse is refused with
+the same reason. Nothing older than the offset is taken in any more.
+
+- **The transfers of `/anos-transfer`.** Check 1b of `verifyAnosTransfer`
+  (`src/transfer/transfer.service.js`) had one half, the block
+  `if (lockMinutes > 0)`: the lock ahead, for a guarded or vault transfer
+  and for a break-glass move out of a guarded or vault account. That half
+  is untouched. It gained its other half, the `else`: the rule above,
+  taken by a plain, an assisted and an escrow transfer and by a
+  break-glass move out of a spending or assisted account, whose
+  `lockMinutes` is 0. `futureDate` stays undefined in that branch, so
+  `future_date` stays NULL for such a break-glass move.
+- **The stake transfer.** `verifyTransferToFund`
+  (`src/fund/fund.service.js`) runs the same check as its 1b, after
+  `checkTransferToFundSignaturesAndIds` and before the purpose's minimum.
+- **Where the check is, and where it is not.** It is in the two verify
+  functions, which run on the receiving validator and on every peer asked
+  to approve (`src/validators/validators.service.js` `verifyTransaction`),
+  each by its own clock. It is not in `checkTransferSignaturesAndIds` or
+  `checkTransferToFundSignaturesAndIds`, the shape, signature and id
+  checks. Only those run when a chain chunk is replayed
+  (`src/garlic-chain/replay.service.js`) and when a joiner stores the held
+  rows it pulled (`src/held-transactions/held-rows.service.js`). So an old
+  link and an old held row are never refused for their age.
+- **No new setting.** The offset is `LOCK_OFFSET_MINUTES`
+  (`env.locks.offsetMinutes`), as for a fund proposal.
+- **What it asks of a sender**, as the plan read the senders on
+  2026-11-11: nothing new. The wallet and the OG signer date a transfer at
+  the moment they send it, a guarded or vault transfer the lock plus the
+  offset ahead. A phone whose clock is more than
+  `TIMESTAMP_WINDOW_SECONDS` (120) off cannot read its account, and the
+  wallet reads the account before it sends.
+
+### 27.2 The wait before a cancel
+
+A cancelled transfer's row moves to `logs`, and the validators do not look
+in `logs` when a transfer comes in. So a cancel must not be accepted while
+the same signed transfer could still be taken in again. One function says
+whether it could, `canBeSentInAgain(payload)`, exported from
+`src/transfer/transfer.service.js`, beside check 1b:
+
+- for a guarded or vault transfer: its date is still at least its lock
+  ahead of the validator's clock;
+- for a plain, an assisted or an escrow transfer: its date is not yet more
+  than `LOCK_OFFSET_MINUTES` behind the validator's clock.
+
+That is true exactly while check 1b accepts the transfer, now or at a
+later clock, and time only moves it to false. Once it is false the check
+refuses that transfer for good. The function reads the transfer's own date
+and the lock of its type, and needs no setting. It is not for a
+`breakGlassTransfer`, whose lock is its sender's type's.
+
+A cancel waits until the function says false. The two cancels that exist
+today got the wait. The third, of a guarded or vault transfer, is the
+plan's step 2 and asks the same function, so the wait and the incoming
+check cannot drift apart.
+
+- **`assistedTransferCancel`**
+  (`src/assisted-transfers/assisted-transfer-cancel.js`): `verify` gained
+  one check between its two, after the sender and before the slot. When
+  the row's transaction is an `assistedAnosTransfer` and
+  `canBeSentInAgain` says true, the cancel is refused with
+  `this transfer cannot be cancelled yet`. A break-glass move's row, which
+  the same cancel may be attached to (5.3), is left as it was: no wait.
+- **`escrowCancel`** (`src/escrow/escrow-cancel.js`): the builder of the
+  three escrow signature kinds (`src/escrow/escrow-signature-kind.js`)
+  takes one more member, which a kind may leave out, `check(row)`: a
+  reason or null. `verify` runs it after `signerOf` and before it walks
+  over the slots. `escrowCancel` passes one: refused with
+  `this trade cannot be cancelled yet` while `canBeSentInAgain` says true
+  for the row's escrow transfer. `escrowSuccess` and `escrowDispute` pass
+  none and are checked as before.
+
+Both reasons contain `cannot be cancelled yet`, which is what the wallet
+looks for (the plan's step 4). With the wallet's dating the wait is the
+offset: 5 minutes after sending on the testnet. The user, 2026-11-11: "An
+easier rule would be that you have to wait at least 5 minutes before
+cancelling it. What ever amount of time ensure that it can't be resent.
+That's a simple 1 line rule."
+
+Why a cancelled transfer cannot come back: a cancel is approved only when
+every validator accepted it, and each accepts it, by its own clock, only
+once check 1b would no longer take the transfer in. From then on each of
+them refuses that same signed transfer for good, since time only moves its
+date further out of the window. So a row that left for `logs` through a
+cancel cannot be put back.
+
+### 27.3 What is left as it is
+
+- **A follow-up's `signedAt` gets no time check**, although the phase 3
+  build list says "a time window on every transaction and follow-up". An
+  attestation is signed by the first attestor, stored on the masterpod and
+  sent to the validators only once the case is decided; a 5 minute rule
+  would refuse it. `signedAt` stays recorded and not compared with the
+  clock (5.1).
+- **The two cancels of a break-glass move have no wait**: the
+  `breakGlassCancel` (5.7), whose file is untouched, and the
+  `assistedTransferCancel` on a break-glass row. No wallet page offers
+  either. A break-glass move that is cancelled while check 1b would still
+  take it in can be sent in again.
+- **An escrow trade that two arbitrators' verdicts cancel** inside the
+  offset after it was made is in the same place.
+- **The moment the wait ends.** Every validator checks the wait by its own
+  clock. A cancel that reaches them in the very moment the wait ends,
+  while two of their clocks disagree, could be accepted by some and
+  refused by one. It would then be stuck: a cancellation that one
+  validator refuses stays unapproved on the others, and the transfer is
+  never written and never removed (21.3, a follow-up there). That takes a
+  press in that same moment and a validator whose clock is off, and is
+  left as it is.
+
+### 27.4 The rollout
+
+- The validators take this build at their last pull, at the phase 3
+  launch, which wipes every database. No schema change, no env variable,
+  no npm package, nothing under `deploy/`.
+- **Every validator has to be on the new code.** One left on the old code
+  would still take in an old transfer that the others refuse, and its row
+  there would only go when the age limit on unapproved rows drops it
+  (section 21).
+- **The validators' clocks now matter for every transfer**, as they
+  already do for signed reads and fund proposals. A validator whose clock
+  is more than `LOCK_OFFSET_MINUTES` off refuses every transfer it is
+  asked to approve. Nothing new is asked of a phone: signed reads already
+  allow it 2 minutes.
+- **The wait needs no setting.** The validators work it out from the lock
+  numbers they have.
+- The doorman checks no time on a transfer or a follow-up and does not
+  change for this step. The wallet's sentence for a cancel pressed too
+  early is the plan's step 4.
+- The run-through is the user's, on the launched network.
+
+### 27.5 Files
+
+Changed: `src/transfer/transfer.service.js` (the `else` half of check 1b;
+`canBeSentInAgain`, new and exported; the comment above `TRANSFER_TYPES`
+and item 1b in the comment of `verifyAnosTransfer`),
+`src/fund/fund.service.js` (1b in `verifyTransferToFund`; its header
+comment), `src/assisted-transfers/assisted-transfer-cancel.js` (the wait
+in `verify`, `NOT_YET`, the import, the header comment),
+`src/escrow/escrow-signature-kind.js` (`check`, in the builder and in
+`verify`; the two comments) and `src/escrow/escrow-cancel.js` (`check`,
+`NOT_YET`, the import, the header comment). Comment only:
+`network/testnet.env`, above the three lock numbers, no value changed, and
+`src/config/env.js`, above `locks`. In the docs: the README's row of
+`LOCK_OFFSET_MINUTES`, its bullet on `createdAt` in "Transfer submission"
+and the list of checks under it, its paragraph on the stake transfer and
+its paragraphs of `/assisted-transfer-cancel` and of `escrowCancel`;
+sections 4, 4.1, 4.2, 4.3, 4.5, 5.3, 5.5 and 10 above, and this section.
+No schema change, no file under `deploy/` and no package file. Nothing in
+`checkTransferSignaturesAndIds`, `checkTransferToFundSignaturesAndIds`,
+`verifyFundProposal`, `break-glass-cancel.js`, `escrow-success.js`,
+`escrow-dispute.js`, `replay.service.js` or `held-rows.service.js`.
+
+### 27.6 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 27.1 or 27.2 was changed.
+
+- **The build was made on main at d0cd95d**, the commit the plan names,
+  with a clean working tree. Every line the plan quotes was where it
+  said, and the last section was 26, so this is 27, as the plan expected.
+- **The code is the plan's, word for word**: the `else` half,
+  `canBeSentInAgain` with its comment, the three lines in
+  `verifyTransferToFund`, the check in the assisted cancel's `verify` and
+  `check(row)` in `escrow-cancel.js`. The comment of `canBeSentInAgain`
+  names `locked-transfer-cancel.js`, a file the plan's step 2 adds.
+- **In `escrow-signature-kind.js`** `verify` gained two lines:
+  `const own = check ? check(row) : null;` and `if (own) return own;`.
+  Both comments of the file name `check`: the builder's, and the header's
+  sentence on what differs between the three kinds, which named
+  `signerOf` and `onAccepted` only.
+- **In `escrow-cancel.js`** `NOT_YET` stands above the header comment, so
+  that the comment stays on the export.
+- **Where a comment says more than the plan quotes.** The comment above
+  `TRANSFER_TYPES` had a second sentence on the date, on a break-glass
+  move out of a spending or assisted account ("is not checked"); it says
+  the new rule too. The assisted cancel's header said of a break-glass
+  row "nothing here reads the row's type"; the wait reads it, so the
+  header says that such a row has no wait, and 5.3 above says the same.
+  The header of `verifyTransferToFund` lists what follows the lifted-out
+  checks and gained two words, "the date,". Item 1b in the comment of
+  `verifyAnosTransfer` also says why the check is not in
+  `checkTransferSignaturesAndIds`.
+- **The README's paragraphs on the assisted and the escrow transfer** do
+  not say that the date is not checked, so nothing changed there; 4.1 and
+  4.2 above did say it. The README's bullet gives the reason with
+  `<offset>` in the number's place. In 4.1 to 4.3 and 5.3 above and in
+  the README's paragraphs on the stake transfer and on
+  `/assisted-transfer-cancel` the lines were wrapped again from the
+  changed sentence on; their other words are as they were.
+- **Two places the plan does not name** were first left as they were and
+  then changed on the user's word, given the same day when the build was
+  reported: "Yes, fix both". The README's paragraph "The server checks,
+  in order" said "for a locked transfer, the date" and says "the date",
+  since the date is now checked for every transfer. The comment above
+  `locks` in `src/config/env.js` told what the offset is for a guarded or
+  vault transfer only. It also tells now what else the offset bounds, a
+  fund proposal's date and the date of every transfer without a lock, and
+  names the wait of the two cancels, in the words of the comment in
+  `network/testnet.env`. Nothing but the comment changed in that file.
+- **Checks.** `node --check` passed on the five source files, and on
+  `src/config/env.js` once its comment had changed. No validator was
+  booted and no database touched. The date arithmetic was read line by
+  line, as the plan's 0.5 says. The `else` half and the 1b of
+  `verifyTransferToFund` are the three lines of `verifyFundProposal`'s
+  1b but for the indent, and `MS_PER_MINUTE` is `60_000` in both files; a
+  date that does not parse is `NaN`, the comparison is false, and the
+  transfer is refused. `canBeSentInAgain`, first line against the `if`
+  half: the half accepts while the date is at least the lock and at most
+  the lock plus the offset ahead, and time only brings the date nearer,
+  so the transfer is accepted now or later exactly while it is at least
+  the lock ahead, which is the line
+  `createdAt - Date.now() >= lockMinutes * MS_PER_MINUTE`; a date exactly
+  the lock ahead passes both. Second line against the `else` half: the
+  half accepts while the date is within the offset either way, and time
+  only takes the date further behind, so the transfer is accepted now or
+  later exactly while it is no more than the offset behind, which is the
+  line `Date.now() - createdAt <= env.locks.offsetMinutes * MS_PER_MINUTE`;
+  a date exactly the offset behind passes both. A date that does not
+  parse gives false in both lines.
+- **Beyond the plan**, a throwaway script in the build chat's scratch
+  folder, outside the repo, loaded the real modules with the values of
+  `network/testnet.env`, a made-up database password, a key file made for
+  the run and no `.env`. No server listened and nothing asked the
+  database. The modules `src/server.js` imports loaded in its order with
+  no error, `server.js` itself left out, so the two new imports of
+  `transfer.service.js` link. With the clock held still,
+  `canBeSentInAgain` gave the answer of the two halves of check 1b,
+  written out and asked "now, or at any later clock?", for 1,881 dates
+  over the five transfer types other than the break-glass move, every
+  edge one millisecond either side: true at exactly the offset behind and
+  at exactly the lock ahead, false one millisecond past, and false for
+  good once false. On rows made by hand `assistedTransferCancel` and
+  `escrowCancel` refused with their reasons inside the offset and passed
+  one millisecond past it, in the order signer, wait, slots; a
+  break-glass row, `breakGlassCancel`, `escrowSuccess` and
+  `escrowDispute` had no wait. The script was run once more after the
+  comment in `src/config/env.js` changed, with the same answers.
+  `verifyAnosTransfer` and `verifyTransferToFund` themselves were not
+  run: they need the database and real signatures. A real transfer and a
+  real cancel on the launched network are the user's run-through.
+
+## 28. The locked transfer cancel (2026-11-11)
+
+Decided 2026-11-11 in the planning chat of section 27, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/locked-transfer-cancel-plan-1.md`. This is
+its step 2 of five, its section 1, and it builds on step 1 (section 27).
+Why: a guarded or vault transfer waits out its lock in
+`locked_transactions`, a week or a month in production, and nothing could
+be done with it meanwhile (18.1). A transfer sent by mistake went through
+when the lock ended, and the account could send nothing else until then.
+The cancel had never been built: this validator had no route for it, and
+the wallet's home page plan of 2026-11-06 listed it as out of scope
+(`~/Desktop/Z-TestNet/forclaude/wallet-home-plan-1.md`, 4.7). The user,
+2026-11-11: "I believe at some point I wanted to add the feature where the
+user could cancel a guarded or vault transfer. But I don't see any button
+like that on the web app." And: "We need cancel before production. It
+shouldn't be too hard to do." Built here: one new follow-up kind, the
+ninth, `lockedTransferCancel` (5.8), with its route,
+`POST /locked-transfer-cancel`; two columns on `locked_transactions`; and
+the ready list, the logs, the held rows a joiner pulls and the read each
+learn of it. Three repos change, in this order: the validator (this
+step), the doorman, whose validator door has to let the new route through
+(the plan's step 3), and the wallet, which gets a "Cancel transfer" button
+on the "Locked transfer" row of its account page (step 4); then the
+paperwork (step 5). The masterpod, the keyholders and the signing
+server's code are not touched. No env variable and no npm package.
+
+### 28.1 The cancel
+
+- **Only the sender cancels.** The cancel is the follow-up of 5.8, signed
+  with the account's own keys under the usual rule, any two pairs; no
+  stake. A cancel by the break-glass key, for someone who lost their
+  passkey, is not in this plan.
+- **The kind**, `src/locked-transactions/locked-transfer-cancel.js`, is a
+  copy of the assisted cancel
+  (`src/assisted-transfers/assisted-transfer-cancel.js`, which is
+  untouched) for the other table: `type` `lockedTransferCancel`, `table`
+  `locked_transactions`, `signerField` `accountId`, no stake, no `rule`.
+  The flow every kind shares runs first (5.1,
+  `src/attachments/attachments.service.js`), so a cancel is accepted only
+  on a transfer that is held
+  (`no locked_transactions transaction with this transactionId`) and that
+  every validator has accepted (`this transaction is not approved yet`).
+  Then the kind's own three checks, in this order:
+  1. the signer is the row's `account_id`, else
+     `payload.accountId is not the transfer's sender`;
+  2. the wait, else `this transfer cannot be cancelled yet`;
+  3. the cancellation slot is empty, else
+     `a cancellation is already present`: one cancel per transfer.
+
+  Reasons 1 and 3 are the assisted cancel's, word for word; reason 2 is
+  the one section 27 gave it.
+- **The wait** (section 27.2) is one call,
+  `canBeSentInAgain(row.ogTransaction.payload)`
+  (`src/transfer/transfer.service.js`, untouched in this step). Only
+  guarded and vault transfers are held in `locked_transactions`, so the
+  function always decides by the lock of the transfer's type here: a
+  cancel is refused while the transfer's `createdAt` is still at least its
+  lock ahead of the validator's clock. That is the exact opposite of the
+  lower bound of check 1b, the one condition under which the same signed
+  transfer would still be taken in. So once any validator has accepted a
+  cancel, that validator refuses the transfer for good, and a transfer
+  needs every validator: a cancelled transfer cannot be sent in again,
+  although its row has gone to `logs`, where the validators do not look
+  when a transfer comes in. With the wallet's dating, the lock plus the
+  offset ahead, the wait is the offset: 5 minutes after sending on the
+  testnet. It needs no setting.
+- **Until when.** After the wait the cancel is accepted until the transfer
+  is written: through the lock, and after it until a leader round writes
+  the transfer.
+- **Where it is stored**: on the transfer's own row, in two new columns of
+  `locked_transactions`, the same two `assisted_transfers` has:
+
+  ```sql
+  cancellation           JSONB,
+  cancellation_approved  BOOLEAN NOT NULL DEFAULT false
+  ```
+
+  `cancellation` holds the whole signed object, `{ payload, signatures }`
+  as received, NULL while there is none; `cancellation_approved` turns
+  true once every validator accepted it. They are the last two columns,
+  after `transaction_id`, so a database built from `db/schema.sql` matches
+  one that was altered (28.2). The file has them in the table's definition
+  and no `ALTER` line.
+- **The queries**
+  (`src/locked-transactions/locked-transactions.queries.js`). `findLocked`
+  answers `{ accountId, approved, ogTransaction, slots: { cancellation:
+  { object, approved } } }`: `approved` and `ogTransaction` as before,
+  which is all `findHeld` and the transfer flows read, and `slots` in the
+  shape `findAssisted` gives, which `findInSlots` reads. New:
+  `setLockedCancellation(transactionId, object)`, which fills the slot
+  only while it is empty, and
+  `markLockedCancellationApproved(transactionId)`; each answers true when
+  a row changed.
+- **Present blocks.** `findDueIds` gained `AND cancellation IS NULL`: a
+  row with a cancellation on it, approved or not, is off the ready list
+  (section 6), as an assisted transfer's is. So a transfer cannot be
+  written while its cancel is still going round.
+- **The effect.** When a validator marks the cancel approved it moves the
+  row to `logs`: source `locked_transactions`, outcome `userCancelled`,
+  `record` `{ row }` with the cancellation in it (section 7). It is not
+  just deleted. `SOURCES` in `src/records/records.queries.js` names
+  `locked_transactions` for that. A locked transfer that is written is
+  deleted as before.
+- **The route.** `POST /locked-transfer-cancel`
+  (`src/locked-transactions/locked-transactions.router.js`, mounted in
+  `src/app.js` after the assisted transfers router), on the handler every
+  follow-up route is built from. It answers `202` + `{ transactionId }` or
+  `400` + `{ error }` as every follow-up does (5.1).
+- **The peers.** `KINDS` in `attachments.service.js` has nine kinds, the
+  new one after `breakGlassCancel`. So a peer accepts the cancel in an
+  attachment approval, checks it against its own row by its own clock,
+  and finds it stored when the proof comes.
+- **A validator that joins** (section 19). The entry of
+  `locked_transactions` in the table specs of
+  `src/held-transactions/held-rows.service.js` (`TABLES`) has the two
+  columns and names `cancellation` as a slot. So the leader sends a locked
+  row with its cancellation, and the joiner checks the signatures of a
+  filled slot and stores the row with every column.
+- **The read** (18.2). `/get-locked-transfer` answers a fourth stage,
+  `cancelling`, for a row with a cancellation on it. It is decided right
+  after `waiting`, before `locked` and `due`, since a cancel is accepted
+  in both and takes the row off the ready list. `findLockedFor`
+  (`src/reads/reads.queries.js`) reads `has_cancellation`;
+  `LOCKED_STAGES` and `lockedStageOf` (`src/reads/reads.service.js`) have
+  the stage. The answer's fields are as they were. Once the row has moved
+  to `logs` the read answers `null`.
+- **Left as it is.** One known gap comes along from the assisted cancel: a
+  cancel that one validator refuses stays unapproved on the others, and
+  the transfer is then never written and never removed (21.3, a follow-up
+  there). The moment the wait ends is the edge of 27.3. Out of this plan:
+  a cancel by the break-glass key; an age limit on a follow-up that got
+  stuck; a history line or a notification for a cancelled transfer; the
+  receiver's view of a locked transfer.
+
+### 28.2 The rollout
+
+- The validators take this build at their last pull, at the phase 3
+  launch, which wipes every database. A database built fresh from
+  `db/schema.sql` has the two columns.
+- **A database kept from before needs two lines** before the new code
+  starts:
+
+  ```sql
+  ALTER TABLE locked_transactions ADD COLUMN IF NOT EXISTS cancellation JSONB;
+  ALTER TABLE locked_transactions ADD COLUMN IF NOT EXISTS cancellation_approved BOOLEAN NOT NULL DEFAULT false;
+  ```
+
+  Without them `findDueIds` fails on the missing column, and that
+  validator finishes no leader round. `findLocked` fails the same way, and
+  `findHeld` asks it about every transaction that is not in `pending`, so
+  that validator approves no transaction either. `npm run db:setup` does
+  not add the columns, since `db/schema.sql` adds no column to a table
+  that exists: on such a database it stops at the comment lines of the two
+  columns until the two lines have run. `npm run db:reset` builds the
+  table with them.
+- **Every validator has to be on the new code.** One left on the old code
+  refuses the cancel as a kind it does not know, so no cancel would be
+  accepted; and a joiner and a leader on different code cannot pass the
+  held rows of `locked_transactions`, whose columns then differ.
+- A doorman on the old code answers `404 Not Found` for the route. The
+  door's line is the plan's step 3.
+- The wallet's button is the plan's step 4. Against validators or doormen
+  without the route, a press ends in the refusal under the row.
+- Today's signing server signs the cancel as it signs anything. The new
+  one of `~/Desktop/Z-TestNet/forclaude/signing-server-plan-1.md` signs
+  only the kinds on its list, so the kind goes on that list before it is
+  built (this plan's 4.1).
+- The wait needs no setting. The validators work it out from the lock
+  numbers they have.
+- The run-through is the user's, on the launched network: a guarded
+  transfer sent from the wallet, a cancel pressed at once, which the wait
+  refuses, and the cancel again after the wait.
+
+### 28.3 Files
+
+Changed: `db/schema.sql` (the two columns at the end of
+`locked_transactions`, its header comment and two `COMMENT ON COLUMN`
+lines; the header comment of `logs` and `archives`, and
+`COMMENT ON TABLE logs`),
+`src/locked-transactions/locked-transactions.queries.js` (`findLocked`;
+`setLockedCancellation` and `markLockedCancellationApproved`, new;
+`findDueIds`; the header comment), `src/app.js` (the import and the
+mount), `src/attachments/attachments.service.js` (the import, `KINDS`,
+three comments), `src/records/records.queries.js` (`SOURCES`; three
+comments), `src/held-transactions/held-rows.service.js` (the entry of
+`locked_transactions` in `TABLES`; the comment above it),
+`src/reads/reads.queries.js` (`findLockedFor`) and
+`src/reads/reads.service.js` (`LOCKED_STAGES`, `lockedStageOf`; the
+comments of both and of `getLockedTransfer`). Comment only:
+`src/validators/validators.service.js` (`findReadyIds`) and
+`src/attachments/stored-attachments.js` (the header and `findInSlots`).
+New: `src/locked-transactions/locked-transfer-cancel.js` and
+`src/locked-transactions/locked-transactions.router.js`. In the docs: the
+README's bullets of `locked_transactions` and of `logs` and `archives` in
+the list of tables, its endpoints table (the new route; the row of
+`/get-locked-transfer`), the bullet of `/get-locked-transfer`, a paragraph
+on the cancel at the end of "Transfer submission", the count of kinds in
+"Follow-ups", the ready table, the table of "Logs and archives" and the
+sentence under it on what is logged, and the layout lines of
+`locked-transactions/`; sections 1, 3 ("logs and archives"), 5.1, 5.8
+(new), 6, 7, 8, 18.1, 18.2 and 21.3 above, and this section. No env
+variable, no file under `deploy/`, no package file and nothing in
+`network/`. Nothing in `assisted-transfer-cancel.js`,
+`transfer.service.js`, `held-transactions.js` or `accounts.service.js`,
+and nothing but that one comment in `validators.service.js`; in
+`locked-transactions.queries.js`, `insertLocked`, `markLockedApproved`,
+`findLockedApproved` and `deleteLocked` are as they were.
+
+### 28.4 Notes from the build
+
+Where the plan was silent the simplest thing was chosen and is recorded
+here; nothing in 28.1 was changed.
+
+- **The build was made on main at 0f80003**, the commit of step 1, with a
+  clean working tree. Every line the plan quotes was where it said, and
+  the last section was 27, so this is 28, as the plan expected. `KINDS`
+  had eight kinds and `canBeSentInAgain` was exported, as step 1 left
+  them.
+- **The code is the plan's**: the two columns with their comments, word
+  for word; the two new queries with the statements it gives;
+  `AND cancellation IS NULL`; the three checks of `verify` in its order,
+  the wait with its two comment lines and its one `if`; `store`,
+  `findStored`, `markApproved` and `onAccepted` as it lists them; the line
+  in `SOURCES`; the entry in `TABLES`; `has_cancellation`; `CANCELLING`
+  and the one line in `lockedStageOf`.
+- **Where the plan left the place open.** `SOURCES` has
+  `locked_transactions` first, the order the holding tables are named in
+  everywhere. The two new queries stand after `markLockedApproved`, where
+  the assisted table's file has its slot functions. `LOCKED_STAGES` has
+  `CANCELLING` second, the order `lockedStageOf` decides in. The entry in
+  `TABLES` is written over five lines, like the assisted table's.
+  `markApproved` of the kind takes the transaction id alone; the flow
+  hands it the slot's name as well, which this table has no use for. In
+  the table of section 7 the new row is the first. In the README the
+  paragraph on the cancel is the last of "Transfer submission".
+- **In `db/schema.sql`** the two new `COMMENT ON COLUMN` lines are lined
+  up with each other, not with the seven above them, whose padding is
+  narrower; those seven were not padded again. The header comment of
+  `logs` and `archives` was wrapped again from its first sentence down to
+  "Logs may be purged after a time:"; its other words are as they were.
+  The new paragraph in the header comment of `locked_transactions` ends
+  with one sentence the plan does not list, saying that the two columns
+  stand after `transaction_id`, appended for the same reason.
+- **Where a comment says more than the plan lists.** The comment of
+  `getLockedTransfer` says that a cancelled transfer answers `null`. The
+  comment of `lockedStageOf` says why `cancelling` is decided before
+  `locked` and `due`, as the comment of `assistedStageOf` does. The header
+  of `locked-transfer-cancel.js` says why the wait is needed: the row
+  goes to `logs`, where the validators do not look.
+- **Eight places the plan does not name** were first left as they were
+  and then changed on the user's word, given the same day when the build
+  was reported: "Yes, fix them". Each told the state before this step. In
+  `db/schema.sql`: the header comment of `locked_transactions` said
+  "transaction_id is the last column" and says that it comes after the
+  columns the table began with; `COMMENT ON TABLE logs` named
+  `assisted_transfers` and `escrow_transfers` and names
+  `locked_transactions` too. In section 3 above, "logs and archives"
+  named three tables a row may leave and names the cancelled locked
+  transfer too. In the README: the bullet of `logs` and `archives` in the
+  list of tables, the same way; "Follow-ups" said "one of the eight
+  below" and says nine, the eight below and the one of "Transfer
+  submission" above it; the table of "Logs and archives" has the row of
+  `locked_transactions`, the first, as in section 7. In the code,
+  comments only: the comment of `findReadyIds` in
+  `src/validators/validators.service.js` gives the ready rule of a locked
+  transaction with "no cancellation present", wrapped again from there
+  on; and `src/attachments/stored-attachments.js` names
+  `locked_transactions` among the tables whose rows have slots, in its
+  header and in the comment of `findInSlots`. Every check below was run
+  once more after these changes, with the same answers.
+- **Checks.** `node --check` passed on the eleven source files, the nine
+  changed and the two new. The psql check of the plan's 1.8 ran against
+  the local `anos1`, as the superuser, in one transaction that was rolled
+  back, each statement as the code has it, prepared with untyped
+  parameters the way pg sends them. The two `ALTER` lines ran, and the
+  table then had nine columns, the two new ones last. One row was
+  inserted for a throwaway id, approved, its `future_date` a minute back.
+  The query of `findDueIds` listed it. The UPDATE of
+  `setLockedCancellation` changed one row, and a second run none. The
+  query of `findDueIds` then listed nothing. The query of `findLockedFor`
+  read `has_cancellation` true. The insert of `moveToLogs`, with the
+  source `locked_transactions` and the outcome `userCancelled`, wrote one
+  `logs` row whose `record` is `{ row }` and holds the cancellation, equal
+  to the object stored. After the rollback `locked_transactions` had its
+  seven columns and no row, and `logs` its one row, as before. No
+  validator was booted.
+- **Beyond the plan, the schema file.** Three more transactions on
+  `anos1`, each rolled back, each building into a scratch schema. In the
+  first, the edited `db/schema.sql` built its 15 tables from nothing with
+  no error and ran a second time with no error; and `locked_transactions`
+  built from the file was the same as the `locked_transactions` of `anos1`
+  altered by the two lines, column by column: name, type, null, default
+  and place. The other two took a scratch copy of a database built by the
+  file of 0f80003. On it the edited file stopped at the comment line of
+  `cancellation`; with the two lines run first, it ran. That is the
+  sentence on `npm run db:setup` in 28.2.
+- **Beyond the plan, the code.** A throwaway script outside the repo
+  loaded the real modules with the values of `network/testnet.env`, a key
+  file made for the run and no `.env`. `src/db/pool.js` was swapped for a
+  stand-in that puts every query of the code on one connection, inside
+  one transaction that was rolled back, against tables built from the
+  edited `db/schema.sql` in a scratch schema of `anos1`. No server
+  listened and `fetch` was cut off. 62 checks, all passed. The modules
+  `src/server.js` imports loaded in its order, so the new imports link.
+  `KINDS` has nine kinds, the new one after `breakGlassCancel`; the
+  router has the one route, and `app.js` mounts it after the assisted
+  transfers router. Then, with two accounts made for the run and a
+  guarded transfer and its cancels signed for real, by pair one and the
+  wallet pair, the steps of `verifyAttachment`, which is not exported,
+  were run in its order. A cancel was refused with the reason of 28.1 on
+  a transfer not yet approved; signed by another account; inside the
+  wait, for a transfer dated its lock plus 4 minutes ahead; and a second
+  time, with one already in the slot. One with a wrong signature was
+  refused by the signature check every kind shares. The signer was
+  checked before the wait, and the wait before the slot. The cancel
+  passed for a transfer dated 6 seconds less than its lock ahead, and for
+  one dated a minute back. Stored, it took the row off `findDueIds`.
+  `findStored` found it by its attachment id. Marked approved,
+  `onAccepted` moved the row to `logs`: `locked_transactions`,
+  `userCancelled`, `{ row }` with the cancellation in it, approved.
+  `getLockedTransfer`, which answers `/get-locked-transfer`, said
+  `waiting`, `locked`, `due`, `cancelling` and `null` in their places,
+  with the fields it had. `readHeldRows` carried the row with
+  `cancellation` and `cancellationApproved`. `storeHeldRows` stored it,
+  with the slot filled and with the slot empty, skipped it the second
+  time, refused it with a wrong signature in the slot, naming the slot,
+  and refused a row without `cancellationApproved`, as a leader on the
+  old code would send it. Not run: `receiveAttachment` and the attachment
+  messages between validators, which need the other validators. A real
+  cancel on the launched network is the user's run-through.
+- **The local databases are older than the two lines.** `anos1` to
+  `anos5` also lack `future_date` on `assisted_transfers` (section 22),
+  `ignored` on `validators` and the `ignore_votes` table (section 19). The
+  two lines of 28.2 are for a database that is one step behind; alone
+  they do not bring these five up to this code. Nothing was changed in
+  them.

@@ -2,6 +2,7 @@ import { findInSlots } from '../attachments/stored-attachments.js';
 import { pool } from '../db/pool.js';
 import { ASSISTED_TRANSFERS } from '../held-transactions/held-transactions.js';
 import { USER_CANCELLED, moveToLogs } from '../records/records.queries.js';
+import { ASSISTED_ANOS_TRANSFER, canBeSentInAgain } from '../transfer/transfer.service.js';
 import { findAssisted, markAssistedSlotApproved, setAssistedSlot } from './assisted-transfers.queries.js';
 
 /**
@@ -11,14 +12,20 @@ import { findAssisted, markAssistedSlotApproved, setAssistedSlot } from './assis
  *   payload: { type: 'assistedTransferCancel', transactionId, accountId, signedAt }
  *
  * The signer is `accountId`, the row's account_id, the sender; no stake is
- * needed. Own check: no cancellation present. Accepted until the transfer is
- * written, even when both attestations are approved; readiness excludes
- * rows with a cancellation present. Stored in the cancellation slot. Effect
- * on acceptance: the row moves to logs, outcome userCancelled. Accepted on
- * a break-glass move's row (breakGlassTransfer, docs/schemas.md section 22)
- * as on an assisted transfer's: nothing here reads the row's type, so an
- * owner who still has their device stops a false move with the account's
- * own keys under any two pairs.
+ * needed. Own checks: the wait, and no cancellation present. The wait
+ * (2026-11-11, docs/schemas.md section 27): an assisted transfer is not
+ * cancelled while the validators would still take the same signed transfer
+ * in again (transfer.service.js canBeSentInAgain: its date no more than
+ * LOCK_OFFSET_MINUTES behind), refused with "this transfer cannot be
+ * cancelled yet". So a cancelled transfer can never be sent in again.
+ * After the wait it is accepted until the transfer is written, even when
+ * both attestations are approved; readiness excludes rows with a
+ * cancellation present. Stored in the cancellation slot. Effect on
+ * acceptance: the row moves to logs, outcome userCancelled. Accepted on a
+ * break-glass move's row (breakGlassTransfer, docs/schemas.md section 22)
+ * as on an assisted transfer's, without the wait, which is for an assisted
+ * transfer alone, so an owner who still has their device stops a false
+ * move with the account's own keys under any two pairs.
  *
  * The interface is described in attestation.js.
  */
@@ -26,6 +33,8 @@ import { findAssisted, markAssistedSlotApproved, setAssistedSlot } from './assis
 const SLOT = 'cancellation';
 
 const PRESENT = 'a cancellation is already present';
+
+const NOT_YET = 'this transfer cannot be cancelled yet';
 
 export const assistedTransferCancel = Object.freeze({
   type: 'assistedTransferCancel',
@@ -39,6 +48,10 @@ export const assistedTransferCancel = Object.freeze({
 
   verify(payload, { row, signerId }) {
     if (!signerId.equals(row.accountId)) return "payload.accountId is not the transfer's sender";
+    // The wait: an assisted transfer that could still be sent in again is not
+    // cancelled yet. A break-glass move's row is left as it was.
+    const transfer = row.ogTransaction?.payload;
+    if (transfer?.transactionType === ASSISTED_ANOS_TRANSFER && canBeSentInAgain(transfer)) return NOT_YET;
     if (row.slots[SLOT].object !== null) return PRESENT;
     return null;
   },

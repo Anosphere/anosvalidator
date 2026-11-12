@@ -6,16 +6,18 @@ import { canonicalHash } from '../crypto/canonical.js';
  * sends. A proof of attachment acceptance names a follow-up by that id
  * alone, so each kind looks through what it has stored for the transaction
  * and hashes each stored object's payload. Two helpers, one per way of
- * storing: in a slot of the held row (assisted_transfers, escrow_transfers)
- * or as a row of a child table (guardian_votes, escrow_arbitrations).
+ * storing: in a slot of the held row (locked_transactions,
+ * assisted_transfers, escrow_transfers) or as a row of a child table
+ * (guardian_votes, escrow_arbitrations).
  */
 
 /**
  * The slot of `row` (a holding table's row with `slots`, as
- * assisted-transfers.queries.js and escrow.queries.js return it; null when
- * there is no row) among `slotNames` whose stored object's payload hashes to
- * `attachmentId` (32 raw bytes). Returns { approved, ref } with `ref` the
- * slot name, which markApproved takes, or null.
+ * locked-transactions.queries.js, assisted-transfers.queries.js and
+ * escrow.queries.js return it; null when there is no row) among
+ * `slotNames` whose stored object's payload hashes to `attachmentId` (32
+ * raw bytes). Returns { approved, ref } with `ref` the slot name, which
+ * markApproved takes, or null.
  */
 export function findInSlots(row, slotNames, attachmentId) {
   if (!row) return null;

@@ -309,18 +309,19 @@ function checkProofShape(body) {
 /**
  * The ids of every transaction this validator is ready to write, as hex in
  * id order, from the five holding tables: its approved pending transactions;
- * its approved locked transactions whose future_date has passed; its
- * approved assisted transfers with both attestations approved and no
- * cancellation present; its approved escrow transfers with no cancel
- * signature and either the success signature approved or the dispute
- * approved and two approved verdicts saying success; and its approved fund
- * proposals whose vote has closed and passed the tally. Building the list
- * also archives the closed proposals whose vote failed (fund.service.js
- * findReadyProposalIds). To the leader round every holding table is another
- * pending table: a ready transaction is listed, ordered and written with
- * the rest (accounts.service.js writeApproved). One that becomes ready
- * between rounds waits for the next one. The hex ids are all the same
- * length, so their string order is their byte order.
+ * its approved locked transactions whose future_date has passed and that
+ * have no cancellation present; its approved assisted transfers with both
+ * attestations approved and no cancellation present; its approved escrow
+ * transfers with no cancel signature and either the success signature
+ * approved or the dispute approved and two approved verdicts saying
+ * success; and its approved fund proposals whose vote has closed and
+ * passed the tally. Building the list also archives the closed proposals
+ * whose vote failed (fund.service.js findReadyProposalIds). To the leader
+ * round every holding table is another pending table: a ready transaction
+ * is listed, ordered and written with the rest (accounts.service.js
+ * writeApproved). One that becomes ready between rounds waits for the next
+ * one. The hex ids are all the same length, so their string order is their
+ * byte order.
  */
 async function findReadyIds() {
   return [

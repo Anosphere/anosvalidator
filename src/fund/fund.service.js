@@ -75,15 +75,17 @@ const HELD_CONFLICTS = [
  * with the fund's extras after the ids: accountIdTo is the fund, stakeFor is
  * one of the six purposes, amount is at least that purpose's minimum. The
  * sender must be a spending account; the signatures follow the any-two-pairs
- * rule; createdAt is not checked; the uniqueness checks cover the five
- * holding tables and the chain.
+ * rule; createdAt is within LOCK_OFFSET_MINUTES of now, before or after,
+ * as a fund proposal's is (since 2026-11-11, docs/schemas.md section 27: a
+ * stake is dated now, and one older than the offset is never taken in);
+ * the uniqueness checks cover the five holding tables and the chain.
  *
  * The shape, signature and id parts (the shape; the ids and the amount;
  * accountIdTo the fund and stakeFor a purpose; the sender exists; the
  * signatures; transactionId) are checkTransferToFundSignaturesAndIds,
  * lifted out for the replay of a chain chunk
  * (src/garlic-chain/replay.service.js), which runs them and nothing else;
- * the minimum, the account's type and the rest follow here.
+ * the date, the minimum, the account's type and the rest follow here.
  *
  * Returns { ok: true, accountId, transactionId, accountIdTo, heldIn } with
  * the ids as 32-byte Buffers and heldIn 'pending', the shape every verify
@@ -100,6 +102,12 @@ export async function verifyTransferToFund(body) {
 
   const { payload } = body;
   const { accountId, accountIdTo, amount, account, transactionId } = checked;
+
+  // 1b. The date.
+  const createdAt = Date.parse(payload.createdAt);
+  if (!(Math.abs(createdAt - Date.now()) <= env.locks.offsetMinutes * MS_PER_MINUTE)) {
+    return { ok: false, reason: `payload.createdAt must be within ${env.locks.offsetMinutes} minutes of now` };
+  }
 
   // 1c. The purpose's minimum.
   if (amount < minimumFor(payload.stakeFor)) {

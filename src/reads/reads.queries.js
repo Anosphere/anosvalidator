@@ -177,14 +177,17 @@ export async function findAssistedFor(accountId) {
  * whose account_id is this account, a guarded or vault transfer waiting
  * out its time lock, or null when there is none (there is at most one:
  * account_id is UNIQUE there). The row: transaction_id, og_transaction,
- * approved, future_date, created_at, as the columns are, and due, whether
+ * approved, future_date, created_at, as the columns are, due, whether
  * future_date has passed by the database's clock, the one findDueIds
- * (section 6) reads.
+ * (section 6) reads, and since 2026-11-11 (spec section 28)
+ * has_cancellation, whether the cancellation slot holds an object, the
+ * sender's lockedTransferCancel.
  */
 export async function findLockedFor(accountId) {
   const { rows } = await query(
     `SELECT transaction_id, og_transaction, approved, future_date, created_at,
-            future_date <= now() AS due
+            future_date <= now() AS due,
+            cancellation IS NOT NULL AS has_cancellation
      FROM locked_transactions
      WHERE account_id = $1`,
     [accountId],
