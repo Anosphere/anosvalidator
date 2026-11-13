@@ -60,9 +60,9 @@ Shared values, in `network/testnet.env`:
 | `PGUSER`                   | `anossoftware` | Application role                                              |
 | `PGDATABASE`               | `anos`         | Database name                                                 |
 | `PORT`                     | `3000`         | Port the server listens on, behind the doorman                |
-| `GUARDED_LOCK_MINUTES`     | `10`           | Time lock on a guarded account, in minutes (a week, 10080, in production) |
-| `VAULT_LOCK_MINUTES`       | `20`           | Time lock on a vault account, in minutes (a month, 43200, in production) |
-| `LOCK_OFFSET_MINUTES`      | `5`            | How much more than its lock a guarded or vault transfer may be dated ahead, and how far the `createdAt` of a fund proposal and, since 2026-11-11, of every transfer without a lock may be from the validator's clock, before or after; so also how long a cancel of an assisted transfer or an escrow trade waits (10 in production) |
+| `GUARDED_LOCK_MINUTES`     | `10080`        | Time lock on a guarded account, in minutes: a week (10 on the testnet until 2026-11-12) |
+| `VAULT_LOCK_MINUTES`       | `43200`        | Time lock on a vault account, in minutes: 30 days (20 on the testnet until 2026-11-12) |
+| `LOCK_OFFSET_MINUTES`      | `10`           | How much more than its lock a guarded or vault transfer may be dated ahead, and how far the `createdAt` of a fund proposal and, since 2026-11-11, of every transfer without a lock may be from the validator's clock, before or after; so also how long a cancel of an assisted transfer or an escrow trade waits (5 on the testnet until 2026-11-12) |
 | `STAKE_MIN_DAO_VOTE_ANOS`  | `10`           | Least `transferToFund` for `daoVote`, in whole anos           |
 | `STAKE_MIN_MODERATOR_ANOS` | `1000`         | For `moderator`                                               |
 | `STAKE_MIN_ATTESTOR_ANOS`  | `1000`         | For `attestor`; also the stake an attestor or arbitrator must hold |
@@ -71,14 +71,14 @@ Shared values, in `network/testnet.env`:
 | `STAKE_MIN_MASTER_POD_ANOS`| `500000`       | For `masterPod`                                               |
 | `GUARDIAN_VOTE_ANOS`       | `1000`         | Guardian stake behind one vote on a fund proposal, in whole anos |
 | `GUARDIAN_VOTE_PERCENT`    | `70`           | Share of the votes cast a proposal needs to pass              |
-| `GUARDIAN_VOTE_MINUTES`    | `60`           | How long a proposal is open for votes (a week, 10080, in production) |
+| `GUARDIAN_VOTE_MINUTES`    | `10080`        | How long a proposal is open for votes, in minutes: a week (60 on the testnet until 2026-11-12) |
 | `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) and for every moderator, attestor, validator or masterPod stake (the appointment check, `docs/schemas.md` sections 24 and 26) |
 | `WEB_ORIGIN`               | `<fill in>`    | The wallet's origin for CORS, scheme, host and port, no path; a comma-separated list when there is more than one |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`          | Allowed clock difference on a signed account-level request, each way; nonces are kept twice this long |
 | `VALIDATOR_CALL_TIMEOUT_SECONDS` | `10`     | How long a call to another validator waits for its answer; past it, no answer (section "Ignoring and joining") |
 | `IGNORE_FLOOR_PERCENT`     | `51`           | The floor: an ignore vote may not leave fewer counted validators than this percent of the active registry rows |
 | `JOIN_HOLD_SECONDS`        | `120`          | How long a joiner may hold the leader's rounds |
-| `NO_ANSWER_WAIT_SECONDS`   | `60`           | How long an originator that got no answer waits for the vote before it sends once more |
+| `NO_ANSWER_WAIT_SECONDS`   | `60`           | How long an originator waits for the vote before it sends once more, after no answer or after a refusal from a validator that fails the health check |
 | `CHAIN_CHUNK_LINKS`        | `100`          | Links in one chain chunk, at most |
 | `HELD_ROWS_PAGE`           | `100`          | Rows in one page of held rows, at most |
 | `UNAPPROVED_AGE_LIMIT_SECONDS` | `300`      | How long a held row may stay unapproved; past it, the validator holding it drops it (section "Database") |
@@ -290,7 +290,7 @@ multi-word URL segments.
 | POST   | `/chain-links`    | Validator to validator: the chain chunk read. `200` + a chain links list, the links above a position, else `400` + reason |
 | POST   | `/ignore-vote`    | Validator to validator: a vote request from the starter. `200` + this validator's vote, else `400` + reason |
 | POST   | `/proof-of-ignore-vote` | Validator to validator: the proof of a passed vote. `200` + the accepted receipt once applied (or applied before), else `400` + reason |
-| POST   | `/no-answer-report` | Validator to validator: a report that validators gave no answer. `200 {}` at once, then the vote, or the queue, or nothing |
+| POST   | `/no-answer-report` | Validator to validator: a report that validators gave no answer, or refused and fail the health check. `200 {}` at once, then the vote, or the queue, or nothing |
 | POST   | `/join-request`   | Validator to validator: a joiner asking the leader. `200` + a join answer with its state, `400 { error: "not the leader", leader }` from anyone else, else `400` + reason |
 | POST   | `/held-rows`      | Validator to validator: a page of one holding table for the joiner the leader holds rounds for. `200` + the rows, else `400` + reason |
 | POST   | `/ready`          | Validator to validator: the joiner is done. `200` + the ready accepted receipt, `400 behind` when its tail is not the leader's, else `400` + reason |
@@ -941,18 +941,24 @@ out of their lists, and the official list is the overlap, so nothing is
 written twice; the leader's own write of step 3 comes right after the
 send, so it stands with theirs); a failed vote sends that step's call once
 more to that peer, and a second no answer ends the round with the line
-`validator N gave no answer twice; the round ends`, as a refusal does. No
-answer to the final declaration is logged only: the leadership has moved,
-and the new leader meets the silent validator on its next call. After the
-round the reports that arrived meanwhile run their votes.
+`validator N gave no answer twice; the round ends`, as a refusal does.
+Since 2026-11-12 a peer that refuses one of the two calls is named in that
+vote as well: the vote drops it when it passes the leader's health check,
+and its refusal then ends the round as before; when it fails the check it
+is voted on like a silent peer (`docs/schemas.md` section 29). No answer to
+the final declaration is logged only: the leadership has moved, and the new
+leader meets the silent validator on its next call. After the round the
+reports that arrived meanwhile run their votes.
 
 ## Ignoring and joining
 
 Since the catch-up build (2026-11-07; `docs/schemas.md` section 19) a
 validator that was down gets the links it missed, a validator that does not
-answer is voted out of the count and back in when it returns, and a
-validator joins a running network through its leader. One rule stays for
-everything: every counted validator answers, or the network stops.
+answer, or since 2026-11-12 answers with a refusal while it fails the
+health check (`docs/schemas.md` section 29), is voted out of the count and
+back in when it returns, and a validator joins a running network through
+its leader. One rule stays for everything: every counted validator answers,
+or the network stops.
 
 **The timeout.** Every call to another validator
 (`src/validators/validators.client.js`) gives up after
@@ -991,10 +997,11 @@ itself and joins again.
 **The votes** (`src/votes/`). One vote kind, two directions, ignore and
 include, naming a list of validators; one table, `ignore_votes`; one set of
 messages (section "Validator-to-validator messages"). The leader starts an
-ignore vote when a validator does not answer; when the validator named is
-the leader itself, the next counted validator after it in the ring starts
-the vote, and the proof makes that starter the leader everywhere. The
-request goes to every counted validator except the starter and the named.
+ignore vote when a validator does not answer, or refuses a call while it
+fails the health check below; when the validator named is the leader
+itself, the next counted validator after it in the ring starts the vote,
+and the proof makes that starter the leader everywhere. The request goes
+to every counted validator except the starter and the named.
 Each voter checks, in order: the shape; the starter is counted and signed
 it; `voteId`; the starter rule (the leader per the voter's own table, or
 the next in the ring when the leader is named in an ignore vote); every
@@ -1009,11 +1016,11 @@ ignore when no named validator is reachable, yes for include when every one
 is, no otherwise. The starter checks each answer as a receipt; the vote
 passed when every voter answered yes. A failed vote is stored by the
 starter with the receipts it got, each result logged; a voter that gave no
-answer to an ignore vote fails it, and one new vote names that voter as
-well, a second no answer ending it with a line. A passed vote is applied to
-the starter's own table first, then its proof, the request and every
-receipt, goes to every counted validator, the named of an include vote
-among them (the one POST a validator that is not counted accepts). Each
+answer to an ignore vote, or refused it, fails it, and one new vote names
+that voter as well, a second time ending it with a line. A passed vote is
+applied to the starter's own table first, then its proof, the request and
+every receipt, goes to every counted validator, the named of an include
+vote among them (the one POST a validator that is not counted accepts). Each
 receiver checks the proof (the starter and its signature, the request
 inside with every check but the health check, every receipt genuinely
 signed by a counted validator other than the starter and the named, yes,
@@ -1027,17 +1034,19 @@ with `validator N answers; no vote`, and an empty list is nothing.
 
 **The report and the originator's wait.** An originator (a create-account,
 transfer, fund or follow-up endpoint) whose approvals got no answer from
-some peers sends a **report** naming them to the leader, or to the next
-counted validator after the leader when the leader is among them or gives
-no answer; then it polls its own table once a second, for at most
-`NO_ANSWER_WAIT_SECONDS` (60), until every one of them is ignored; then it
-sends the approval once more to the ones still counted. A second no answer
-is `validator N gave no answer twice` and fails the submission as a refusal
-does; otherwise the own row is marked approved and the proof goes to the
-counted peers as before. A refusal from a peer is handled as before, no
-report. The receiver of a report answers `200 {}` at once; if it may start
-a vote (it is the leader, or the ids hold its leader and it is the next in
-the ring) it runs the vote; if it is busy, the ids wait in a queue.
+some peers, or a refusal from peers that fail its own health check (the
+check of a vote, above), sends a **report** naming them to the leader, or
+to the next counted validator after the leader when the leader is among
+them or gives no answer; then it polls its own table once a second, for at
+most `NO_ANSWER_WAIT_SECONDS` (60), until every one of them is ignored;
+then it sends the approval once more to the ones still counted. A second no
+answer is `validator N gave no answer twice` and fails the submission as a
+refusal does; otherwise the own row is marked approved and the proof goes
+to the counted peers as before. A refusal from a peer that passes the
+health check is handled as before, no report. The receiver of a report
+answers `200 {}` at once; if it may start a vote (it is the leader, or the
+ids hold its leader and it is the next in the ring) it runs the vote; if it
+is busy, the ids wait in a queue.
 
 **One busy flag** per validator covers a round, a vote and a join it leads,
 so none of them overlap; whoever ends a busy section runs the queued

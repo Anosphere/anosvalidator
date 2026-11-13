@@ -100,8 +100,9 @@ export async function receiveAttachment(body, kinds) {
   const stored = await kind.store(transactionId, body, context);
   if (!stored.stored) return { ok: false, reason: stored.reason };
 
-  // No answer from a peer: the report, the wait, the one re-send
-  // (src/votes/votes.messages.js settleNoAnswers); a refusal is a refusal.
+  // No answer from a peer, or a refusal from one that fails the health
+  // check: the report, the wait, the one re-send (src/votes/votes.messages.js
+  // settleNoAnswers); any other refusal is a refusal.
   const approvals = await settleNoAnswers(
     await sendAttachmentApproval({ attachment: body, transactionId, attachmentId }),
     (peers) => sendAttachmentApproval({ attachment: body, transactionId, attachmentId, peers }),

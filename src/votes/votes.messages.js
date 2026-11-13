@@ -1,8 +1,10 @@
 import { env } from '../config/env.js';
 import { canonicalHash } from '../crypto/canonical.js';
 import { decodeDigest, digestMatches } from '../crypto/hash.js';
+import { findTailRow } from '../garlic-chain/garlic-chain.queries.js';
 import { isObject } from '../util/is-object.js';
-import { postToValidators } from '../validators/validators.client.js';
+import { isCounted } from '../validators/join.service.js';
+import { getHealth, postToValidators } from '../validators/validators.client.js';
 import { postToPeers } from '../validators/validators.messages.js';
 import {
   findActiveValidator,
@@ -18,7 +20,10 @@ import { signPayload, verifyPayloadSignature } from '../validators/validators.si
  * is built and signed, sent and checked. The receiving side is
  * votes.service.js. Kept apart from the service, like
  * validators.messages.js, so the originators (accounts, transfer, fund and
- * attachments) can report and wait without importing the service.
+ * attachments) can report and wait without importing the service. The
+ * health check of a validator (checkReachable) is here for the same
+ * reason: the originators use it on a peer that refused, the service in a
+ * vote.
  *
  * Every message is { payload, signature }, the payload signed as its RFC
  * 8785 canonical bytes by the sender's P-256 key (validators.signing.js).
@@ -292,39 +297,93 @@ async function postReport(report, target) {
 }
 
 /**
- * What an originator does with approvals that got no answer (section
- * 19.1): `approvals` are the per-validator results of an approval send
- * (validators.messages.js). The validators that gave no answer are
- * reported; then the own table is polled once a second, for at most
- * NO_ANSWER_WAIT_SECONDS, until every one of them is ignored; then the
- * approval goes once more, through `resend(peers)`, to the ones still
- * counted. Resolves with the approvals to go on with: the first answers
- * without the silent validators, plus the second answers, in id order. A
- * second no answer is logged (`validator N gave no answer twice`) and
- * stays an entry with approved: false, so the caller treats it as a
- * refusal; a validator ignored meanwhile drops out of the list.
+ * This validator's own check of another validator (a registry row): its
+ * health within the timeout (validators.client.js getHealth), reachable
+ * when it answered 200 with chain.position, chain.recordHash and leader
+ * equal to this validator's own. Returns { reachable: true } or
+ * { reachable: false, reason }. The voters and the starter of a vote use it
+ * (votes.service.js), and an originator on a peer that refused
+ * (settleNoAnswers).
+ */
+export async function checkReachable(validator) {
+  const answer = await getHealth(validator);
+  if (answer.noAnswer) return { reachable: false, reason: `no answer: ${answer.reason}` };
+  if (answer.status !== 200) return { reachable: false, reason: `health answered ${answer.status}` };
+  const { body } = answer;
+  if (!isObject(body) || !isObject(body.chain)) return { reachable: false, reason: 'health carries no chain' };
+
+  const own = (await findTailRow()) ?? { position: 0, recordHash: null };
+  if (body.chain.position !== own.position || body.chain.recordHash !== own.recordHash) {
+    return { reachable: false, reason: `tail at position ${body.chain.position}, own ${own.position}` };
+  }
+  const leaderId = await findLeaderId();
+  if (body.leader !== leaderId) return { reachable: false, reason: `names leader ${body.leader}, own ${leaderId}` };
+  return { reachable: true };
+}
+
+/**
+ * What an originator does with approvals that got no answer or a refusal
+ * (docs/schemas.md sections 19.1 and 29): `approvals` are the per-validator
+ * results of an approval send (validators.messages.js). A validator that
+ * refused is checked by this validator itself (findFailingRefusers): one
+ * that passes the health check keeps its refusal and nothing more happens
+ * for it. The validators that gave no answer, and the ones that refused and
+ * fail the check, are reported; then the own table is polled once a second,
+ * for at most NO_ANSWER_WAIT_SECONDS, until every one of them is ignored;
+ * then the approval goes once more, through `resend(peers)`, to the ones
+ * still counted. Resolves with the approvals to go on with: the first
+ * answers without the reported validators, plus the second answers, in id
+ * order. A second no answer is logged (`validator N gave no answer twice`)
+ * and stays an entry with approved: false, so the caller treats it as a
+ * refusal, as it does a second refusal; a validator ignored meanwhile drops
+ * out of the list.
  */
 export async function settleNoAnswers(approvals, resend) {
   const silent = approvals.filter((approval) => approval.noAnswer).map((approval) => approval.id);
-  if (silent.length === 0) return approvals;
+  const reported = [...silent, ...(await findFailingRefusers(approvals))];
+  if (reported.length === 0) return approvals;
 
-  await sendNoAnswerReport(silent);
+  await sendNoAnswerReport(reported);
   const deadline = Date.now() + env.network.noAnswerWaitSeconds * 1000;
   let ignored = await findIgnoredIds();
-  while (!silent.every((id) => ignored.includes(id)) && Date.now() < deadline) {
+  while (!reported.every((id) => ignored.includes(id)) && Date.now() < deadline) {
     await sleep(1000);
     ignored = await findIgnoredIds();
   }
 
-  const peers = (await findCountedPeers(env.validator.id)).filter((peer) => silent.includes(peer.id));
+  const peers = (await findCountedPeers(env.validator.id)).filter((peer) => reported.includes(peer.id));
   const again = peers.length === 0 ? [] : await resend(peers);
   for (const answer of again) {
     if (answer.noAnswer) console.log(`validator ${answer.id} gave no answer twice`);
   }
   return approvals
-    .filter((approval) => !silent.includes(approval.id))
+    .filter((approval) => !reported.includes(approval.id))
     .concat(again)
     .sort((a, b) => a.id - b.id);
+}
+
+/**
+ * The ids of the validators among `approvals` that refused and fail this
+ * validator's own health check (checkReachable), each logged with the
+ * check's reason. A refusal from a validator that passes the check is a
+ * refusal and is not in the list. A validator that no longer counts itself
+ * (join.service.js: its peers have just answered that it is ignored) lists
+ * nobody: the leader would refuse its report.
+ */
+async function findFailingRefusers(approvals) {
+  const refused = approvals.filter((approval) => !approval.approved && !approval.noAnswer);
+  if (refused.length === 0 || !isCounted()) return [];
+  const checks = await Promise.all(refused.map(async ({ id }) => {
+    const row = await findActiveValidator(id);
+    return row === null ? { reachable: true } : checkReachable(row);
+  }));
+  const failing = [];
+  for (const [i, { id }] of refused.entries()) {
+    if (checks[i].reachable) continue;
+    console.log(`validator ${id} refused and fails the health check: ${checks[i].reason}`);
+    failing.push(id);
+  }
+  return failing;
 }
 
 function sleep(ms) {

@@ -1800,6 +1800,9 @@ originator's wait, the leader round with no answer, the join handshake,
 the loop every boot runs, and one amendment the user approved in the build
 chat: a joiner adopts the network's view of who is ignored (19.1).
 
+Since 2026-11-12 a refusal starts the ignore vote as well, when the
+refusing validator fails the health check: section 29.
+
 ### 19.1 The decisions, as they apply to the code
 
 Step 1:
@@ -4139,3 +4142,215 @@ here; nothing in 28.1 was changed.
   two lines of 28.2 are for a database that is one step behind; alone
   they do not bring these five up to this code. Nothing was changed in
   them.
+
+## 29. A refusal starts the ignore vote (2026-11-12)
+
+Decided 2026-11-12 in a planning chat, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/validator-refusal-plan-1.md`, built in the
+same chat. Why: a validator left the count only by an ignore vote, and only
+silence started one (section 19: a refused connection, a dropped one, no
+answer within the timeout). A validator that answered with a refusal stayed
+counted, and its refusal failed every transaction at the validator that
+took it and ended every leader round. Two cases showed it on 2026-11-12: a
+validator that has not taken the new code and still runs the old network,
+and a validator whose program has stopped while its doorman keeps answering
+for it, `502 worker unavailable` or `504 worker timeout` (doormansoftware
+`src/door/forward.js`). The vote itself would have passed in both: the
+health check of section 19.3 fails on another chain tail and on a doorman's
+`503`. The user weighed a quorum of 80 or 90 percent against one more
+round, in which the others test the validator that refused, and took the
+round, with the health check of the ignore vote as the test. One build step
+in this repo; nothing touches the doorman, the wallet, the masterpod, the
+keyholder, the registry, the database schema or a settings file, and there
+is no new message, route or variable.
+
+### 29.1 The decisions, as they apply to the code
+
+- **A refusal is tested, and only a failed test counts.** A validator that
+  refused and passes the health check keeps its refusal: the transaction is
+  not approved, or the round ends, as before. One that fails the check is
+  handled as a silent validator is. The check is the one of section 19.3,
+  unchanged: `200`, the checker's `chain.position` and `chain.recordHash`,
+  the checker's `leader`.
+- **The originator.** `src/votes/votes.messages.js` `settleNoAnswers`, which
+  the four originators already pass their approvals through: the peers that
+  refused (`approved: false` without `noAnswer`) are checked by the
+  originator itself, all at once (`findFailingRefusers`, one line each:
+  `validator N refused and fails the health check: <reason>`); the ones
+  that fail join the silent ones in the report, the wait of at most
+  `NO_ANSWER_WAIT_SECONDS` and the one re-send, exactly as section 19.1
+  has them. So a real refusal from a healthy validator costs one health
+  read and no report. An originator that no longer counts itself
+  (`join.service.js` `isCounted`: more than half of its peers have just
+  answered that it is ignored) checks nobody, since the leader would refuse
+  its report and the wait would run out for nothing.
+- **The leader round.** `src/validators/validators.service.js`
+  `settleRoundAnswers` names the peers that refused the ready announcement
+  or the official list in the vote it already runs for the silent ones.
+  `runVote` drops a peer that passes the leader's own check (`validator N
+  answers; no vote`), as it always dropped a reachable id. A passed vote
+  starts the round again; after a failed one the call goes once more to
+  the silent peers only, and a refusal still among the answers ends the
+  round with its line, as before.
+- **A voter that refuses the vote.** `src/votes/votes.service.js`
+  `runVote`: a voter that refused an ignore vote is named in the one new
+  vote, as a voter that gave no answer is. The new vote's first step drops
+  it again when it passes the starter's check. Without this, two validators
+  that are out of step block the vote on each other: each is a voter in
+  the vote on the other and refuses the request. The line of a second
+  failure now reads `no vote twice from validator N; no further vote`, for
+  both kinds.
+- **`checkReachable` moved** from `votes.service.js` to `votes.messages.js`,
+  word for word, because the originators cannot import the service: it
+  imports `validators.service.js`, which imports them. `votes.service.js`
+  imports it back and lost the three imports it used nowhere else
+  (`findTailRow`, `isObject`, `getHealth`).
+- **What stays.** The floor (`IGNORE_FLOOR_PERCENT`, 51: with 25 active
+  rows at most 12 ignored), the starter rule, the proof and every message
+  as section 19 has them. The report carries ids only, so its receiver and
+  the door need no change, and its name, `noAnswerReport`, stays although
+  it now also carries validators that refused. A refusal of the proof of
+  acceptance or of the final declaration is not acted on, as silence there
+  is not. `502` and `504` from a doorman stay answers: the fix does not
+  read the status.
+
+### 29.2 The rollout
+
+- **With the last validator pull**, which starts on 2026-11-13: every
+  worker pulls `main` and restarts on an empty database. No doorman pull is
+  needed for it, no setting, no `npm ci`, no schema step. The messages are
+  the ones of section 19, so a validator on older code answers a vote
+  request or a report as it always did.
+- **A validator that does not come to the pull** keeps running the old
+  network and refuses the others. It is voted out at its first refusal and
+  joins later by its visit, as long as at least 13 of the 25 stay counted.
+  The wallet does not learn who was voted out, so such a validator is left
+  out of the wallet's lists, or its two VMs are stopped
+  (`~/Desktop/Z-TestNet/test_net_phase_3_launch/last-validator-pull.md`).
+- **Not caught:** a validator that passes the health check and still
+  refuses everything, for example one whose clock is more than
+  `LOCK_OFFSET_MINUTES` off (section 27), or whose list of ignored
+  validators differs from the others'. The quorum the user described is
+  the follow-up for that, after production.
+
+### 29.3 Files
+
+Changed: `src/votes/votes.messages.js` (`checkReachable` moved in,
+`settleNoAnswers`, the new `findFailingRefusers`, three import lines, the
+header), `src/votes/votes.service.js` (`checkReachable` moved out, the
+imports, the retry of `runVote`, two comments),
+`src/validators/validators.service.js` (`settleRoundAnswers`, the comment
+of `leadRound`); a comment only in `src/accounts/accounts.service.js`,
+`src/transfer/transfer.service.js`, `src/fund/fund.service.js` and
+`src/attachments/attachments.service.js`. In the docs: six places of the
+README (the settings table, the routes table, "The leader round",
+"Ignoring and joining", "The votes", "The report and the originator's
+wait"), one paragraph in section 19 above, and this section. No file under
+`deploy/`, `network/` or `db/` and no package file changes; the doorman is
+not touched.
+
+### 29.4 Notes from the build
+
+- **The build was made on main at e3ed89e**, with a clean working tree. The
+  code is the plan's, line for line.
+- **One comment says more than the plan lists.** In the comment of
+  `leadRound` the plan changes the first sentence of the last paragraph
+  and says the rest stays. That rest said a failed vote sends the call once
+  more "to that peer", which after the new first sentence would have
+  included a refusing peer. It says "to a peer that gave no answer", and
+  the paragraph is wrapped again.
+- **Checks.** `node --check` passed on the seven source files, with Node
+  24.22.0. The four names of the changed import lines were read against
+  their modules' exports: `findTailRow` in
+  `src/garlic-chain/garlic-chain.queries.js`, `isCounted` in
+  `src/validators/join.service.js`, `getHealth` in
+  `src/validators/validators.client.js`, `checkReachable` in
+  `src/votes/votes.messages.js`. A search of `src/` shows `checkReachable`
+  in `votes.messages.js` and `votes.service.js` only, and no
+  `findTailRow`, `isObject` or `getHealth` left in `votes.service.js`.
+  Nothing was run: no server, no rig, no script that loads the modules.
+  `node --check` does not link imports, which is why the names were read
+  by hand; the first boot on a worker is the first time these modules load
+  together.
+- **The import ring.** `votes.messages.js` now imports `join.service.js`
+  (`isCounted`), which imports `votes.messages.js` (`IGNORE`, `INCLUDE`).
+  The two were already in one ring through `validators.messages.js`, and
+  no module in it uses an imported name while it loads, only inside
+  functions.
+- **A round in flight.** An originator's check compares the refusing
+  validator's tail and leader with its own at that moment. While a round
+  is being written the tails differ for a moment across healthy
+  validators, so a healthy validator can fail that one check. It is then
+  reported; the leader's own check, made in a busy section with no round
+  in flight, drops it (`validator N answers; no vote`), and the sender of
+  that transaction waits up to `NO_ANSWER_WAIT_SECONDS` for the refusal it
+  would have got at once.
+- **Never run live.** No ignore vote and no include vote is recorded on
+  the live network before this build
+  (`~/Desktop/Z-TestNet/forclaude/validators-record.md`); both ran on the
+  rig of 2026-11-07 (19.5).
+
+## 30. The worker script writes the keyholder's bucket line (2026-11-12)
+
+One change to `scripts/bootstrap-worker.sh`, at point 10.3, from section
+3.6 of `~/Desktop/Z-TestNet/forclaude/keyholder-share-copies-plan-1.md`
+(FINAL, 2026-11-12). The keyholder now also writes every share it saves
+to a bucket in the banker's own project (keyholdersoftware
+`docs/schemas.md` section 16; the bucket is step 15 of the Cloud Shell
+line, doormansoftware `docs/schemas.md` section 11), and it does not
+start without the line `SHARE_COPIES_BUCKET` in its `.env`. The
+keyholder's own script, `scripts/set-copies-bucket.sh`, writes that line.
+The 25 workers that exist get it from the worker paste of the last
+validator pull; this change is for a validator set up later, and for
+every run of the worker line after it. Nothing else in the script
+changed, and nothing in the validator: no route, no table, no setting, no
+message.
+
+### 30.1 The change
+
+- **At point 10.3, before the keyholder is started or restarted**, and
+  only once all five lines of 7.3 are filled, the script runs
+  `sudo -u anos sh /opt/anos/keyholdersoftware/scripts/set-copies-bucket.sh`
+  and keeps the one line it prints: `SHARE_COPIES_BUCKET: written
+  <project id>-share-copies` or `SHARE_COPIES_BUCKET: already <project
+  id>-share-copies`. The keyholder's script reads the project id from the
+  metadata server itself; the worker script hands it nothing.
+- **A keyholder that is running when the line is written is restarted**,
+  as it is when its software changed: `10.3 keyholder: restarted
+  (SHARE_COPIES_BUCKET written)`. A keyholder that is not active is
+  started, and one whose repo moved in this run is restarted as `11.3`,
+  both as before.
+- **The 10.3 line shows what the script printed**, after the KMS line:
+  `10.3 keyholder: started; KMS ok; SHARE_COPIES_BUCKET: written <project
+  id>-share-copies; 3200: 200`.
+- **A line that names another bucket**, a missing `.env` or a metadata
+  server that does not answer ends the keyholder's script with its
+  message, and this point with it: `failed at step 10.3 (keyholder)`,
+  the message among the five log lines above it.
+- **Point 7.3 and its five lines are not touched.** `fill` still only
+  replaces a line that is already in `.env`.
+
+### 30.2 Notes from the build
+
+- **The build was made on main at 6118cb9**, with a clean working tree.
+  `sh -n` passed on the script. Nothing was run.
+- **The script runs as `sudo -u anos`, without the login shell**, like
+  show-key at 7.2, so that only its one line is captured. The guide and
+  the paste of the last pull run the same script through `sudo -iu anos`.
+- **The keyholder's repository must hold the script** by the time the
+  worker script reaches 10.3, so both repositories go to GitHub
+  together. The worker script pulls the keyholder's repository at 9.1,
+  before 10.3.
+- **Left as it was: `boot_error`.** It reads a unit's journal for
+  `Registry failed`, `Genesis failed`, `Could not connect`, `KMS self-test
+  failed` and `Error:`. A keyholder without the line stops with Node's
+  `Error: Missing required environment variable: SHARE_COPIES_BUCKET`,
+  which it catches. The keyholder's other new stop line, `Share copies
+  could not start: <message>`, for a database without the
+  `waiting_copies` table, is not in that list: such a keyholder is
+  reported after the ninety seconds, without that line. On this script's
+  own path the table is there: the 9.1 pull runs the database scripts
+  again when `db/` changed.
+- **The keyholder's two new boot lines**, `Share copies: bucket <name>,
+  <n> waiting` and `Share copies: test file ok` or the reason, are not
+  shown by this script. They are in the keyholder's journal.
