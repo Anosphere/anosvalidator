@@ -2,6 +2,7 @@ import { env } from '../config/env.js';
 import { decodeDigest } from '../crypto/hash.js';
 import { adoptIgnoredList, catchUp, fetchChainFrom, ownTail, sweepHealth } from '../garlic-chain/replay.service.js';
 import { HELD_ROW_TABLES, readHeldRows, storeHeldRows } from '../held-transactions/held-rows.service.js';
+import { clearHeldRows, dropWrittenHeldRows } from '../held-transactions/written-rows.js';
 import { isObject } from '../util/is-object.js';
 import { IGNORE, INCLUDE } from '../votes/votes.messages.js';
 import { drainReports, runVote } from '../votes/votes.service.js';
@@ -17,10 +18,16 @@ import { signPayload, verifyPayloadSignature } from './validators.signing.js';
  * The joiner: every boot asks to join (startJoinLoop, from server.js after
  * listen), serving in the meantime. The loop: the health sweep of the
  * catch-up pass, until a majority agrees on a tail; the own table takes
- * the majority's leader and its ignored list; a validator that is that
- * leader is counted at once; any other runs the catch-up pass to the
- * majority tail, then join requests to the leader until it is counted, or
- * included, after which it pulls the held rows, says ready and is counted.
+ * the majority's leader and its ignored list; every validator, the one
+ * that is that leader too, runs the catch-up pass to the majority tail
+ * before it counts itself (docs/schemas.md section 31); the leader is then
+ * counted and starts a round at once; any other sends join requests to the
+ * leader until it is counted, or included, after which it clears its
+ * waiting rows, pulls the leader's, says ready and is counted. A validator
+ * that counts itself without that pull first deletes the waiting rows
+ * whose transaction its own chain already holds
+ * (held-transactions/written-rows.js). A thrown error never ends the
+ * joining: one line, the wait, and the loop runs again (keepJoining).
  *
  * The leader: a join request from a validator it does not count opens a
  * hold (the busy flag of validators.service.js, so no round or vote runs
@@ -34,7 +41,8 @@ import { signPayload, verifyPayloadSignature } from './validators.signing.js';
  * of an include vote naming this validator and the chain chunk read
  * (app.js), and GET /health answers it as `counted`. A counted validator
  * whose peers refuse it as ignored clears the flag and joins again
- * (noticeIgnoredAnswers).
+ * (noticeIgnoredAnswers). So does one whose self-check finds it out of
+ * step with most of the others twice in a row (self-check.js).
  */
 
 /** payload.type of the six join messages. */
@@ -63,7 +71,7 @@ export function isCounted() {
   return counted;
 }
 
-/** Sets the flag: true once the join loop finds this validator counted, false when its peers refuse it as ignored. */
+/** Sets the flag: true once the join loop finds this validator counted, false when its peers refuse it as ignored or its self-check finds it out of step twice in a row (self-check.js). */
 export function setCounted(flag) {
   counted = flag;
 }
@@ -315,11 +323,22 @@ let loopRunning = false;
 export function startJoinLoop() {
   if (loopRunning) return;
   loopRunning = true;
-  joinLoop()
-    .catch((err) => console.log(`join loop stopped: ${err.message}`))
-    .finally(() => {
-      loopRunning = false;
-    });
+  keepJoining().finally(() => {
+    loopRunning = false;
+  });
+}
+
+/** joinLoop, started again after the wait whenever it throws: an error never ends the joining. */
+async function keepJoining() {
+  for (;;) {
+    try {
+      await joinLoop();
+      return;
+    } catch (err) {
+      console.log(`join loop failed: ${err.message}; trying again`);
+      await wait();
+    }
+  }
 }
 
 /** Waits VALIDATOR_CALL_TIMEOUT_SECONDS. */
@@ -332,18 +351,26 @@ function sleep(ms) {
 }
 
 /**
- * The loop every boot runs (docs/schemas.md 19.1):
+ * The loop every boot runs (docs/schemas.md 19.1 and 31.1):
  *   1. the health sweep (replay.service.js sweepHealth); nobody answers:
  *      `no validator answers yet`, again after the wait; no majority
  *      otherwise: the same wait. With a majority, the own table takes the
  *      majority's leader when it differs and its ignored list
  *      (adoptIgnoredList);
- *   2. own id is that leader: counted, `leading at position P`, done;
+ *   2. own id is that leader: the catch-up pass first (catchUp), so a
+ *      leader that is behind does not lead on a shorter chain; a pass that
+ *      stops ends the loop; a pass that ends with another leader goes back
+ *      to step 1 at once; otherwise the waiting rows the own chain already
+ *      holds are deleted (written-rows.js dropWrittenHeldRows), then
+ *      counted, `leading at position P`, a round started at once
+ *      (runLeader), done;
  *   3. the catch-up pass to the majority tail (catchUp); a pass that stops
  *      ends the loop, the validator serving but not counted;
  *   4. join requests to the leader (joinThrough) until counted, `counted
  *      at position P`; a refusal, no answer or a stop of the handshake goes
  *      back to step 1 after the wait.
+ * An error thrown anywhere in it is caught by keepJoining, which runs the
+ * loop again after the wait.
  */
 async function joinLoop() {
   for (;;) {
@@ -362,8 +389,17 @@ async function joinLoop() {
     if (sweep.ignored !== null) await adoptIgnoredList(sweep.ignored, 'the network');
 
     if (sweep.leader === env.validator.id) {
+      // A leader that is behind catches up before it counts itself.
+      const caught = await catchUp();
+      if (!caught.caughtUp) {
+        console.log('join loop stopped: the own chain cannot reach the network tail');
+        return;
+      }
+      if (caught.leader !== env.validator.id) continue;
+      await dropWrittenHeldRows();
       setCounted(true);
       console.log(`leading at position ${(await ownTail()).position}`);
+      runLeader().catch((err) => console.log(err));
       return;
     }
 
@@ -382,9 +418,14 @@ async function joinLoop() {
 
 /**
  * The handshake with the leader `leaderId`, per 19.3: join requests until
- * `counted`, or `included`, the held rows, ready, counted. Returns
- * COUNTED, 'again' (back to the sweep after the wait) or 'stopped' (the
- * catch-up pass stopped).
+ * `counted`, or `included`, the held rows, ready, counted. On `counted`
+ * the joiner first deletes the waiting rows whose transaction its own
+ * chain already holds (written-rows.js dropWrittenHeldRows). On `included`
+ * it first clears its five holding tables and their two child tables
+ * (clearHeldRows) and then pulls the leader's rows, so a row the leader no
+ * longer holds goes and a row gets the follow-ups it missed
+ * (docs/schemas.md 31.1). Returns COUNTED, 'again' (back to the sweep
+ * after the wait) or 'stopped' (the catch-up pass stopped).
  */
 async function joinThrough(leaderId) {
   if (leaderId === null) {
@@ -410,6 +451,7 @@ async function joinThrough(leaderId) {
 
     switch (state) {
       case COUNTED:
+        await dropWrittenHeldRows();
         setCounted(true);
         console.log(`counted at position ${own.position}`);
         return COUNTED;
@@ -428,6 +470,7 @@ async function joinThrough(leaderId) {
         await sleep(1000);
         continue;
       case INCLUDED: {
+        await clearHeldRows();
         if (!(await pullHeldRows(leader))) return 'again';
         if (!(await sayReady(leader))) return 'again';
         setCounted(true);

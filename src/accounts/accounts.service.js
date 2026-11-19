@@ -5,7 +5,7 @@ import { ACCOUNT_KEYS } from './account-keys.js';
 import { ACCOUNT_TYPES } from './account-types.js';
 import { pool } from '../db/pool.js';
 import { FUND_PROPOSAL, TRANSFER_TO_FUND, writeFundProposal, writeTransferToFund } from '../fund/fund.service.js';
-import { findTail, insertLink } from '../garlic-chain/garlic-chain.queries.js';
+import { findTail, insertLink, prepareChainWrite } from '../garlic-chain/garlic-chain.queries.js';
 import {
   ASSISTED_TRANSFERS,
   ESCROW_TRANSFERS,
@@ -257,6 +257,10 @@ export async function writeApproved(transactionIds) {
  * none of these, or a database error on one of the writes. A connection
  * that drops still throws, like every other query.
  *
+ * The transaction opens with prepareChainWrite (garlic-chain.queries.js):
+ * a lock that only another writer of links waits for, and the position
+ * counter set to the chain's end.
+ *
  * Each link's record_hash is the SHA-256 of its trans_hash followed by the
  * previous link's record_hash, both as raw bytes. The previous link is the
  * newest row in the chain when the batch starts (findTail), then the link
@@ -266,6 +270,7 @@ async function writeTransactions(rows) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await prepareChainWrite(client);
     let previousRecordHash = await findTail(client);
     for (const row of rows) {
       const { transactionType } = row.ogTransaction.payload;

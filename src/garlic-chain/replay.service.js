@@ -23,7 +23,7 @@ import { getHealth } from '../validators/validators.client.js';
 import { findIgnoredIds, findMemberPeers, setIgnoredList } from '../validators/validators.queries.js';
 import { findLinkPayload, findTailLink } from './chain-links.queries.js';
 import { sendChainLinks } from './chain-links.service.js';
-import { findTailRow, insertLink } from './garlic-chain.queries.js';
+import { findTailRow, insertLink, prepareChainWrite } from './garlic-chain.queries.js';
 
 /**
  * Catching up: how a validator that is behind the network gets the links it
@@ -51,7 +51,11 @@ import { findTailRow, insertLink } from './garlic-chain.queries.js';
 
 /**
  * Replays `links`, a chunk as the wire carries it (ascending positions),
- * onto the own chain in one database transaction. Each link, in order:
+ * onto the own chain in one database transaction, which opens with
+ * prepareChainWrite (garlic-chain.queries.js): a lock that only another
+ * writer of links waits for, and the position counter set to the chain's
+ * end, so the counter gives the first link the tail's position plus one.
+ * Each link, in order:
  *   1. its position is the own tail's plus one (the tail read once at the
  *      start of the chunk, then the link just written);
  *   2. transHash is the SHA-256 of the canonical JSON of
@@ -76,6 +80,7 @@ export async function replayLinks(links) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await prepareChainWrite(client);
     const tail = await findTailLink(client);
     let state = {
       position: tail === null ? 0 : tail.position,

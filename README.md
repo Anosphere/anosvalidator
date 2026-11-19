@@ -147,6 +147,18 @@ variable, the key file or the registry row; under systemd it is retried
 every five seconds, and `journalctl -fu anos-validator` shows the reason
 each time.
 
+Since 2026-11-19 (`docs/schemas.md` section 31) the start also tries the
+two statements that open every write of links (section "Database",
+`garlic_chain`), right after it has connected, in a transaction that is
+rolled back. It prints nothing when they run. A database user that may not
+run them stops the process with `Chain write check failed: <message>`.
+
+A stop (SIGTERM or SIGINT) waits for a round, a vote or a join that this
+validator leads, at most 30 seconds, and starts none meanwhile. While it
+waits the log says `a round, a vote or a join is under way; stopping when
+it ends`. Then it stops as before: no new connections, the requests in
+flight finish, the pool is closed.
+
 Every validator knows every other one through the `validators` table in
 its own database, filled from `network/testnet.registry.json` at boot (see
 Database) and read fresh on every call. Public keys use the same format as
@@ -179,7 +191,13 @@ Tables:
 - `garlic_chain`: one row per transaction on the chain, holding the signed
   transaction object whole in `og_transaction`. `position` numbers the rows
   in the order they were written; the highest is the chain's tail, and the
-  highest for an account is that account's newest transaction.
+  highest for an account is that account's newest transaction. A counter
+  gives `position`. Since 2026-11-19 it is set to the chain's end at the
+  start of every write of links, behind a lock that only another writer of
+  links waits for (`prepareChainWrite` in
+  `src/garlic-chain/garlic-chain.queries.js`): a batch that is rolled back
+  moves the counter on, and this puts it back, so the positions have no
+  hole.
 - `pending`: transactions received but not yet on the chain, one per account.
 - `locked_transactions`: guarded and vault transfers waiting out their time
   lock, one per account, with `future_date`, the moment each may be written,
@@ -950,6 +968,18 @@ the final declaration is logged only: the leadership has moved, and the new
 leader meets the silent validator on its next call. After the round the
 reports that arrived meanwhile run their votes.
 
+Since 2026-11-19 (`docs/schemas.md` section 31) the leader logs why a peer
+gave no answer or refused, at both calls and before any vote: `validator N
+sent no approved pending list: <reason>` or `validator N did not write:
+<reason>`. And at the write step the official list goes once more to every
+peer that gave no answer or refused, before any vote: `the call goes once
+more to validator N`. A peer that wrote at the first send answers the
+second with an empty list and writes nothing twice. Only a peer that fails
+both sends is voted on. A peer that answers 200 with fewer ids than the
+leader wrote is not sent to again: its own self-check finds it (next
+section). The ready announcement keeps its order: the vote first, then the
+second send.
+
 ## Ignoring and joining
 
 Since the catch-up build (2026-11-07; `docs/schemas.md` section 19) a
@@ -992,7 +1022,8 @@ messages, which a joiner sends while it is still ignored. `/health` shows
 `ignored`, the ids this validator ignores, and `counted`, whether this
 validator counts itself. A counted validator that gets `validator N is
 ignored` back from more than half of the peers it sent to stops counting
-itself and joins again.
+itself and joins again. Since 2026-11-19 it also checks itself once a
+minute (the self-check, below).
 
 **The votes** (`src/votes/`). One vote kind, two directions, ignore and
 include, naming a list of validators; one table, `ignore_votes`; one set of
@@ -1011,9 +1042,15 @@ the counted rows minus the named, times 100, at least `IGNORE_FLOOR_PERCENT`
 (51) times the active rows, else `below the floor` (the leader refuses to
 start such a vote too). Then its own check of each named validator: health
 within the timeout, **reachable** when it answered 200 with the voter's own
-tail (`chain.position`, `chain.recordHash`) and leader. The vote is yes for
-ignore when no named validator is reachable, yes for include when every one
-is, no otherwise. The starter checks each answer as a receipt; the vote
+tail (`chain.position`, `chain.recordHash`) and leader. Since 2026-11-19
+an ignore vote asks one more question, last: does the validator count
+itself (`counted` in its health)? If not, the reason is `does not count
+itself`. A validator that is up and answers 503 `not counted yet` to
+everything passed the check before and could not be voted out. An include
+vote does not ask it: a joiner does not count itself yet while the others
+vote on it. The vote is yes for ignore when no named validator is
+reachable, yes for include when every one is, no otherwise. The starter
+checks each answer as a receipt; the vote
 passed when every voter answered yes. A failed vote is stored by the
 starter with the receipts it got, each result logged; a voter that gave no
 answer to an ignore vote, or refused it, fails it, and one new vote names
@@ -1030,7 +1067,8 @@ leader, makes the starter the leader; include clears the flags and makes
 the starter the leader; the vote's row is stored. A proof already stored
 answers the accepted receipt again. Before starting an ignore vote the
 starter checks each named validator itself: one that answers is dropped
-with `validator N answers; no vote`, and an empty list is nothing.
+with `validator N answers; no vote`, and an empty list is nothing. The
+starter's check asks about `counted` too.
 
 **The report and the originator's wait.** An originator (a create-account,
 transfer, fund or follow-up endpoint) whose approvals got no answer from
@@ -1046,7 +1084,8 @@ to the counted peers as before. A refusal from a peer that passes the
 health check is handled as before, no report. The receiver of a report
 answers `200 {}` at once; if it may start a vote (it is the leader, or the
 ids hold its leader and it is the next in the ring) it runs the vote; if it
-is busy, the ids wait in a queue.
+is busy, the ids wait in a queue. Since 2026-11-19 the originator's check
+of a peer that refused asks about `counted` too, as an ignore vote does.
 
 **One busy flag** per validator covers a round, a vote and a join it leads,
 so none of them overlap; whoever ends a busy section runs the queued
@@ -1109,7 +1148,10 @@ checks every row's transaction (its signature and id checks by type) and
 every stored follow-up's signatures, keeps the approved flags on trust, and
 inserts every column as received (`src/held-transactions/held-rows.service.js`);
 a row already present with the same `og_transaction` is skipped, present
-with another one the pull stops and the joiner starts over. Ready with the
+with another one the pull stops and the joiner starts over. Since
+2026-11-19 the joiner clears its five holding tables and their two child
+tables right before the pull, so the rows it ends with are the leader's
+(the waiting rows, below). Ready with the
 tail equal to the leader's ends the hold: busy off, the queued reports, the
 leader round. A hold also ends after `JOIN_HOLD_SECONDS` (120): `join of
 validator N timed out`, and an ignore vote naming the joiner when the
@@ -1118,14 +1160,64 @@ include vote had passed.
 **Every boot asks to join.** After listening, `startJoinLoop`: the health
 sweep (`no validator answers yet` every ten seconds while nobody answers;
 with a majority, the own table takes the majority's leader and ignored
-list); own id is that leader: counted, `leading at position P`; otherwise
-the catch-up pass, then the join requests until `counted at position P`.
+list); own id is that leader: the catch-up pass, then counted, `leading at
+position P`, and a round at once; otherwise the catch-up pass, then the
+join requests until `counted at position P`.
 `counted` is an in-memory flag, false at boot: while it is false every
 POST but `/proof-of-ignore-vote` and `/chain-links` is answered 503
 `{ error: "not counted yet" }`, and GET `/health` always answers, `counted`
 in it. The registry stays read at boot: adding a validator stays "everyone
 pulls and restarts" through the operator guide's two short lines, and the
 restart is safe because every boot asks to join.
+
+Two things changed in that loop on 2026-11-19 (`docs/schemas.md` section
+31). A validator that the others name as leader runs the catch-up pass
+before it counts itself, like everyone else. Before, it was counted at
+once, so a leader that came back one batch behind would have led on a
+shorter chain. And it starts a round as soon as it is counted, so what
+waited is written without waiting for the next transaction. Second, an
+error thrown in the loop no longer ends the joining: `join loop failed:
+<message>; trying again`, the wait of the timeout, and the loop runs
+again. One stop stays, and it needs a person: `join loop stopped: the own
+chain cannot reach the network tail`, when the own chain is ahead of the
+network's or differs from it.
+
+**The waiting rows of a validator that comes back**
+(`src/held-transactions/written-rows.js`, since 2026-11-19). A validator
+that missed a write kept that transaction as an approved row in its holding
+table: the catch-up writes the missed link and does not touch the holding
+tables. The row then blocked the account on that validator, and one no is
+enough. So before a validator counts itself, at every start and after every
+catch-up, it deletes every waiting row whose transaction its own chain
+already holds, approved or not, with its child rows: `dropped held <table>
+transaction <id>: already on the chain`. And at a join through the leader
+(`included`) it clears the five holding tables and their two child tables
+before it pulls the leader's rows: `cleared held <table> transaction <id>:
+the join takes the leader's rows`. That is how a row the leader no longer
+holds goes, and how a row gets the follow-ups it missed. Both are plain
+deletes with one log line a row, as the sweep of unapproved rows is. They
+touch the waiting tables only, never the chain, the accounts, the logs or
+the archives. Neither runs while the validator is counted, so neither can
+cross a write.
+
+**The self-check** (`src/validators/self-check.js`, since 2026-11-19). A
+validator that is voted out is told nothing. So once a minute a counted
+validator reads every other validator's health and compares itself with
+what most of them say. Three findings count: most list it as ignored
+(`ignored by the network`); most are at a higher position (`behind the
+network (position P, the network's Q)`); most name another leader (`names
+leader X, the network names Y`). The look at the others takes as long as
+the slowest health answer, and a round that ends meanwhile hands the lead
+on. So the own leader is read before the look and again after it, and
+"another leader" counts only when the own leader stood still. The first
+finding is logged: `self-check: <finding>`. A check that finds one right
+after a check that found one logs
+`self-check: <finding>, twice in a row; joining again`, and the validator
+stops counting itself and runs the loop above. The check does nothing
+while the validator is not counted, nothing while it leads a round, a vote
+or a join, nothing without a majority, and nothing when it is ahead of the
+others. The first check runs a minute after the start. The minute is a
+constant in the file, not a setting.
 
 **The same message twice.** An exact repeat of a transaction approval, the
 held row's `og_transaction` equal to the transaction carried, answers the
@@ -1563,8 +1655,9 @@ src/
   held-transactions/     the registry of the five holding tables
     held-transactions.js one entry per table (insert, find, markApproved, findApproved, conflictReasons); findHeld
     held-rows.service.js the held rows a joiner pulls: readHeldRows (the leader), storeHeldRows (the joiner)
+    written-rows.js      the two deletes of a validator that comes back: dropWrittenHeldRows (already on the chain), clearHeldRows (before the pull of a join)
   garlic-chain/          the chain: its SQL, the chunk read and the replay (section "Ignoring and joining")
-    garlic-chain.queries.js  findTail, findTailRow, insertLink
+    garlic-chain.queries.js  findTail, findTailRow, insertLink; prepareChainWrite and checkChainWrite, the two statements that open every write of links
     chain-links.service.js, chain-links.handlers.js, chain-links.queries.js  POST /chain-links, both sides
     replay.service.js    replayLinks, the writer of a chunk; sweepHealth, catchUp and fetchChainFrom, the catch-up pass; adoptIgnoredList
   transfer/              feature: transfers (anos-transfer), all six types
@@ -1601,6 +1694,7 @@ src/
     validators.queries.js  counted and member peers; one validator with its keys; the leader; the ignored flag; the next in the ring
     validators.client.js   POST one message to each peer, in parallel, and GET one validator's health, each with the timeout
     join.service.js        joining: the counted flag, the leader's side (the hold, the three join messages) and the joiner's loop every boot runs
+    self-check.js          the self-check: once a minute a counted validator compares itself with most of the others, and joins again when it is out of step twice in a row
     validators.signing.js  loads the key file; own public key; sign a payload with own key; verify one with a peer's
     registry.service.js    applies network/testnet.registry.json at boot: the shape checks, the five rules, the hash
     registry.queries.js    the apply's SQL

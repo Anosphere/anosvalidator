@@ -69,3 +69,30 @@ export async function insertLink(client, {
   );
   return Number(rows[0].position);
 }
+
+/**
+ * The first statements of every database transaction that inserts links. A lock that
+ * only another writer of links waits for, held to the end of the transaction, so two
+ * writes never cross. Then the counter behind garlic_chain.position set to the
+ * chain's end, so the next link gets the tail's position plus one, 1 on an empty
+ * chain. A batch that is rolled back moves the counter on; this puts it back.
+ */
+export async function prepareChainWrite(client) {
+  await client.query("SELECT pg_advisory_xact_lock(hashtext('garlic_chain'))");
+  await client.query(
+    `SELECT setval(pg_get_serial_sequence('garlic_chain', 'position'), coalesce(max(position), 0) + 1, false)
+     FROM garlic_chain`,
+  );
+}
+
+/** Tries prepareChainWrite once, in a transaction that is rolled back. Throws when the database user may not run it. */
+export async function checkChainWrite() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await prepareChainWrite(client);
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+}

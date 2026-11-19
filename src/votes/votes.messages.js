@@ -304,8 +304,17 @@ async function postReport(report, target) {
  * { reachable: false, reason }. The voters and the starter of a vote use it
  * (votes.service.js), and an originator on a peer that refused
  * (settleNoAnswers).
+ *
+ * `mustCount` adds one question, asked last: does the validator count
+ * itself (`counted` in its health)? One that does not answers 503 to
+ * everything and would pass the check above. It is passed as true where the
+ * question is whether to ignore a validator: by the starter of an ignore
+ * vote (runVote), by a voter in an ignore vote (receiveIgnoreVote) and by an
+ * originator on a peer that refused (findFailingRefusers). An include vote
+ * leaves it false: a joiner does not count itself yet while the others
+ * vote on it. The reason is `does not count itself`.
  */
-export async function checkReachable(validator) {
+export async function checkReachable(validator, { mustCount = false } = {}) {
   const answer = await getHealth(validator);
   if (answer.noAnswer) return { reachable: false, reason: `no answer: ${answer.reason}` };
   if (answer.status !== 200) return { reachable: false, reason: `health answered ${answer.status}` };
@@ -318,6 +327,7 @@ export async function checkReachable(validator) {
   }
   const leaderId = await findLeaderId();
   if (body.leader !== leaderId) return { reachable: false, reason: `names leader ${body.leader}, own ${leaderId}` };
+  if (mustCount && body.counted !== true) return { reachable: false, reason: 'does not count itself' };
   return { reachable: true };
 }
 
@@ -375,7 +385,7 @@ async function findFailingRefusers(approvals) {
   if (refused.length === 0 || !isCounted()) return [];
   const checks = await Promise.all(refused.map(async ({ id }) => {
     const row = await findActiveValidator(id);
-    return row === null ? { reachable: true } : checkReachable(row);
+    return row === null ? { reachable: true } : checkReachable(row, { mustCount: true });
   }));
   const failing = [];
   for (const [i, { id }] of refused.entries()) {
