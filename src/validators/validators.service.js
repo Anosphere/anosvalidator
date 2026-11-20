@@ -18,6 +18,8 @@ import { isTransferType, verifyAnosTransfer } from '../transfer/transfer.service
 import { isObject } from '../util/is-object.js';
 import { IGNORE } from '../votes/votes.messages.js';
 import { drainReports, runVote } from '../votes/votes.service.js';
+import { LEADER_APART, LEADER_BEHIND, LEVEL, OTHERS_DIFFER, lookAtChainEnds } from './chain-ends.js';
+import { setCounted, startJoinLoop } from './join.service.js';
 import {
   APPROVED_PENDING_LIST,
   FINAL_DECLARATION,
@@ -399,6 +401,14 @@ const RESTART = Symbol('restart');
 
 /**
  * One round:
+ *   0. the look (chain-ends.js lookAtChainEnds): every counted peer's
+ *      chain end, the position and the record hash of its last link, read
+ *      from its health and compared with this validator's own, before
+ *      anything is sent. Nothing is written while they differ: a
+ *      difference is logged, `chain ends differ: <the groups>`, and
+ *      settled by settleChainEnds before step 1, after which the round
+ *      starts again or ends. The look runs again whenever the round
+ *      starts again;
  *   1. the ready announcement goes to every counted peer; each answers
  *      with its approved pending list (findReadyIds: approved pending
  *      transactions and due locked ones), in id order;
@@ -437,6 +447,15 @@ async function leadRound() {
     if (!(await findIsLeader(env.validator.id))) return;
     const own = await findReadyIds();
     if (own.length === 0) return;
+
+    // 0. The look (chain-ends.js): every counted validator's chain end,
+    // before anything is sent. Nothing is written while they differ.
+    const look = await lookAtChainEnds();
+    if (look.finding !== LEVEL) {
+      console.log(`chain ends differ: ${look.line}`);
+      if ((await settleChainEnds(look)) === RESTART) continue;
+      return;
+    }
 
     // 1. Everyone's approved pending list.
     const lists = await settleRoundAnswers(
@@ -478,6 +497,58 @@ async function leadRound() {
     console.log(`validator ${nextLeader} is the leader`);
     return;
   }
+}
+
+/**
+ * What the leader does when the look (chain-ends.js) found chain ends that
+ * differ. Nothing is written in any of the four cases. Returns RESTART when
+ * the round starts again, null when it ends.
+ *   othersDiffer: one ignore vote naming them, in this busy section
+ *     (votes.service.js runVote, which drops a validator that passes this
+ *     validator's own health check by then). Passed: the round starts
+ *     again. Not passed: one more look, since a validator that caught up
+ *     meanwhile is level by now; level, the round starts again; otherwise
+ *     the round ends.
+ *   leaderBehind: this validator stops counting itself and joins again
+ *     (join.service.js), as its self-check would after two findings. The
+ *     join loop catches it up and, while the others still name it leader,
+ *     has it lead at once.
+ *   leaderApart: the lead goes to the next counted validator, by the final
+ *     declaration an empty round sends. That leader's look finds this
+ *     validator differing, and its vote takes it out.
+ *   noMajority: a line. The self-checks of the validators that are behind
+ *     bring them level; where the chains really differ, a person decides.
+ */
+async function settleChainEnds(look) {
+  if (look.finding === OTHERS_DIFFER) {
+    const vote = await runVote(look.ids, IGNORE);
+    if (!vote.passed && (await lookAtChainEnds()).finding !== LEVEL) {
+      console.log('nothing is written: the chain ends still differ');
+      return null;
+    }
+    console.log('the round starts again');
+    return RESTART;
+  }
+  if (look.finding === LEADER_BEHIND) {
+    console.log(`behind the network (position ${look.own.position}, the network's ${look.network.position}); joining again`);
+    setCounted(false);
+    startJoinLoop();
+    return null;
+  }
+  if (look.finding === LEADER_APART) {
+    const nextLeader = await findNextCounted(env.validator.id);
+    await setLeader(nextLeader);
+    const declared = await sendFinalDeclaration({ transactionIds: [], nextLeader });
+    for (const { id, status, noAnswer, reason } of declared) {
+      console.log(noAnswer
+        ? `validator ${id} gave no answer to the final declaration: ${reason}`
+        : `validator ${id} answered the final declaration ${status}`);
+    }
+    console.log(`own chain end is not the network's: nothing is written, validator ${nextLeader} is the leader`);
+    return null;
+  }
+  console.log('nothing is written: no chain end is held by more than half of the counted validators');
+  return null;
 }
 
 /**

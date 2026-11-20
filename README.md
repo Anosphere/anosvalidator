@@ -980,6 +980,48 @@ leader wrote is not sent to again: its own self-check finds it (next
 section). The ready announcement keeps its order: the vote first, then the
 second send.
 
+Since 2026-11-19 too (`docs/schemas.md` section 32) a leader looks before
+it sends anything (`src/validators/chain-ends.js`). It has found that it
+is the leader and that something waits. Then, before the ready
+announcement, it reads the health of every counted validator, all at
+once. It compares each chain end, the position and the record hash of the
+last link, with its own. All the same: the round goes on as before, and
+nothing is logged. Otherwise one line, `chain ends differ: <who stands
+where>`, and nothing is written in that pass. Most win: the chain end that
+more than half of the counted validators hold is the network's. The leader
+then does one of four things (`settleChainEnds` in
+`src/validators/validators.service.js`). One: it is at the network's chain
+end and others are not. They are named in one ignore vote, before anything
+is written. The vote passes: `the round starts again`, with a new look.
+The vote does not pass: the leader looks once more, because the vote drops
+a validator that has caught up meanwhile. Level now: `the round starts
+again`. Still not level: `nothing is written: the chain ends still
+differ`, and the round ends. Two: the leader is behind the network.
+`behind the network (position P, the network's Q); joining again`. It
+stops counting itself and joins again. The join catches it up and, while
+the others still name it leader, it leads at once. Three: the leader is
+ahead of the network, or on a chain that does not fit. It hands the lead
+to the next counted validator with the final declaration an empty round
+sends: `own chain end is not the network's: nothing is written, validator
+N is the leader`. The next leader's look finds it differing, and that
+leader's vote takes it out. Four: no chain end is held by more than half.
+`nothing is written: no chain end is held by more than half of the counted
+validators`. The validators that are behind find it by their self-check
+and catch up. On two real chains a person decides. A validator that was
+voted out because it is behind comes back by its self-check (next
+section). One that is ahead, or on a chain that does not fit, stops and
+waits for a person, as before. The look compares chain ends only. It does
+not compare `leader` and `counted`, as the health check of a vote does. A
+validator may get its copy of a final declaration a moment after the new
+leader started its round, and still name the old leader. A chain end has
+no such moment. A health page that cannot be read is not held against a
+validator. It is not compared, and it counts for nobody when "more than
+half" is worked out. With nothing else differing there is no line, and the
+round goes on. With something else differing the line ends in `no chain
+end read from validator N`. The round's own steps meet that validator
+next. A leader with nothing to write does not look. The look runs again
+whenever the round starts again.
+
 ## Ignoring and joining
 
 Since the catch-up build (2026-11-07; `docs/schemas.md` section 19) a
@@ -1155,7 +1197,12 @@ tables right before the pull, so the rows it ends with are the leader's
 tail equal to the leader's ends the hold: busy off, the queued reports, the
 leader round. A hold also ends after `JOIN_HOLD_SECONDS` (120): `join of
 validator N timed out`, and an ignore vote naming the joiner when the
-include vote had passed.
+include vote had passed. Since the look before a round was built
+(2026-11-19, `docs/schemas.md` section 32) a joiner that is answered
+`behind` waits the timeout before it asks again, when its catch-up pass
+brought nothing new. It is level with most by then, and the leader is the
+one out of step. Before, it asked again at once, with a read of every
+health page each time round.
 
 **Every boot asks to join.** After listening, `startJoinLoop`: the health
 sweep (`no validator answers yet` every ten seconds while nobody answers;
@@ -1217,7 +1264,9 @@ stops counting itself and runs the loop above. The check does nothing
 while the validator is not counted, nothing while it leads a round, a vote
 or a join, nothing without a majority, and nothing when it is ahead of the
 others. The first check runs a minute after the start. The minute is a
-constant in the file, not a setting.
+constant in the file, not a setting. A leader whose look before a round
+finds it behind the network joins again at once, without waiting for two
+checks (section "The leader round").
 
 **The same message twice.** An exact repeat of a transaction approval, the
 held row's `og_transaction` equal to the transaction carried, answers the
@@ -1695,6 +1744,7 @@ src/
     validators.client.js   POST one message to each peer, in parallel, and GET one validator's health, each with the timeout
     join.service.js        joining: the counted flag, the leader's side (the hold, the three join messages) and the joiner's loop every boot runs
     self-check.js          the self-check: once a minute a counted validator compares itself with most of the others, and joins again when it is out of step twice in a row
+    chain-ends.js          the look before a round: the leader reads every counted validator's chain end from its health and judges it (lookAtChainEnds, judgeChainEnds; most win, five findings)
     validators.signing.js  loads the key file; own public key; sign a payload with own key; verify one with a peer's
     registry.service.js    applies network/testnet.registry.json at boot: the shape checks, the five rules, the hash
     registry.queries.js    the apply's SQL

@@ -42,7 +42,9 @@ import { signPayload, verifyPayloadSignature } from './validators.signing.js';
  * (app.js), and GET /health answers it as `counted`. A counted validator
  * whose peers refuse it as ignored clears the flag and joins again
  * (noticeIgnoredAnswers). So does one whose self-check finds it out of
- * step with most of the others twice in a row (self-check.js).
+ * step with most of the others twice in a row (self-check.js). And so
+ * does a leader whose look before a round finds it behind the network, at
+ * once (validators.service.js settleChainEnds).
  */
 
 /** payload.type of the six join messages. */
@@ -71,7 +73,7 @@ export function isCounted() {
   return counted;
 }
 
-/** Sets the flag: true once the join loop finds this validator counted, false when its peers refuse it as ignored or its self-check finds it out of step twice in a row (self-check.js). */
+/** Sets the flag: true once the join loop finds this validator counted, false when its peers refuse it as ignored, its self-check finds it out of step twice in a row (self-check.js), or, as the leader, its look finds it behind the network (validators.service.js settleChainEnds). */
 export function setCounted(flag) {
   counted = flag;
 }
@@ -424,8 +426,12 @@ async function joinLoop() {
  * it first clears its five holding tables and their two child tables
  * (clearHeldRows) and then pulls the leader's rows, so a row the leader no
  * longer holds goes and a row gets the follow-ups it missed
- * (docs/schemas.md 31.1). Returns COUNTED, 'again' (back to the sweep
- * after the wait) or 'stopped' (the catch-up pass stopped).
+ * (docs/schemas.md 31.1). On `behind` it runs the catch-up pass and asks
+ * again. When that pass brought nothing new, the joiner is level with
+ * most and the leader is the one out of step, so it waits
+ * VALIDATOR_CALL_TIMEOUT_SECONDS before it asks again (docs/schemas.md
+ * 32.1). Returns COUNTED, 'again' (back to the sweep after the wait) or
+ * 'stopped' (the catch-up pass stopped).
  */
 async function joinThrough(leaderId) {
   if (leaderId === null) {
@@ -458,6 +464,10 @@ async function joinThrough(leaderId) {
       case BEHIND: {
         const caught = await catchUp();
         if (!caught.caughtUp) return 'stopped';
+        // Level with most and still behind the leader: the leader is the
+        // one out of step. Its own look or self-check brings it in line,
+        // and the next request waits for that, not asked at full speed.
+        if ((await ownTail()).position === own.position) await wait();
         continue;
       }
       case BUSY:
