@@ -1063,7 +1063,10 @@ answer**: the call no longer fails as a whole. That peer's entry says
 carry `noAnswer: true` through (`{ id, approved: false, reason, noAnswer:
 true }`), so a caller can tell no answer from a refusal. One call waits
 twice the timeout: the vote request, since a voter's own check of a silent
-validator takes one timeout before the voter can answer.
+validator takes one timeout before the voter can answer. Since 2026-11-19
+no call to another validator follows a redirect: a redirect comes back as
+an answer with its own status, read as any other answer is, and nothing is
+sent to the address it names (`docs/schemas.md` 19.1 and 19.5).
 
 **Counted.** `active` keeps meaning membership, from the registry file, part
 of the registry hash. A second flag on the row, `ignored`, means "not

@@ -1821,7 +1821,12 @@ Step 1:
   `checkAttachmentAnswer`, `checkListAnswer`) answer `{ reason: "no answer:
   <reason>", noAnswer: true }` for such an entry, and the per-validator
   results of the six senders carry `noAnswer: true` through;
-  `sendFinalDeclaration`'s raw answers carry the entry as it is.
+  `sendFinalDeclaration`'s raw answers carry the entry as it is. Since
+  2026-11-19
+  (`~/Desktop/Z-TestNet/forclaude/validator-redirects-plan-1.md`) both
+  fetches set `redirect: 'manual'`: neither call follows a redirect, and a
+  redirect comes back as an answer with its own status (the note at the
+  end of 19.5).
 - **Health.** `identity()` in `src/health/health.service.js` is async and
   gains `chain` (`{ position, recordHash }` of the newest link,
   `garlic-chain.queries.js findTailRow`, the position a number and the
@@ -2560,6 +2565,97 @@ Follow-ups, from the plan's section 5 and the build:
   restart on every VM.
 - The wallet's answer to 503 `not counted yet` from the validator it
   picked.
+
+A call to another validator does not follow a redirect (2026-11-19).
+Built from `~/Desktop/Z-TestNet/forclaude/validator-redirects-plan-1.md`
+(FINAL, 2026-11-19), its step 2 of two, its section 2, one commit, on main
+at b2dcc2d. Two lines of code in `src/validators/validators.client.js`: in
+`postToValidators` the options of the `fetch` gain `redirect: 'manual'`,
+after the `body` line, and in `getFromValidator` they become `{ redirect:
+'manual', signal: AbortSignal.timeout(TIMEOUT_MS) }`. The comment at the
+top of that file gains one sentence, and the point "The timeout" of 19.1
+one dated sentence. The README's paragraph "The timeout." gains one
+sentence too: the plan does not name it, the build's first report listed
+it as left, and the user said the same day to add it ("add that one
+sentence to the two places"). No message, no route, no variable, no table
+and no npm package; the doorman and the keyholder are not touched. A
+validator with this change and one without it work together.
+
+- Why. A redirect is an answer that says "ask this other address
+  instead". Node's `fetch` follows one by itself, up to 20 in a row. Both
+  calls go to another validator's doorman, a machine this validator's
+  operator does not run. Whoever runs that doorman, or breaks into it,
+  could so pick another address for the call, and this validator would
+  make that call from inside its own network, where addresses answer that
+  the outside cannot reach. After a 307 or a 308 Node sent the POST again
+  to that address with the same body, which is this validator's signed
+  message. The same word already stands in the doorman's relay to its
+  worker (`doormansoftware/src/door/forward.js`) and in the monitor's
+  sweep (`monitorsoftware/server/sweep/ask.js`), and step 1 of the plan
+  puts it into the masterpod's read of the DAO stakes
+  (`masterpodsoftware/src/dao/validators.client.js`).
+- What a redirect is now, in `postToValidators`: an entry with its own
+  status, `{ id, url, status: 302, body: '' }` (the body is the redirect's
+  own, when it has one). Every check of an answer reads a status that is
+  not 200 as `answered 302: `, a refusal, as it reads any answer that is
+  not a yes. It is not "no answer". No new handling was needed.
+- What a redirect is now, in `getFromValidator`: with an empty body `{
+  noAnswer: true, reason }`, since an empty body is not JSON; with a JSON
+  body `{ status: 302, body }`. The health check (`checkReachable` in
+  `src/votes/votes.messages.js`) reads the second as `health answered
+  302`: not reachable. The look before a round
+  (`src/validators/chain-ends.js`), the join and the replay read the body
+  that `getHealth` hands them and not the status, as they read any body
+  that validator sends with a 200. So a redirect gives its sender nothing
+  it could not send anyway, and its target's words are no longer read as
+  the validator's.
+- What a person sees: nothing. Honest validators send no redirect.
+- Left as it is, on purpose (the plan's decision 5): the call to the
+  masterpod (`src/masterpod/masterpod.client.js`), the only other `fetch`
+  under `src/`. The masterpod is our own server.
+- Checked. `git status --short` showed a clean tree at b2dcc2d at the
+  start, and this step's three files and no others at the end:
+  `src/validators/validators.client.js`, this file and `README.md`.
+  `node --check src/validators/validators.client.js` passes. The plan's
+  two code lines are in the file once each, and the built file equals
+  the planning chat's own trial file but for the new sentence of the
+  comment. No validator was started or stopped and no database was
+  opened. Beyond the
+  plan's two checks, one throwaway run on loopback, on the user's Mac,
+  Node v24.22.0: the real `postToValidators`, `getFromValidator` and
+  `getHealth` of the working tree, loaded with made-up settings, in front
+  of three made-up validators and one more made-up server, "the other
+  address", which stands in for an address inside the calling validator's
+  own network and answers words of its own. The script is in the build
+  chat's scratchpad and nothing of it is in the repo. 54 checks, all as
+  expected. A signed message posted to three validators at once, of which
+  one answers 307 and one 302 with the other address as the target: three
+  entries in order, the two redirects with their own status and an empty
+  body, the good validator's answer as before, each validator asked once,
+  and no call to the other address. Each of 301, 302, 303, 307 and 308
+  alone, a redirect that carries a body, and one to a path on the
+  validator's own address: the same. The read of `/health`: each of the
+  five with an empty body is no answer, one with a JSON body comes back
+  under its own status, `getHealth` unwraps a doorman's `worker` from it
+  as from any body, and the other address gets no call. As before: a 200
+  and a 400 with their bodies as text, a body that is not JSON, an address
+  where nothing listens and a validator that never answers (no answer,
+  with the reason, after the timeout), the longer timeout of one call
+  (`timeoutSeconds`), a message of 2 MB arriving whole, and `getHealth`
+  with and without a doorman. The file of b2dcc2d went through the same
+  script: 26 of the 54 checks were as expected, and the 28 others are what
+  this step changes. There the other address got the signed message again
+  after a 307 or a 308 and a GET after a 301, 302 or 303; its words came
+  back as the validator's answer, and as the validator's health, under the
+  status 200; and a redirect to the validator's own address was followed
+  twenty times before the call gave up as no answer. Not run: a doorman,
+  TLS, a validator, a rig, a database, the masterpod.
+- The round of pulls. The change is plain new code: it reaches a
+  validator with the pull and the restart of a round, and a banker's pull
+  has no extra step for it. Nothing is installed, no database is changed,
+  no setting changes. After this step's commit the build adds its entry to
+  the short list of the round's `pull_steps.md`
+  (`Z-TestNet/upcoming_validator_pulls`).
 
 ## 20. The assisted signing rule (2026-11-07)
 

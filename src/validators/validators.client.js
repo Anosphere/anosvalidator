@@ -13,6 +13,11 @@ import { isObject } from '../util/is-object.js';
  * more. The peer's entry says so, with the reason, and the other entries
  * come back as before. No retries here; what a caller does with no answer
  * is its own (docs/schemas.md section 19).
+ *
+ * Neither call follows a redirect (redirect: 'manual'; docs/schemas.md
+ * 19.1 and 19.5): a redirect comes back as an answer with its own status,
+ * read as any other answer is, and nothing is sent to the address it
+ * names.
  */
 
 /** The timeout of every call, in milliseconds. */
@@ -41,6 +46,7 @@ export async function postToValidators(validators, path, body, { timeoutSeconds 
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: json,
+          redirect: 'manual',
           signal: AbortSignal.timeout(timeoutMs),
         });
         return { id, url, status: response.status, body: await response.text() };
@@ -59,7 +65,7 @@ export async function postToValidators(validators, path, body, { timeoutSeconds 
  */
 export async function getFromValidator(validator, path) {
   try {
-    const response = await fetch(validator.url + path, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const response = await fetch(validator.url + path, { redirect: 'manual', signal: AbortSignal.timeout(TIMEOUT_MS) });
     return { status: response.status, body: await response.json() };
   } catch (err) {
     return { noAnswer: true, reason: reasonOf(err) };
