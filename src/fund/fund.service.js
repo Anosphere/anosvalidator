@@ -12,6 +12,7 @@ import {
   HELD_TABLES,
   LOCKED_TRANSACTIONS,
   PENDING,
+  takeApprovalBack,
 } from '../held-transactions/held-transactions.js';
 import { fetchAnosAccount } from '../masterpod/masterpod.client.js';
 import { VOTE_FAILED, moveToArchives } from '../records/records.queries.js';
@@ -20,6 +21,7 @@ import { addStake, findStake, subtractStake } from '../stakes/stakes.queries.js'
 import { guardianWeight } from '../stakes/stakes.service.js';
 import { findAccount, findExisting, findLatestTransactionId } from '../transfer/transfer.queries.js';
 import { isObject } from '../util/is-object.js';
+import { proveAcceptance } from '../validators/acceptance.js';
 import { sendProofOfAcceptance, sendTransactionApproval } from '../validators/validators.messages.js';
 import { settleNoAnswers } from '../votes/votes.messages.js';
 import { FUND_ACCOUNT_ID } from './fund-account.js';
@@ -564,9 +566,14 @@ export async function findReadyProposalIds() {
  * every other active validator, wait for all of them, and check each answer
  * as a transaction approved receipt; then, if every one approved, mark the
  * own row approved and send everyone the proof of acceptance bundling those
- * receipts. Returns { ok: false, reason }, or { ok: true, transactionId,
- * approvals, approved, proof } exactly as those two do. Written as if
- * nothing can fail, like them.
+ * receipts. Since 2026-11-19 that last step is proveAcceptance
+ * (src/validators/acceptance.js, docs/schemas.md section 33): right before
+ * the proof the approvals are brought in line with the validators counted
+ * by then; a proof that not every validator accepted goes once more, a
+ * second later; and when every validator refused, the mark on the own row
+ * is taken back, so the sweep drops the row. Returns { ok: false, reason },
+ * or { ok: true, transactionId, approvals, approved, proof } exactly as
+ * those two do. Written as if nothing can fail, like them.
  */
 async function receiveTransaction(body, verify) {
   const result = await verify(body);
@@ -591,13 +598,17 @@ async function receiveTransaction(body, verify) {
     return { ...outcome, approved: false };
   }
 
-  // Every counted validator approved: our own row first, then tell them all.
-  await table.markApproved(transactionId);
-  const proof = await sendProofOfAcceptance({
+  // Every counted validator approved: the proof of acceptance
+  // (src/validators/acceptance.js proveAcceptance), our own row first.
+  const proved = await proveAcceptance({
     transactionId: body.payload.transactionId,
-    receipts: approvals.map((approval) => approval.receipt),
+    approvals,
+    askApproval: (peers) => sendTransactionApproval({ transaction: body, transactionId, peers }),
+    markApproved: () => table.markApproved(transactionId),
+    sendProof: (receipts) => sendProofOfAcceptance({ transactionId: body.payload.transactionId, receipts }),
+    takeMarkBack: () => takeApprovalBack(heldIn, transactionId),
   });
-  return { ...outcome, approved: true, proof };
+  return { ...outcome, ...proved };
 }
 
 /** How an amount must look, for the reasons that quote it. */

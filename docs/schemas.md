@@ -1821,7 +1821,12 @@ Step 1:
   `checkAttachmentAnswer`, `checkListAnswer`) answer `{ reason: "no answer:
   <reason>", noAnswer: true }` for such an entry, and the per-validator
   results of the six senders carry `noAnswer: true` through;
-  `sendFinalDeclaration`'s raw answers carry the entry as it is.
+  `sendFinalDeclaration`'s raw answers carry the entry as it is. Since
+  2026-11-19
+  (`~/Desktop/Z-TestNet/forclaude/validator-redirects-plan-1.md`) both
+  fetches set `redirect: 'manual'`: neither call follows a redirect, and a
+  redirect comes back as an answer with its own status (the note at the
+  end of 19.5).
 - **Health.** `identity()` in `src/health/health.service.js` is async and
   gains `chain` (`{ position, recordHash }` of the newest link,
   `garlic-chain.queries.js findTailRow`, the position a number and the
@@ -2560,6 +2565,97 @@ Follow-ups, from the plan's section 5 and the build:
   restart on every VM.
 - The wallet's answer to 503 `not counted yet` from the validator it
   picked.
+
+A call to another validator does not follow a redirect (2026-11-19).
+Built from `~/Desktop/Z-TestNet/forclaude/validator-redirects-plan-1.md`
+(FINAL, 2026-11-19), its step 2 of two, its section 2, one commit, on main
+at b2dcc2d. Two lines of code in `src/validators/validators.client.js`: in
+`postToValidators` the options of the `fetch` gain `redirect: 'manual'`,
+after the `body` line, and in `getFromValidator` they become `{ redirect:
+'manual', signal: AbortSignal.timeout(TIMEOUT_MS) }`. The comment at the
+top of that file gains one sentence, and the point "The timeout" of 19.1
+one dated sentence. The README's paragraph "The timeout." gains one
+sentence too: the plan does not name it, the build's first report listed
+it as left, and the user said the same day to add it ("add that one
+sentence to the two places"). No message, no route, no variable, no table
+and no npm package; the doorman and the keyholder are not touched. A
+validator with this change and one without it work together.
+
+- Why. A redirect is an answer that says "ask this other address
+  instead". Node's `fetch` follows one by itself, up to 20 in a row. Both
+  calls go to another validator's doorman, a machine this validator's
+  operator does not run. Whoever runs that doorman, or breaks into it,
+  could so pick another address for the call, and this validator would
+  make that call from inside its own network, where addresses answer that
+  the outside cannot reach. After a 307 or a 308 Node sent the POST again
+  to that address with the same body, which is this validator's signed
+  message. The same word already stands in the doorman's relay to its
+  worker (`doormansoftware/src/door/forward.js`) and in the monitor's
+  sweep (`monitorsoftware/server/sweep/ask.js`), and step 1 of the plan
+  puts it into the masterpod's read of the DAO stakes
+  (`masterpodsoftware/src/dao/validators.client.js`).
+- What a redirect is now, in `postToValidators`: an entry with its own
+  status, `{ id, url, status: 302, body: '' }` (the body is the redirect's
+  own, when it has one). Every check of an answer reads a status that is
+  not 200 as `answered 302: `, a refusal, as it reads any answer that is
+  not a yes. It is not "no answer". No new handling was needed.
+- What a redirect is now, in `getFromValidator`: with an empty body `{
+  noAnswer: true, reason }`, since an empty body is not JSON; with a JSON
+  body `{ status: 302, body }`. The health check (`checkReachable` in
+  `src/votes/votes.messages.js`) reads the second as `health answered
+  302`: not reachable. The look before a round
+  (`src/validators/chain-ends.js`), the join and the replay read the body
+  that `getHealth` hands them and not the status, as they read any body
+  that validator sends with a 200. So a redirect gives its sender nothing
+  it could not send anyway, and its target's words are no longer read as
+  the validator's.
+- What a person sees: nothing. Honest validators send no redirect.
+- Left as it is, on purpose (the plan's decision 5): the call to the
+  masterpod (`src/masterpod/masterpod.client.js`), the only other `fetch`
+  under `src/`. The masterpod is our own server.
+- Checked. `git status --short` showed a clean tree at b2dcc2d at the
+  start, and this step's three files and no others at the end:
+  `src/validators/validators.client.js`, this file and `README.md`.
+  `node --check src/validators/validators.client.js` passes. The plan's
+  two code lines are in the file once each, and the built file equals
+  the planning chat's own trial file but for the new sentence of the
+  comment. No validator was started or stopped and no database was
+  opened. Beyond the
+  plan's two checks, one throwaway run on loopback, on the user's Mac,
+  Node v24.22.0: the real `postToValidators`, `getFromValidator` and
+  `getHealth` of the working tree, loaded with made-up settings, in front
+  of three made-up validators and one more made-up server, "the other
+  address", which stands in for an address inside the calling validator's
+  own network and answers words of its own. The script is in the build
+  chat's scratchpad and nothing of it is in the repo. 54 checks, all as
+  expected. A signed message posted to three validators at once, of which
+  one answers 307 and one 302 with the other address as the target: three
+  entries in order, the two redirects with their own status and an empty
+  body, the good validator's answer as before, each validator asked once,
+  and no call to the other address. Each of 301, 302, 303, 307 and 308
+  alone, a redirect that carries a body, and one to a path on the
+  validator's own address: the same. The read of `/health`: each of the
+  five with an empty body is no answer, one with a JSON body comes back
+  under its own status, `getHealth` unwraps a doorman's `worker` from it
+  as from any body, and the other address gets no call. As before: a 200
+  and a 400 with their bodies as text, a body that is not JSON, an address
+  where nothing listens and a validator that never answers (no answer,
+  with the reason, after the timeout), the longer timeout of one call
+  (`timeoutSeconds`), a message of 2 MB arriving whole, and `getHealth`
+  with and without a doorman. The file of b2dcc2d went through the same
+  script: 26 of the 54 checks were as expected, and the 28 others are what
+  this step changes. There the other address got the signed message again
+  after a 307 or a 308 and a GET after a 301, 302 or 303; its words came
+  back as the validator's answer, and as the validator's health, under the
+  status 200; and a redirect to the validator's own address was followed
+  twenty times before the call gave up as no answer. Not run: a doorman,
+  TLS, a validator, a rig, a database, the masterpod.
+- The round of pulls. The change is plain new code: it reaches a
+  validator with the pull and the restart of a round, and a banker's pull
+  has no extra step for it. Nothing is installed, no database is changed,
+  no setting changes. After this step's commit the build adds its entry to
+  the short list of the round's `pull_steps.md`
+  (`Z-TestNet/upcoming_validator_pulls`).
 
 ## 20. The assisted signing rule (2026-11-07)
 
@@ -4354,3 +4450,2342 @@ message.
 - **The keyholder's two new boot lines**, `Share copies: bucket <name>,
   <n> waiting` and `Share copies: test file ok` or the reason, are not
   shown by this script. They are in the keyholder's journal.
+
+## 31. Seven small fixes for resilience (2026-11-19)
+
+Decided 2026-11-19 in a planning chat of two rounds, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/validator-resilience-plan-1.md`, built the
+same day in a chat of its own. The network is live since a soft launch a
+few days earlier and holds real accounts. Why: it has had one ignore vote,
+on 2026-11-16 at 15:47 UTC, naming validators 18 and 24. Neither was down.
+The vote's record says what a voter saw, `tail at position 288, own 289`,
+for both: the other 23 had written link 289 and these two had not. A
+validator that missed a write was always voted out: the leader waited,
+wrote, and only then started the vote, and by then every other validator
+had written, so the one that missed it failed every health check. A
+validator that was voted out was told nothing: validator 18 stayed out for
+3 hours 56 minutes and validator 24 for 12 hours 51 minutes, each until a
+wallet's transaction came in through it, and that transaction failed. And
+a validator that came back kept its old waiting rows, which block the
+account on that validator. Three more things were read in the code and
+not seen live: a validator that is up and does not count itself answers
+`503` to everything, passes the health check and cannot be voted out, and
+its join loop ends for good on any thrown error; a batch that is rolled
+back moves the counter behind `garlic_chain.position` on, after which that
+validator can never catch up; and a stop did not wait for a round.
+
+Seven fixes, lettered as in the planning chat: A, B, C, D, E, J and K. F,
+the leader's look at every validator's chain end before a round, is not
+among them: it has a plan of its own. This plan is about honest
+validators, not a validator that is corrupt on purpose. One build step in
+this repo, then a rig (31.5). Nothing touches the doorman, the wallet, the
+masterpod, the keyholder, the database schema, the registry, the genesis
+files or a settings file, and there is no new message between validators,
+no new route, no new variable and no package. Each fix changes only what
+the validator that runs it does, so a validator on this code and a
+validator on `6b27427` work together, and the code goes onto the
+validators one at a time.
+
+### 31.1 The decisions, as they apply to the code
+
+- **A. The health check asks "do you count yourself", where the question
+  is whether to ignore a validator.** `src/votes/votes.messages.js`
+  `checkReachable(validator, { mustCount = false } = {})`: after the
+  checks of section 19.3 (`200`, the checker's `chain.position` and
+  `chain.recordHash`, the checker's `leader`), with `mustCount` a health
+  whose `counted` is not `true` answers `{ reachable: false, reason:
+  'does not count itself' }`. It comes last, so every reason of before
+  stays as it was. Three callers pass `mustCount: true`: the originator's
+  check of a peer that refused (`findFailingRefusers`, same file), the
+  voter in an ignore vote (`src/votes/votes.service.js`
+  `receiveIgnoreVote`, `mustCount: payload.action === IGNORE`) and the
+  starter's own check before an ignore vote (`runVote`). An include vote
+  keeps the check of 19.3: a joiner does not count itself yet while the
+  others vote on it.
+- **B. A thrown error never ends the joining.**
+  `src/validators/join.service.js`: `startJoinLoop` runs `joinLoop`
+  through the new `keepJoining`, which catches whatever `joinLoop` throws,
+  logs `join loop failed: <message>; trying again`, waits
+  `VALIDATOR_CALL_TIMEOUT_SECONDS` as every other failed try does, and
+  runs the loop again. The line `join loop stopped: <message>` of a thrown
+  error is gone. The stop that needs a person stays a stop: `join loop
+  stopped: the own chain cannot reach the network tail`.
+- **A leader catches up before it counts itself, and then leads at once
+  (decision 11 of the plan).** `joinLoop`, the step "own id is that
+  leader": `catchUp()` first. A pass that stops ends the loop with the
+  line above. A pass that ends with another leader goes back to the sweep
+  at once. Otherwise `dropWrittenHeldRows()` (D), `setCounted(true)`,
+  `leading at position P`, and `runLeader()` in the background, so what
+  waited is written without waiting for the next transaction. Before, a
+  validator that the others named as leader counted itself at once, also
+  when it was one batch behind.
+- **C. The self-check.** `src/validators/self-check.js`, new, built like
+  `src/held-transactions/unapproved-sweep.js`: `startSelfCheck()` and
+  `stopSelfCheck()`, a timer that is unref'ed, `SELF_CHECK_EVERY_MS =
+  60_000`, the first check one interval after the start. One check,
+  `selfCheck()`, which never throws:
+  1. not counted (`isCounted`), or the busy flag held (`isBusy`): the last
+     finding is forgotten, nothing else;
+  2. the own table's leader is read (`findLeaderId`), then
+     `sweepHealth()`; no majority: forgotten, nothing else;
+  3. the finding, the first that holds: the majority's ignored list holds
+     the own id, `ignored by the network`; the majority's position is
+     above the own (`ownTail`), `behind the network (position P, the
+     network's Q)`; the majority names a leader, and it is not the own
+     table's, read again now and the same as before the sweep, `names
+     leader X, the network names Y`. An own leader that moved during the
+     sweep is no finding: the rig showed why (31.4). A validator whose own
+     position is above the majority's has no finding of any kind (31.4);
+  4. not counted or busy by now, since the sweep takes up to the call
+     timeout: forgotten, nothing else;
+  5. no finding: forgotten;
+  6. a finding, and the check before had none: remembered, `self-check:
+     <finding>`;
+  7. a finding, and the check before had one too, of whatever kind:
+     `self-check: <finding>, twice in a row; joining again`, forgotten,
+     `setCounted(false)`, `startJoinLoop()`.
+
+  An error is logged as `self-check failed: <message>` and changes
+  nothing. `src/server.js` starts the check in the `listen` callback,
+  after `startUnapprovedSweep()`, and stops it in `shutdown`.
+- **D. The waiting rows of a validator that comes back.**
+  `src/held-transactions/written-rows.js`, new. Two functions, each one
+  database transaction that deletes from the two child tables
+  (`escrow_arbitrations`, `guardian_votes`) and then from the five tables
+  of `HELD_TABLE_NAMES`, logs after the commit and resolves with the
+  number of rows the five tables lost; a database error is thrown.
+  `dropWrittenHeldRows()`: every row whose transaction the own chain
+  holds (`DELETE FROM <table> h WHERE EXISTS (SELECT 1 FROM garlic_chain g
+  WHERE g.transaction_id = h.transaction_id)`), approved or not, one line
+  a row: `dropped held <table> transaction <id as hex>: already on the
+  chain`. `clearHeldRows()`: every row, one line a row: `cleared held
+  <table> transaction <id as hex>: the join takes the leader's rows`.
+  Both are called by the join loop only, before the validator counts
+  itself, never while it is counted, so neither can cross a write:
+  `dropWrittenHeldRows` in the leader's step of `joinLoop` and at `case
+  COUNTED` of `joinThrough`, so at every start and after every catch-up;
+  `clearHeldRows` at `case INCLUDED`, right before `pullHeldRows`. That is
+  how a row the leader no longer holds goes, and how a row gets the
+  follow-ups it missed. While the joiner clears and pulls it answers `503`
+  to every POST but two, so nothing else writes those tables. Plain
+  deletes, as the sweep of section 21 is: only the waiting tables, never
+  the chain, the accounts, the logs or the archives.
+- **E. The counter is set to the chain's end before every write of
+  links.** `src/garlic-chain/garlic-chain.queries.js`
+  `prepareChainWrite(client)`, two statements: `SELECT
+  pg_advisory_xact_lock(hashtext('garlic_chain'))`, a lock that only
+  another writer of links waits for, held to the end of the database
+  transaction, so two writes never cross; then `SELECT
+  setval(pg_get_serial_sequence('garlic_chain', 'position'),
+  coalesce(max(position), 0) + 1, false) FROM garlic_chain`, so the next
+  link gets the tail's position plus one, 1 on an empty chain. It is the
+  first line after `BEGIN` in the three database transactions that insert
+  links: `writeTransactions` (`src/accounts/accounts.service.js`, the
+  batch), `replayLinks` (`src/garlic-chain/replay.service.js`, a catch-up
+  chunk) and `runGenesis` (`src/genesis/genesis.service.js`). The check in
+  `replayLink` that the counter gave the link's own position stays.
+  `checkChainWrite()`, same file, tries the two statements once in a
+  transaction that is rolled back; `src/server.js` calls it after the
+  database check and before genesis, and a start whose database user may
+  not run them stops with `Chain write check failed: <message>`. A banker
+  then sees it at the pull, not at the first transaction.
+- **J. The official list goes once more before any vote.**
+  `src/validators/validators.service.js` `settleRoundAnswers(answers,
+  resend, what, { secondSendFirst = false } = {})`. First every answer
+  with a reason is logged, `validator N <what>: <reason>`, in both steps
+  of the round and before any vote; before, a silence or a refusal was
+  logged nowhere when the vote passed. With `secondSendFirst`, which
+  `leadRound` passes at step 3 only, the call then goes once more to
+  every peer that gave no answer or refused, after the line `the call
+  goes once more to validator N` (`validators N, M` for several), and the
+  second answers take the place of the first. Then the vote, the one
+  further send to a silent peer after a failed vote, and the end of the
+  round, as sections 19 and 29 have them. A validator that wrote at the
+  first send answers the second with an empty list and writes nothing
+  twice: `writeApproved` finds no approved row. A validator that answers
+  `200` with fewer ids than the leader wrote is not sent to again: C
+  finds it. The ready announcement keeps its order.
+- **K. A stop waits for a round, a vote or a join.**
+  `validators.service.js`: a flag `stopping`; `stopBusySections()` sets
+  it, `isStopping()` reads it, and `takeBusy()` answers false once it is
+  set, so no round, vote or join starts any more. `votes.service.js`
+  `startVote` opens with `if (isStopping()) return;`, before it takes the
+  flag or queues anything: `drainReports` calls `startVote` for each
+  queued report and `startVote` queues a report it cannot run, so without
+  that line the queue would never empty during a stop. `server.js`
+  `shutdown`: `stopBusySections()`, then, while `isBusy()`, the line `a
+  round, a vote or a join is under way; stopping when it ends` and a wait
+  of at most `STOP_WAIT_MS` (30 seconds), looked at every 100
+  milliseconds; then `server.close` and the pool, as before. The safety
+  net is `STOP_WAIT_MS + 10_000`. The unit sets no stop timeout, so
+  systemd's own applies.
+- **No new setting.** The minute of the self-check and the 30 seconds of
+  the stop are constants in their files, as `SWEEP_EVERY_MS` is in
+  `unapproved-sweep.js`.
+- **What stays.** Every message, route, table and setting, and the
+  registry. "Every counted validator answers, or the network stops": no
+  quorum. A proof of acceptance or a final declaration that gets no
+  answer is logged only. A validator whose chain is ahead of the others',
+  or differs from theirs, stops and waits for a person. The wallet is
+  answered `202` whatever the validators said. The floor of 51 percent.
+
+### 31.2 The rollout
+
+- **One validator at a time, no shutdown.** The order is the user's:
+  validator 1 first, watched, then the others one at a time, each counted
+  again before the next one starts. Nothing but the validator's program
+  restarts: no `npm ci`, no database step, no doorman pull, no setting.
+- **The line for a worker**, as `banker@worker`. It is the line of
+  `~/Desktop/Z-TestNet/guides/operator-guide.md` step 11, point 3, with a
+  leader check between the pull and the restart. The user decided that
+  check: the restart line asks first whether the validator is the leader,
+  and does not restart a leader.
+
+  ```text
+  sudo -iu anos git -C /opt/anos/anossoftware pull --ff-only && node -e "fetch('http://127.0.0.1:3000/health').then((r) => r.json()).then((h) => { if (h.leader === h.validator.id) { console.log('This validator is the leader right now. Nothing was restarted. Wait for the next transaction, then paste the line again.'); process.exit(1); } }, () => {})" && sudo systemctl restart anos-validator && sleep 3 && sudo journalctl -u anos-validator -n 8 --no-pager -o cat
+  ```
+
+  The check asks the validator itself, on its worker, so it is exact to
+  the second. When the validator leads, nothing is restarted: wait for
+  the lead to move on, or send one transaction through, then paste the
+  line again. The pull then answers `Already up to date.` and the check
+  runs again. The check's three cases were tried on the Mac against a
+  stand-in health page (leads: stops; another leads: goes on; nothing
+  answers: goes on). The whole line was not, since a Mac has no systemd.
+  The line goes into
+  `~/Desktop/Z-TestNet/upcoming_validator_pulls/Nov_19/pull_steps.md` on
+  the user's word.
+- **What a restart costs the network**, while validators on `6b27427` are
+  still about. While the program is down, a transaction that needs its
+  yes waits up to `NO_ANSWER_WAIT_SECONDS`, then goes through. In the
+  seconds between `listening` and `counted` the validator answers `503`.
+  To an originator on `6b27427` that is a no that stands, and the
+  transaction is not approved. To an originator on this code it is a
+  validator that fails the health check: a wait, and then either the
+  validator is counted again or it is voted out and joins.
+- **An ignore vote on a validator that does not count itself** passes
+  only once every voter runs this code. Until then a voter on `6b27427`
+  finds such a validator reachable and answers no, and the vote fails as
+  it does today.
+- **Validators 18 and 24 delete nothing by hand.** Each should still hold
+  the transaction of link 289 (`e38cc911…`) as an approved row in
+  `pending`. The first start of this code should show `dropped held
+  pending transaction e38cc911…: already on the chain` on each. If the
+  line is not there, the row was not there.
+- **Not known before the first days: the self-check's traffic.** One
+  health answer through a doorman is 736 bytes (measured 2026-11-19).
+  With 24 asked once a minute and the connection set up each time, the
+  estimate is 2 to 8 GB a month for each validator, against the doorman's
+  own counter of 100 GB a month. Not measured. `sudo nft list quota inet
+  doorman egress-month` on a doorman shows it.
+
+### 31.3 Files
+
+Changed: `src/votes/votes.messages.js` (`checkReachable` and its comment,
+the call in `findFailingRefusers`), `src/votes/votes.service.js` (the two
+calls of `checkReachable`, the first line of `startVote`, one import),
+`src/validators/validators.service.js` (`stopping`, `takeBusy`,
+`stopBusySections`, `isStopping`, `settleRoundAnswers`, the call of step 3
+in `leadRound`, the comments of both), `src/validators/join.service.js`
+(`startJoinLoop`, the new `keepJoining`, the leader's step of `joinLoop`,
+two cases of `joinThrough`, one import, the opening comment and the
+comments of both functions), `src/garlic-chain/garlic-chain.queries.js`
+(`prepareChainWrite`, `checkChainWrite`),
+`src/accounts/accounts.service.js`, `src/garlic-chain/replay.service.js`
+and `src/genesis/genesis.service.js` (one line and one import each),
+`src/server.js` (the chain write check, `startSelfCheck`, `shutdown`,
+three imports). In seven of these files also the comments that 31.4
+lists.
+New: `src/validators/self-check.js`,
+`src/held-transactions/written-rows.js`. In the docs: the README
+("Running", the `garlic_chain` bullet of "Database", "The leader round",
+"Ignoring and joining", two lines of "Project layout") and this section.
+No file under `deploy/`, `network/`, `db/` or `scripts/` and no package
+file changes; the doorman is not touched.
+
+### 31.4 Notes from the build
+
+- **The build was made on main at `6b27427`**, with a clean working tree,
+  equal to GitHub. All 25 live validators ran that commit at 19:31 UTC on
+  2026-11-19. The code blocks of the plan's sections 1.1 to 1.9 are in
+  the code as the plan has them. Where the plan gives steps and no code
+  (its 1.6 and 1.8), the notes below say what was picked, and one of them
+  what the rig then changed.
+- **A validator that is ahead has no finding.** The plan's list of one
+  self-check (its 1.8) has no step for a validator that is ahead of the
+  others; its decision 12 says the check does nothing then. Built so:
+  when the own position is above the majority's, the check has no finding
+  of any kind, not `ignored by the network` and not another leader
+  either, and it forgets the last one. The own tail is read after the
+  sweep, as 1.8 orders its steps.
+- **A fault the rig found, fixed: "another leader" compared two
+  different moments.** As the plan has it, one check reads the others'
+  health and then the own table's leader. The look at the others lasts as
+  long as the slowest health answer, up to the call timeout. A round that
+  ends meanwhile hands the lead on: the own table then names the new
+  leader, the others' answers still name the old one, and a validator
+  that is in step has a finding. Two such checks a minute apart took it
+  out of the count. On the rig, with the proxy holding validator 5's
+  health answer for 6 seconds and its answer to the official list for 5,
+  and one transfer sent in 2.5 seconds before each of two checks of
+  validator 4: `self-check: names leader 3, the network names 2`, a minute
+  later `self-check: names leader 4, the network names 3, twice in a row;
+  joining again`, and validator 4, which had missed nothing and was the
+  leader by then, did not count itself for the 6 seconds its join took.
+  The proxy made both windows seconds wide so that the timing was
+  certain. On one computer they are a few milliseconds wide: 945
+  transfers in 150 seconds with nothing slowed brought no finding on the
+  code before the fix. On the live network they are as wide as the
+  slowest health answer and the slowest answer to an official list, and
+  with transfers coming in every few seconds, as a payout batch sends
+  them, two hits a minute apart are a matter of time. The fix, in
+  `src/validators/self-check.js`: the own leader is read before the sweep
+  as well, and "another leader" is a finding only when it is the same
+  before and after. An own leader that moved during the sweep means that
+  a round ended in between, and nothing is concluded from it. A validator
+  that really missed a hand-over keeps its old leader, so it is still
+  found (31.5, the missed hand-over). The same two transfers at the same
+  two checks after the fix: no line, and validator 4 stayed counted. The
+  other two findings need no such care. "Ignored" does not move with a
+  round. And the own tail is read after the sweep, which errs to the safe
+  side: a validator that writes when the others do is then level with
+  them or ahead of them, and ahead is no finding.
+- **One helper serves both deletes** of `written-rows.js`
+  (`deleteHeldRows`, private). On the two child tables
+  `dropWrittenHeldRows` runs the same statement as on the five tables: a
+  child row's `transaction_id` is its held row's. A child row gets no log
+  line.
+- **`checkChainWrite` leaves the counter at the chain's end.** A sequence
+  is not part of a database transaction, so the `setval` stays although
+  the check's transaction is rolled back. Nothing else writes at that
+  point of the boot, so it only puts the counter where the next write
+  would put it.
+- **Three sends at the write step, at the most.** After the second send
+  of J and a vote that failed, the call goes once more to a peer that
+  gave no answer, as before this build. The line of a peer that is silent
+  then still reads `gave no answer twice; the round ends`.
+- **A reason can be in the log twice, and the second answers get no line
+  of their own.** `settleRoundAnswers` logs every reason at once, and
+  logs the reason that ends the round again at its end, as it did before.
+  When the second send of J gets no answer either, the leader's log goes
+  from `the call goes once more to validator N` straight to the vote, ten
+  seconds later (31.5, point 4). The reason of the first send is in the
+  log, which is what the plan asks for.
+- **Seen on the rig and left as it is: the minute a transfer waits for a
+  validator that is back at once.** An originator that has reported a
+  validator looks at its own table once a second, for at most
+  `NO_ANSWER_WAIT_SECONDS`, until that validator is ignored, and only
+  then sends the approval once more. A validator that was only restarting
+  is counted again within seconds and is not voted out, and the transfer
+  still waits the whole minute: 60.2 seconds on the rig, twice (31.5, the
+  restart while transfers come in, and point 9). Before this build such a
+  transfer waited the same minute. A validator that is stopping still
+  answers for about three seconds on the connections the others hold
+  open, `counted: true` in its health, which is why the vote on it
+  failed. To end the wait as soon as the reported validator passes the
+  health check again, or to have a stopping validator say so in its
+  health, would be a change of design. It is not in this plan.
+- **One sentence of section 19.5 that the code does not bear out.** Its
+  first follow-up says a validator that missed an official list keeps
+  those transactions approved, and "a later round would write them again
+  on that validator alone". It would not: the official list holds only
+  the ids that every list holds, so no later list names those rows. They
+  stay, approved, and the validator refuses the account's next
+  transaction while it passes the health check. That is what
+  `dropWrittenHeldRows` ends. Section 19.5 is the record of its build and
+  is left as it was.
+- **Comments the plan does not name** were first left as they were, where
+  the build made them say less than the code does, and listed for the
+  user, who said to bring them in line (2026-11-19, "Fix the comments and
+  start the rig"). Brought in line: in
+  `src/validators/validators.service.js` the comment of `takeBusy` (it
+  also answers false during a stop); in `src/votes/votes.service.js` the
+  comments of `startVote` (nothing starts during a stop), of
+  `receiveIgnoreVote` and of `runVote` (an ignore vote also asks about
+  `counted`); in `src/validators/join.service.js` the comment of
+  `setCounted` and the last sentence of the opening comment (the
+  self-check clears the flag too); in `src/server.js` the comment of
+  `shutdown` (the wait comes first); the comments of the three writers,
+  `writeTransactions`, `replayLinks` and `runGenesis` (each now names the
+  two opening statements); and in the README's "Project layout" the line
+  of `garlic-chain.queries.js` (it listed three functions; there are
+  five). Comments only: no line of code changed with them.
+- **Left as it was: `boot_error` of `scripts/bootstrap-worker.sh`.** It
+  reads a unit's journal for `Registry failed`, `Genesis failed`, `Could
+  not connect`, `KMS self-test failed` and `Error:`. The new stop line,
+  `Chain write check failed: <message>`, is not in that list, so the
+  worker script would report such a validator after its ninety seconds,
+  without that line. On a worker the database user owns its tables
+  (`scripts/setup-db.sh` applies the schema as that user), so the check is
+  expected to pass there.
+- **The import ring.** `self-check.js` is imported by `server.js` only
+  and `written-rows.js` by `join.service.js` only, and neither uses an
+  imported name while it loads, only inside functions. `votes.service.js`
+  already imported `validators.service.js`.
+- **Checks.** `node --check` passed on the eleven source files, the nine
+  changed and the two new, with Node 24.22.0. The names of the changed
+  and the new import lines were read against their modules' exports:
+  `isStopping`, `isBusy` and `stopBusySections` in
+  `src/validators/validators.service.js`; `prepareChainWrite` and
+  `checkChainWrite` in `src/garlic-chain/garlic-chain.queries.js`;
+  `clearHeldRows` and `dropWrittenHeldRows` in
+  `src/held-transactions/written-rows.js`; `startSelfCheck` and
+  `stopSelfCheck` in `src/validators/self-check.js`; `ownTail` and
+  `sweepHealth` in `src/garlic-chain/replay.service.js`; `isCounted`,
+  `setCounted` and `startJoinLoop` in `src/validators/join.service.js`;
+  `findLeaderId` in `src/validators/validators.queries.js`; `pool` in
+  `src/db/pool.js`; `HELD_TABLE_NAMES` in
+  `src/held-transactions/held-transactions.js`; `env` in
+  `src/config/env.js`. One check more than the plan lists: Node linked the
+  whole module graph from `src/server.js` once, with an empty
+  environment. The load stopped at the first settings read (`Missing
+  required environment variable: PGDATABASE`), after every import of
+  every module had been matched to an export. No key file was read, no
+  database connection made, no server started. The same load with one
+  wrong name put in front of it stopped with `does not provide an export
+  named`, so the check does see a wrong name. No statement was run
+  against a database in that step: the rig was the first run. After the
+  rig, with its fix and the comments in: `node --check` on the eleven
+  files again, the link check again, and the rig's copy of the code
+  compared with the working tree, file by file: equal, but for the rig's
+  own genesis pair. `git status` showed the thirteen files of 31.3 and no
+  other, on `main` at `6b27427`.
+
+### 31.5 The rig
+
+The rig (the plan's section 2), 2026-11-19, on this Mac, everything in the
+build chat's scratchpad and nothing in the repo. Built as the rig of 19.5
+and the payout tool's
+(`~/Desktop/Z-TestNet/og app signer/test/README.md`) were:
+
+- **Two copies of the code**, without `.git`, `node_modules` linked: the
+  working tree, and `6b27427` from `git archive`. Each validator is one
+  process started from one of the two copies, so a validator changes its
+  code by a stop and a start from the other copy.
+- **Five databases**, `anosrig1` to `anosrig5`, on Homebrew PostgreSQL
+  17.11 by `scripts/setup-db.sh`, under a role of the rig's own,
+  `anosrig`, which owns the tables and the counter as the database user
+  does on a worker. No other role or database of the Mac was touched.
+- **A key per validator**, in the format `scripts/make-keys.js` writes, in
+  owner-only files, the private halves never shown. The values that
+  differ per validator in five machine files, given as the second
+  `--env-file`. The network's own settings as they are: the call timeout
+  of 10 seconds, the wait of 60, the self-check's minute.
+- **A registry of five rows**, `http://127.0.0.1:3711` to `3714` for
+  validators 1 to 4, and the proxy's address for validator 5.
+- **A genesis pair and a signer of the rig's own**, built as
+  `~/Desktop/Z-TestNet/anossoftwarescripts/make-genesis-accounts.mjs` and
+  `~/Desktop/Z-TestNet/og app signer/transfer.mjs` build theirs, with the
+  rig's OG keys in an owner-only file in the scratchpad. The keys file on
+  the Desktop was never read. Every transfer paid the rig's fund account
+  or the one extra account the rig made.
+- **A stand-in for the masterpod**, asked once, for that one account.
+- **No doorman**: the validators called each other directly.
+- **One tool of the rig's own: a small proxy in front of validator 5**,
+  which that validator's registry row points at, so the other four reach
+  validator 5 through it. It can hold back the first or every `POST
+  /official-list`, or one `POST /final-declaration` (not passed on, no
+  answer); hold the answer to an official list or to `GET /health` for
+  some seconds; and answer `counted: false` in `/health` with `503` to
+  every POST.
+- Every line a validator printed got the time of day in front, to the
+  millisecond, by a filter on its output.
+
+The rig found one fault, in the self-check (31.4). Points 1 to 4 ran
+before the fix and again after it, with the same lines; points 5 to 9 ran
+on the fixed code. The lines and numbers below are of the runs on the
+fixed code, which is the code of this build.
+
+What it showed, in the plan's order:
+
+1. **Ground.** Five up on empty databases. No boot printed `Chain write
+   check failed`. Genesis wrote links 1 and 2 behind the two new opening
+   statements. Validator 1, the registry's first leader, logged `network
+   tail: position 2, 2 of 2 agree, leader 1` and then `leading at
+   position 2`: the catch-up pass before it counts itself. The other four
+   `counted at position 2`. One account creation and six transfers, sent
+   through all five validators, landed at positions 3 to 9 on all five
+   with one record hash, and the lead went all the way round. Validator 3,
+   stopped with SIGTERM while idle, had ended 0.1 seconds later and was
+   `counted at position 8` 0.16 seconds after its start. Later, when the
+   fix went onto the rig, all five were restarted one at a time, the lead
+   moved on by one transfer before the leader's turn, and each was counted
+   again before the next.
+2. **A.** The proxy answered `503 not counted yet` to every POST for
+   validator 5 and `counted: false` in its health. A transfer through
+   validator 2: `validator 5 refused and fails the health check: does not
+   count itself`, the report to the leader, `ignore vote e4b4c121 naming
+   validator 5: 3 voters`, three times `voted yes (5: does not count
+   itself)`, `validator 5 ignored`, and the transfer written by the other
+   four at position 975. The wallet's call was answered after 1.1
+   seconds. The vote's row on validator 1: action ignore, named `{5}`,
+   outcome passed, the first voter's results `{"5": "does not count
+   itself"}`. Validator 5 itself was up and counted itself all along, and
+   was told nothing. With the proxy passing everything on again and
+   nothing sent through validator 5: `self-check: ignored by the network`
+   24 seconds after the vote, `self-check: ignored by the network, twice
+   in a row; joining again` a minute later, one link replayed, the include
+   vote, `counted at position 975`. It was out of the count for 85
+   seconds.
+3. **J.** The proxy held back the first official list to validator 5.
+   The leader, validator 4, ten seconds later: `validator 5 did not write:
+   no answer: The operation was aborted due to timeout`, `the call goes
+   once more to validator 5`. Validator 5 logged `wrote: 1` at the second
+   send, the leader `validator 5 wrote 1`, and the final declaration went
+   round. Position 976 on all five. No vote ran: `ignore_votes` on
+   validator 1 held six rows before and six after.
+4. **C and D, the case of 2026-11-16.** The proxy held back both sends.
+   The leader, validator 1: the reason, `the call goes once more to
+   validator 5`, then `ignore vote 6aa7fa43 naming validator 5: 3 voters`,
+   three times `voted yes (5: tail at position 977, own 978)`, the words
+   of the live network's vote, and `the round starts again`. Validator 5
+   then stood at position 977 with the others at 978, and its `pending`
+   held the transfer `65d4968a…`, approved and not on its own chain. With
+   nothing sent through it: `self-check: ignored by the network` 27
+   seconds after the vote, `…twice in a row; joining again` a minute
+   later, `replayed 1 links from validator 1, now at position 978`, the
+   include vote, `cleared held pending transaction 65d4968a…: the join
+   takes the leader's rows`, `counted at position 978`, 88 seconds after
+   it was voted out. Its `pending` was empty. A second transfer from the
+   same account, through validator 2, was written by all five at position
+   979. In the run before the fix the first of the two findings came
+   before the vote had passed and read `behind the network (position 12,
+   the network's 13)`; the second, `ignored by the network`, still made
+   it join: two findings of different kinds count as two in a row.
+5. **D, at a start.** Validator 3 was stopped. By hand, five transactions
+   its own chain already held went back into its five waiting tables,
+   approved, one in each, with one row in `escrow_arbitrations` and one in
+   `guardian_votes`; and one made-up row that was really waiting went into
+   `pending`, not on the chain. At the start: `join: counted`, five lines
+   `dropped held <table> transaction …: already on the chain`, one for
+   each of `pending`, `locked_transactions`, `assisted_transfers`,
+   `escrow_transfers` and `fund_proposals`, then `counted at position
+   972`. The five rows and the two child rows were gone, and the made-up
+   row was still there. It was taken out by hand again.
+6. **E.** A trigger on validator 4's `garlic_chain` made one batch fail:
+   `batch write failed: the rig makes this batch fail`, `wrote: 0`, and on
+   the leader `validator 4 wrote 0`, with no second send. The trigger was
+   removed at once. Validator 4 then had 972 links and top position 972,
+   and its counter gave 974 next: the failed batch had used up 973. With
+   nothing sent: `self-check: behind the network (position 972, the
+   network's 973)`, a minute later `…twice in a row; joining again`,
+   `replayed 1 links from validator 1, now at position 973`, `join:
+   counted`, `dropped held pending transaction c2c6ea56…: already on the
+   chain`, `counted at position 973`. On all five then: 973 links, top
+   position 973, the counter at 974 next.
+7. **K.** The proxy held validator 5's answer to the official list for 6
+   seconds. SIGTERM reached the leader, validator 2, 39 milliseconds
+   after `official list: 1`: `SIGTERM received, shutting down...`, `a
+   round, a vote or a join is under way; stopping when it ends`, and 6
+   seconds later `wrote 1`, four times `validator N wrote 1`, four times
+   `answered the final declaration 200`, `validator 3 is the leader`. The
+   process had ended 6.1 seconds after the signal. All five chains stood
+   at position 974 with one record hash while it was down. Started again,
+   it was `counted at position 974`.
+8. **B.** Validator 3 was started with the proxy holding validator 5's
+   health answer for 5 seconds, so that its first look at the others
+   lasted that long. In that time the database's superuser closed its
+   database to new connections and ended the open ones. `join loop failed:
+   database "anosrig3" is not currently accepting connections; trying
+   again`. The connections were allowed again, and after the wait:
+   `network tail: position 974, 4 of 4 agree, leader 3`, `leading at
+   position 974`. It was the leader at that moment, so the same run shows
+   an idle leader that is restarted: the catch-up pass, then the lead.
+9. **Old and new together.** Validators 1 and 2 on `6b27427`, validators
+   3, 4 and 5 on this code. Five transfers, one through each validator,
+   landed at positions 1072 to 1076 on all five, and each of the five led
+   one round. Validator 2, on `6b27427`, restarted: `counted at position
+   1076`. Validator 4, on this code and the leader at that moment,
+   restarted while idle: `network tail: position 1076, 4 of 4 agree,
+   leader 4`, `leading at position 1076`. Then the vote of point 2, with
+   validator 3 (this code) leading and the transfer sent in through
+   validator 4 (this code): `validator 5 refused and fails the health
+   check: does not count itself`, the report, `ignore vote 8babaf20 naming
+   validator 5: 3 voters`, `validator 1 voted no (5: ok)`, `validator 2
+   voted no (5: ok)`, `validator 4 voted yes (5: does not count itself)`,
+   `ignore vote 8babaf20 failed: validator 1 voted no (5: ok)`. Nobody was
+   ignored. With the proxy passing everything on again, the originator
+   waited out its `NO_ANSWER_WAIT_SECONDS`, sent the approval to validator
+   5 once more, and the transfer was answered after 60.2 seconds and
+   written by all five at position 1081. All five were in step after it.
+
+Tried besides the nine points, all on the fixed code unless it says
+otherwise:
+
+- **The self-check's leader read**, the fault of 31.4: with a round under
+  way at two checks in a row, before the fix and after it. And a control
+  after the fix: a whole round, write and hand-over, begun and ended
+  inside each of two checks in a row (the proxy holding validator 5's
+  health answer for 6 seconds, a transfer sent in 2 seconds after each
+  check began). No line: the own position was above the one the others
+  had answered, and that is no finding.
+- **A plain run of transfers**, nothing slowed or held: one after the
+  other for 150 seconds, through each validator in turn. Before the fix,
+  945 transfers, positions 17 to 961 on all five with no hole, the lead
+  round and round, and not one self-check line. After the fix, as the
+  last run of the rig, 935 transfers, positions 1910 to 2844, 2844 links
+  and top position 2844 on all five, the counter at 2845 next, and again
+  no self-check, join or vote line, with two self-checks of each
+  validator inside the run.
+- **The missed hand-over.** The proxy held back the final declaration
+  that named validator 5 the next leader: `validator 5 gave no answer to
+  the final declaration: The operation was aborted due to timeout`. The
+  other four named validator 5 the leader, and validator 5 still named
+  validator 4. A second transfer was approved by all five and stayed in
+  `pending` on all five: nobody led a round. On `6b27427` nothing would
+  have moved it, by the code; that was not tried. With nothing more sent,
+  validator 5: `self-check: names leader 4, the network names 5`, a
+  minute later `…twice in a row; joining again`, `validator 5 is the
+  leader`, `leading at position 971`, `official list: 1`, and the
+  transfer was written by all five at position 972, 98 seconds after it
+  had been approved. So the fix of 31.4 still finds a validator whose own
+  leader stands still, and a validator that finds itself the leader leads
+  at once.
+- **A restart while transfers come in.** Transfers one after the other
+  through validators 1, 2 and 4, and SIGTERM to validator 3 in the middle
+  of it. The write that was under way reached it: `wrote: 1` 3
+  milliseconds after `SIGTERM received`. It took 3.2 seconds to end: the
+  other validators' open connections to it stay up for about three
+  seconds after their last use, and the stop waits for them, as it did
+  before this build. A restart while idle took 0.1 seconds. The next
+  transfer's approval got no answer from it, and the vote that followed
+  failed: two voters found the connection refused, the third still
+  reached it on its open connection and answered `voted no (3: ok)`. The
+  validator was counted again 3.4 seconds after the signal, by a plain
+  `join: counted`. The transfer waited out the originator's
+  `NO_ANSWER_WAIT_SECONDS` and was answered after 60.2 seconds, approved
+  by all five and written. That is the cost of a restart the rollout
+  names (31.2), seen: one transfer that waits a minute, nothing lost. 92
+  transfers in that run, one slow, all five chains equal at the end.
+- **The first night of the rollout.** Validator 5 alone on this code,
+  validators 1 to 4 on `6b27427`: 820 transfers in 130 seconds, through
+  each validator in turn, written by all five (positions 1082 to 1901).
+  Validator 5's self-check ran three times in that time and logged
+  nothing. Restarted while idle, it was `counted at position 1901` 0.17
+  seconds after its start.
+- **What B changes, seen on `6b27427`.** Point 8's cut on a validator
+  that ran `6b27427`: `join loop stopped: database "anosrig3" is not
+  currently accepting connections`. Forty seconds later, the database
+  long open again, it still answered `counted: false`, as validator 24
+  did on the launch evening, until it was restarted.
+- **What E prevents, seen on `6b27427`.** The trigger of point 6 on a
+  validator that ran `6b27427`: `wrote: 0`, 1903 links, the counter at
+  1905 next. Restarted on `6b27427`, as a banker would restart a
+  validator that is behind: `chain replay: position 1904: the identity
+  column gave position 1905`, then 1906, 1907, 1908, and after every wait
+  four more. It answered `counted: false` and could never catch up, and
+  every try moved its counter further on. The same validator, started on
+  this code: `replayed 1 links from validator 1, now at position 1904`,
+  `join: counted`, `dropped held pending transaction 37ec1f5f…: already
+  on the chain`, `counted at position 1904`, and on all five 1904 links,
+  top position 1904, the counter at 1905 next. So the first start of this
+  code also heals a validator that `6b27427` had left in that state.
+- **The start check without the permission.** A sixth throwaway database
+  whose tables belonged to another role, the validator's database user
+  allowed to read and write the rows and not to set the counter:
+  `Connected to PostgreSQL …`, `Chain write check failed: permission
+  denied for sequence garlic_chain_position_seq`, and the process ended
+  with code 1, before genesis.
+- **The leader check of the pull line** (31.2), against the rig's health
+  pages in place of a stand-in. On the leader: the message `This
+  validator is the leader right now. Nothing was restarted. …` and the
+  line stops with code 1. On another validator, and on a port where
+  nothing answers: nothing printed, and the line would go on.
+
+What the rig could not show:
+
+- The doorman: how it wraps the health answer, its `502`, `503` and
+  `504`, its rate limit and its certificates. And the real network:
+  twenty-five validators and the distances between them.
+- How wide the two windows of 31.4's fault are on the real network. The
+  proxy made them seconds wide; on one computer they are milliseconds.
+- The self-check's traffic (31.2).
+- The stop's limit of 30 seconds: the round of point 7 lasted 6. A stop
+  during a vote or a join this validator leads: only a round was stopped.
+- The clear at a join with rows of the other four waiting tables, and a
+  pull that brings rows: every row cleared on the rig was a `pending`
+  row, and the leader held no waiting row at any of those joins. Point 5
+  put rows into all five tables and both child tables for the other
+  delete.
+- A validator that is ahead of the others while something else differs:
+  the control case above is the only run in which the "ahead" rule
+  decided.
+- The whole pull line: a Mac has no systemd. `systemctl restart` sends
+  the SIGTERM the rig sent; the unit's own time limits were not there.
+
+The end of the rig: the five validators, the proxy and the stand-in
+stopped, the five databases and the role `anosrig` dropped, the sixth
+database dropped right after its one start. No other role or database of
+the Mac was touched. The rig's folder, with its tools, keys and logs,
+stayed in the build chat's scratchpad and is not kept.
+
+## 32. The look before a round (2026-11-19)
+
+Decided 2026-11-19 in a planning chat of its own, over two rounds of
+questions, the plan FINAL at
+`~/Desktop/Z-TestNet/forclaude/validator-resilience-plan-2.md`, built the
+same day in a chat of its own. It is fix F of the resilience work, the
+last piece, which section 31 left to a plan of its own. Why: a validator
+that misses a write is one batch shorter than the others, and it can
+still be counted. Two ways lead there. Its own batch failed and it
+answered the official list with `200` and no ids: the leader logs
+`validator N wrote 0` and goes on. Or the leader died while it handed out
+the list, and only some validators got it. Such a validator keeps the
+missed transactions as approved rows. Its next ready list still names
+them, the next official list is the overlap of every ready list and
+leaves them out, and so it writes the next batch onto its shorter chain.
+From that moment it is on a chain of its own: its catch-up fails on
+`recordHash does not chain on the previous link`, and only a wipe by hand
+mends it. When a list reached only some validators, the same thing splits
+the whole network in two. The self-check of section 31 finds a validator
+that is behind and brings it back, after one to two minutes. Nothing
+looked before the next write. This build closes that window: a leader
+looks at every counted validator's chain end before it sends anything,
+and nothing is written while they differ. The one ignore vote the live
+network has had, on 2026-11-16, was validators 18 and 24 one link behind.
+That case, one or a few validators behind, is what this build heals
+without a person.
+
+This plan is about honest validators, as section 31 is. One build step in
+this repo, then a rig (32.5). Nothing touches the doorman, the wallet,
+the masterpod, the keyholder, the database schema, the registry, the
+genesis files or a settings file. There is no new message between
+validators, no new field in a message, no new route, no new variable and
+no package. The fix changes only what the validator that runs it does, so
+a validator on this code and a validator on older code work together, and
+the code goes onto the validators one at a time.
+
+### 32.1 The decisions, as they apply to the code
+
+- **The rule.** A leader writes only when every counted validator's chain
+  end, the position and the record hash of its last link, is the same as
+  its own. If not, nothing is written in that pass.
+  `src/validators/validators.service.js` `leadRound` has a new step 0,
+  right after `if (own.length === 0) return;` and before the ready
+  announcement: `lookAtChainEnds()`. A finding other than `level` logs
+  `chain ends differ: <the groups>` and goes to the new
+  `settleChainEnds(look)`, which answers `RESTART` (the loop goes round:
+  the leader check, the ready list and the look run again) or null (the
+  round ends). A validator that is not the leader, or has nothing to
+  write, returns before the look, as before: a leader with nothing to
+  write does not look.
+- **The look reads the health pages.** `src/validators/chain-ends.js`,
+  new. `lookAtChainEnds()`: the counted peers (`findCountedPeers`), this
+  validator's own chain end (`ownTail`), then `getHealth` on every peer
+  at once. An answer whose `chain` is an object with an integer
+  `position` and a string `recordHash` gives that peer's chain end. Every
+  other answer puts the peer's id on the `unread` list: no answer within
+  the call timeout, a body that is not an object, no `chain`, or a
+  `chain` of another shape. It resolves with the judgement below and
+  `own` added to it. Nothing new is sent between validators: `chain` has
+  been in every validator's health since the catch-up build (section 19),
+  so every validator on the network answers it, whatever code it runs.
+- **Most win: the judgement.** `judgeChainEnds({ ownId, own, ends,
+  unread })`, same file. It reads no table and makes no call. No chain
+  end that was read differs from the own: `level`. Otherwise the chain
+  ends are grouped by position and record hash, this validator's own
+  among them, the largest group first and the higher position first on a
+  tie. The counted validators are the ones read, the ones not read and
+  this one. The largest group is the network's chain end when it holds
+  more than half of them (`largest.ids.length * 2 > counted`). The five
+  findings:
+
+  | Finding        | When | It carries |
+  | -------------- | ---- | ---------- |
+  | `level`        | no chain end that was read differs from the own | nothing more |
+  | `noMajority`   | no chain end is held by more than half of the counted validators | `line` |
+  | `othersDiffer` | the own chain end is the network's, and others are not at it | `line`; `ids`, the validators that differ, ascending |
+  | `leaderBehind` | the own chain end is not the network's, and the network's position is above the own | `line`; `network`, the network's chain end |
+  | `leaderApart`  | the own chain end is not the network's, and the network's position is the own or below it: this validator is ahead, or on a chain that does not fit | `line`; `network` |
+
+- **The line.** `describeChainEnds`, same file, private: the groups in
+  words, for the log. A group of more than half is given as a count,
+  every other group by its ids; then the own position; then, when some
+  were not read, their ids. A record hash is cut to its first eight
+  characters. As a leader logs them:
+
+  ```text
+  chain ends differ: 23 validators at position 971 (ab12cd34); validators 18, 24 at position 970 (ef567890); own position 971 (ab12cd34)
+  chain ends differ: 24 validators at position 971 (ab12cd34); validator 7 at position 970 (ef567890); own position 970 (ef567890)
+  chain ends differ: validators 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 at position 971 (ab12cd34); validators 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 at position 970 (ef567890); own position 970 (ef567890)
+  chain ends differ: 21 validators at position 971 (ab12cd34); validators 22, 23 at position 970 (ef567890); own position 971 (ab12cd34); no chain end read from validators 24, 25
+  ```
+
+- **What the leader then does.** `settleChainEnds(look)`, in
+  `validators.service.js` right below `leadRound`. Nothing is written in
+  any of the four cases.
+  - `othersDiffer`, validators that are not at the network's chain end
+    while the leader is. One ignore vote naming them, `runVote(look.ids,
+    IGNORE)`, inside the round's busy section, as `settleRoundAnswers`
+    runs its vote. The vote that exists is used as it is. Its starter
+    drops a validator that passes the starter's own health check by then
+    (`validator N answers; no vote`). Each voter compares the named
+    validator's chain end with its own (section 19.3), so the vote passes
+    with voters on older code too. Passed: `the round starts again`. Not
+    passed: one more look, since a validator that caught up meanwhile is
+    level by now. Level: `the round starts again`. Otherwise `nothing is
+    written: the chain ends still differ`, and the round ends. A
+    validator that was voted out because it is behind comes back by its
+    own self-check (section 31). One that is ahead, or on a chain that
+    does not fit, stops and waits for a person, as before. It does not
+    rebuild itself.
+  - `leaderBehind`. `behind the network (position P, the network's Q);
+    joining again`, then `setCounted(false)` and `startJoinLoop()`
+    (`src/validators/join.service.js`), which is what the self-check does
+    after two findings, and the round ends. The join loop of section 31
+    catches the validator up and, while the others still name it leader,
+    has it lead at once (`leading at position Q`). No vote.
+  - `leaderApart`, a leader that is ahead of the network or on a chain
+    that does not fit. It cannot name most of the network in a vote. It
+    hands the lead on with the message an empty round already sends:
+    `findNextCounted`, `setLeader(nextLeader)`, `sendFinalDeclaration({
+    transactionIds: [], nextLeader })`, one line for each answer as step
+    4 of the round logs them, then `own chain end is not the network's:
+    nothing is written, validator N is the leader`, and the round ends.
+    The next leader's look finds this validator differing, and that
+    leader's vote takes it out. Step 4 of `leadRound` is left as it is:
+    the hand-on has its own copy of those lines.
+  - `noMajority`. `nothing is written: no chain end is held by more than
+    half of the counted validators`, and the round ends. After a list
+    that reached half of the validators, the ones that are behind find it
+    by their self-check and catch up. On two real chains a person
+    decides.
+- **Chain ends only.** A health page also carries `leader` and `counted`,
+  and the health check of a vote compares them (`checkReachable`,
+  sections 19.3 and 31.1). The look does not. A new leader starts its
+  round the instant it gets the final declaration, and another validator
+  may get its copy a moment later and still name the old leader. That is
+  the fault of 31.4, two answers from two moments, in another place. A
+  chain end has no such moment: every validator that answered the
+  official list had committed its batch before it answered, and the final
+  declaration goes out after those answers. Inside the leader's own round
+  nothing else writes.
+- **A health page that cannot be read is not held against a validator.**
+  It is not compared, and it counts for nobody when "more than half" is
+  worked out. With nothing else differing the look finds `level` and logs
+  nothing. With something else differing the line ends in `no chain end
+  read from validator N`. The round's own steps meet that validator next,
+  as before: no answer to the ready announcement starts the vote. So a
+  validator that is behind and whose health page cannot be read in that
+  moment is missed for that round. Named here, not closed.
+- **Where the look sits, and when it runs again.** After "am I the
+  leader, and does something wait" and before the ready announcement. It
+  runs again whenever the round starts again: after a passed vote of
+  `settleRoundAnswers` as well as after `settleChainEnds`. After a vote
+  of `settleChainEnds` that did not pass there is one more look inside
+  it. That look tells the case where the round goes on, a validator that
+  caught up in between, from the case where the chain ends still differ
+  and the round ends.
+- **One line of the join changes.** `join.service.js` `joinThrough`,
+  `case BEHIND`: after a catch-up pass that brought nothing new (the own
+  position is what it was when the request went out), the joiner waits
+  `VALIDATOR_CALL_TIMEOUT_SECONDS` before it asks again. A joiner that
+  the leader answers `behind` while it is already level with most used to
+  ask again at once, with a read of every health page each time round,
+  for as long as the leader itself was out of step. That had been so
+  since the catch-up build. The `noMajority` case leans on this path for
+  up to two minutes, with up to twelve validators in it. Nothing else in
+  the file's code changes.
+- **The cost.** One health read of every counted peer more in every round
+  that a validator on this code leads: 24 on the network, each through a
+  doorman, 736 bytes an answer (measured 2026-11-19 for section 31). The
+  round is longer by the slowest of them, at most the call timeout of 10
+  seconds. Not measured on the network.
+- **No new setting, message, field, route, table or package.**
+- **What stays.** Every message, route, table and setting, and the
+  registry. "Every counted validator answers, or the network stops": no
+  quorum. The ignore vote and its health check, the include vote, the
+  join through the leader. The self-check: it still does nothing for a
+  validator that is ahead. A validator whose chain is ahead of the
+  others', or does not fit theirs, is now voted out before anything is
+  written; it then stops and waits for a person, as before. A round that
+  ended without writing is led again at the next transaction, as every
+  round that ends early is: nothing makes a leader look while nothing
+  waits. A proof of acceptance or a final declaration that gets no answer
+  is logged only.
+- **Known and accepted: a list that reached fewer than half** (the plan's
+  decision 10). The few that got it are right, but they differ from most.
+  They are voted out and wait for a person. It needs a leader that dies
+  in the very moment it hands out a list.
+- **Out of this build.** The follow-ups are the plan's section 5, written
+  there and on no other list: sparing the few that are ahead the wipe; a
+  round that ended without writing, led again as soon as the validators
+  are level; a validator that is behind and whose health page cannot be
+  read; a validator that is ahead and is restarted before the others have
+  written; the minute an originator waits for a validator that was only
+  restarting (31.4); what the look and the self-check send, measured on
+  the network.
+
+### 32.2 The rollout
+
+- **One validator at a time, no shutdown**, as in 31.2. The order is the
+  user's: validator 1 first, watched, then the others one at a time, each
+  counted again before the next one starts. Nothing but the validator's
+  program restarts: no `npm ci`, no database step, no doorman pull, no
+  setting. A start prints the same lines as before this build.
+- **The line for a worker**, as `banker@worker`, is the one of
+  `~/Desktop/Z-TestNet/upcoming_validator_pulls/Nov_19/pull_steps.md`,
+  step 3, which is the line of 31.2 with its leader check:
+
+  ```text
+  sudo -iu anos git -C /opt/anos/anossoftware pull --ff-only && node -e "fetch('http://127.0.0.1:3000/health').then((r) => r.json()).then((h) => { if (h.leader === h.validator.id) { console.log('This validator is the leader right now. Nothing was restarted. Wait for the next transaction, then paste the line again.'); process.exit(1); } }, () => {})" && sudo systemctl restart anos-validator && sleep 3 && sudo journalctl -u anos-validator -n 8 --no-pager -o cat
+  ```
+
+  The pull papers of this build go into a new folder of
+  `~/Desktop/Z-TestNet/upcoming_validator_pulls`, on the user's word.
+- **While validators on older code are about.** The look runs in every
+  round that a validator on this code leads, and it looks at validators
+  on any code: the health page, the ignore vote and the final declaration
+  are in the code all 25 run today. A leader on older code does not look.
+  It leads as today. A validator that is voted out comes back by itself
+  only when it runs the self-check of section 31. One still on `6b27427`
+  comes back at its pull, or when a wallet's transaction goes through it,
+  as today.
+- **What to look for on validator 1**, in its journal: `chain ends
+  differ|nothing is written|joining again|own chain end is not`. None of
+  these lines is expected on a network that is in step. What the look
+  sends is seen on its doorman: `sudo nft list quota inet doorman
+  egress-month`.
+- **The way back** is the one of the Nov_19 papers: `git reset --hard` to
+  the commit before this build and a restart. This build leaves nothing
+  in the database.
+
+### 32.3 Files
+
+New: `src/validators/chain-ends.js` (`lookAtChainEnds`, `judgeChainEnds`,
+the five findings, the private `describeChainEnds`).
+Changed: `src/validators/validators.service.js` (two imports, step 0 in
+`leadRound` and in its comment, the new `settleChainEnds`) and
+`src/validators/join.service.js` (`case BEHIND` of `joinThrough`, and
+three comments: the last sentences of the opening comment, `setCounted`,
+`joinThrough`). In the docs: the README ("The leader round", one
+paragraph; "Ignoring and joining", the paragraphs "Joining" and "The
+self-check"; one line of "Project layout") and this section.
+Not changed: `src/votes/` (the vote and its health check are used as they
+are), `src/validators/self-check.js`,
+`src/validators/validators.messages.js`,
+`src/validators/validators.client.js`, `src/garlic-chain/`,
+`src/server.js`, every file under `deploy/`, `network/`, `db/` and
+`scripts/`, and no package file. The doorman is not touched.
+
+### 32.4 Notes from the build
+
+- **The build was made on main at `0108bc5`**, the build of section 31,
+  with a clean working tree (`git status --short` and `git log` at about
+  22:40 UTC on 2026-11-19, before the first edit). GitHub's `main` stood
+  at `6b27427` then: the commit of section 31 was not pushed yet. The five
+  code blocks of the plan's sections 1.1 to 1.3 are in the code as the
+  plan has them, compared line for line by a throwaway script.
+- **Where the plan gives words and no code.** The opening comment of
+  `chain-ends.js` stands after the five import lines and above the
+  constants, as the opening comments of `self-check.js` and
+  `join.service.js` stand in their files. It says, in the plan's words:
+  why the look exists, most win and the five findings, chain ends only, a
+  health page that cannot be read, and that `settleChainEnds` is what the
+  leader then does. Step 0 in the comment of `leadRound` says what the
+  look is, that a difference is settled by `settleChainEnds` before step
+  1, and that the look runs again whenever the round starts again. The
+  three comments of `join.service.js` each got one or two sentences: a
+  leader whose look finds it behind the network clears the flag too (the
+  opening comment and `setCounted`), and the wait after `behind`
+  (`joinThrough`).
+- **Where the new lines stand.** The two import lines of
+  `validators.service.js` stand after the import of `votes.service.js`
+  and before the one of `validators.messages.js`, in the order of the
+  paths, as the file's other imports are. `settleChainEnds` stands
+  between `leadRound` and `settleRoundAnswers`.
+- **The import ring.** `chain-ends.js` is imported by
+  `validators.service.js` only. `validators.service.js` now imports
+  `join.service.js` itself; before, it reached it through
+  `validators.messages.js`, and `join.service.js` already imported
+  `validators.service.js`. Neither file uses a newly imported name while
+  it loads, only inside functions, and the five findings are plain
+  strings.
+- **Comments and doc lines the plan does not name** are left as they
+  were, where this build makes them say less than the code does, and
+  listed for the user (2026-11-19). In
+  `src/validators/validators.service.js`: the comment of the constant
+  `RESTART` (it names `settleRoundAnswers` alone; `settleChainEnds`
+  answers it too), and in the comment of `leadRound` the sentence "A
+  passed vote starts the round again from step 1" (the round now starts
+  again with the look, step 0). In `src/votes/votes.service.js`: the
+  opening comment (the leader starts an ignore vote for a validator that
+  gave no answer or refused; now also for one whose chain end is not the
+  network's). In `src/validators/validators.queries.js`: the comment of
+  `findCountedPeers` ("who to send a message to"; the look reads their
+  health as well). In the README: "The leader round", the paragraph "A
+  round runs in a busy section" (the same "from step 1"); and in
+  "Ignoring and joining" the opening paragraph and the paragraph "The
+  votes" (when a validator is voted out) and the paragraph "Counted"
+  (when a validator stops counting itself).
+- **Checks.** `node --check` passed on the three source files, with Node
+  24.22.0. The imported names were read against their modules' exports:
+  `env` in `src/config/env.js`; `ownTail` in
+  `src/garlic-chain/replay.service.js`; `isObject` in
+  `src/util/is-object.js`; `getHealth` in
+  `src/validators/validators.client.js`; `findCountedPeers` in
+  `src/validators/validators.queries.js`; `LEADER_APART`,
+  `LEADER_BEHIND`, `LEVEL`, `OTHERS_DIFFER` and `lookAtChainEnds` in
+  `src/validators/chain-ends.js`; `setCounted` and `startJoinLoop` in
+  `src/validators/join.service.js`. The link check of 31.4: Node linked
+  the whole module graph from `src/server.js` with an empty environment
+  and stopped at the first settings read (`Error: Missing required
+  environment variable: PGDATABASE`), after every import of every module
+  had been matched to an export. No key file was read, no database
+  connection made, no server started. The same load behind one wrong name
+  asked of `chain-ends.js` stopped with `does not provide an export
+  named`, so the check does see a wrong name. Two checks more than the
+  plan lists, both with throwaway scripts outside the repo. The plan's
+  five code blocks were compared with the three files, line for line:
+  equal, and between the imports and the constants of `chain-ends.js`
+  stands one comment and nothing else. And the two judging functions, in
+  a copy of the built file without its import lines, were given the four
+  layouts whose lines the plan prints (32.1, "The line"): the four lines
+  came out letter for letter, with the findings `othersDiffer`,
+  `leaderBehind`, `noMajority` and `othersDiffer`. No statement was run
+  against a database and no validator was started in that step: the rig
+  was the first run. After the rig: `node --check` on the three files
+  again, the link check again with the same answer, the plan's five code
+  blocks compared with the three files again, and the rig's copy of the
+  code compared with the working tree: equal in `src/`, `network/`,
+  `db/`, `deploy/` and `scripts/`, but for the rig's own registry and
+  genesis pair. `git status` showed the five files of 32.3 and no other,
+  on `main` at `0108bc5`.
+- **The rig found no fault in the code of this build**, and no line of
+  the three source files changed after the first step. Every new branch
+  ran at least once (32.5): the five findings, the four things a leader
+  does, both ends of a vote that did not pass, a health page that cannot
+  be read, and the wait after `behind`. The rig also showed four things
+  that are not faults of this code. They are left as they are, they
+  follow here, each with what it costs, and none of them is in the plan.
+- **Seen on the rig and left as it is: a healthy validator voted out at
+  a hand-over.** Older than this build: the first step of a round, the
+  vote of section 29 and the hand-over are the same code in `6b27427`,
+  which the live network runs, and in `0108bc5`. A leader ends its round
+  with the final declaration, sent to every validator at once. The next
+  leader starts its own round the instant it has taken its copy in, when
+  something waits. A validator that is still taking its own copy in (the
+  `UPDATE` that moves the lead is a commit to disk) answers the new
+  leader's ready announcement `400 validator N is not the leader`. The
+  new leader then does what section 29 says for a refusal: its own
+  health check of that validator and the vote, and that health check
+  compares `leader`. If the validator still names the old leader in
+  those milliseconds, every voter says yes (`names leader X, own Y`), and
+  a validator that missed nothing is out. If it names the new leader by
+  then: `validator N answers; no vote`, the refusal ends the round with
+  nothing written, and what waited is written at the next transaction.
+  It is the fault of 31.4, two answers from two moments, in the health
+  check of a vote. The look of this build logs nothing in that moment,
+  because it compares chain ends only (the plan's decision 13 was right
+  to leave `leader` out), and it makes the case rarer: it puts a read of
+  every health page between the hand-over and the ready announcement.
+  The rig's numbers (32.5): with three accounts sending side by side as
+  fast as they could for 150 seconds, on `0108bc5` 37 refusals in 9,024
+  rounds, one validator voted out; on this build 3 refusals in 6,652
+  rounds and nobody voted out, and in an earlier run 2 in 6,511, both
+  voted out. With one account, each transfer sent the instant the one
+  before was written: 2 refusals in 4,718 rounds, both voted out, and
+  none in 3,197. The validators that were voted out and then watched
+  were found by their self-check and came back, 68 to 101 seconds
+  later. A rig makes this far likelier than a network does: five
+  validators share one computer and one disk, a call between them takes
+  no time, and a commit that waits 20 to 40 milliseconds is then slower
+  than the new leader's whole start. A
+  timing line in the rig's proxy showed the wait inside the validator
+  each time, not in the proxy, and often in several validators at the
+  same moment. On the network the new leader's first message needs the
+  way to the other validator, and with this build the slowest health
+  answer before that. It can still happen there when a validator's disk
+  stalls at a hand-over while a transaction waits. What it looks like in
+  a journal: `failed: validator N is not the leader` on the validator
+  that refused; on the leader `validator M sent no approved pending
+  list: answered 400: {"error":"validator N is not the leader"}`. A fix
+  would change the round's first step or the vote's health check.
+- **Seen on the rig and left as it is: a transaction that is between
+  its approvals and its proof when a vote passes is not written.** The
+  validator a transaction comes in through collects an approval from
+  every counted validator and then sends them the proof. If a vote
+  changes who is counted in between, the others refuse the proof:
+  `receipts[i]: validatorFrom N is not a counted validator` after an
+  ignore vote, `no receipt from validator N` after an include vote.
+  Nothing reacts to a refused proof (left so in 29.1, and on plan 1's
+  list as a second try for the proof of acceptance). The transaction is
+  never written, although the wallet was answered `202`. The validator
+  it came in through has marked its own row approved by then. The others
+  drop their rows after `UNAPPROVED_AGE_LIMIT_SECONDS`, and nothing
+  removes the approved one: from then on that validator refuses every
+  transaction of that account, and one no is enough. By the code, not
+  tried on the rig, it heals when the same signed transaction is sent in
+  again through another validator while its date still allows it: the
+  approved row is then answered as the same approval twice and written
+  with the rest. Otherwise the row is deleted by hand, as the rig did.
+  Seen three times on the rig: at an include vote in a fast run, and in
+  both runs of point 4. In point 4 it is this build's vote that falls
+  into the gap, and it does so every time. The transaction that makes
+  the others find the dead leader waits about a second for the vote on
+  that leader. The new leader holds the missed transaction, so it looks
+  the moment that vote has passed, and votes out the validator that is
+  ahead while the first transaction's proof has not gone out yet. So the
+  plan's "the transfer written by
+  three" did not happen in point 4: the three wrote the missed transfer,
+  and the transfer that had found the dead leader was left as described.
+  In point 5 that transfer was written, because its proof went round
+  before any vote on a living validator. Without this build the same
+  case ends with two chains, so this is the smaller harm. It is still a
+  harm, and the plan does not name it.
+- **Seen on the rig and left as it is: a joiner that waits after
+  `behind` is voted out when the leader comes back.** The wait of this
+  build (32.1, "One line of the join changes") keeps a joiner that is
+  level with most from asking at full speed. While it waits it does not
+  count itself. When the leader has caught up by its self-check it leads
+  at once (section 31), and its ready announcement meets the joiner,
+  which answers `503 not counted yet`. The vote of section 31 then takes
+  it out (`does not count itself`), and it comes back through an include
+  vote at one of its next tries: 17.8 seconds on the rig (32.5, point 6,
+  third run). Before this build the joiner asked again within
+  milliseconds and would most likely have been answered `counted` first.
+  It needs the no-majority case with the leader among the validators
+  that are behind, and a transaction that waits, which that case has.
+- **Seen in passing, older: the second of two validators that are voted
+  back in one after the other.** A joiner takes the leader's list of
+  ignored validators once, before its join requests begin. One that is
+  then answered `busy`, because the leader holds for another joiner,
+  still has that other joiner as ignored when its own include vote
+  comes. The proof of its own vote carries a receipt from that
+  validator, so it refuses the proof (`receipts[0]: validatorFrom N is
+  not a counted validator`). The leader answers `included` all the same,
+  and the joiner then counts itself with a table that says it is
+  ignored, refuses what names the two, and names an old leader. Its
+  self-check found it (`names leader 5, the network names 1`); it joined
+  again and was right 109 seconds after it had counted itself. A
+  transfer sent in that time was not written: the muddled validator
+  refused its proof. Seen once, when the rig started two voted-out
+  validators in the same second. It is in the join of section 19, not
+  in this build.
+
+### 32.5 The rig
+
+The rig (the plan's section 2), 2026-11-19, 15:04 to 16:09 on this Mac's
+clock, everything in the build chat's scratchpad and nothing in the repo.
+Built as the rig of 31.5 was, with these differences:
+
+- **Two copies of the code**, without `.git`, `node_modules` linked: the
+  working tree, and `0108bc5` from `git archive`. They differed in the
+  five files of 32.3 and nothing else.
+- **Five databases**, `anosrig1` to `anosrig5`, under a role of the
+  rig's own, `anosrig`, by `scripts/setup-db.sh`, on Homebrew PostgreSQL
+  17.11. A key per validator in owner-only files, five machine files,
+  the network's own settings as they are.
+- **The proxy stood in front of all five validators.** Each registry row
+  named the proxy's address for its validator (`http://127.0.0.1:3721`
+  to `3725`); the validators listened on `3711` to `3715`. So every call
+  between two validators passed through it. On a word from the rig it
+  could, for one validator: hold back a call (not passed on, no answer),
+  cut the connection at once, hold a call for some seconds before
+  passing it on, and hold an answer for some seconds. Later it also
+  logged, for a call that took 15 milliseconds or more, where the time
+  went.
+- **Three accounts that send**: the rig's OG account and two more,
+  created through a validator with a stand-in for the masterpod (asked
+  twice) and paid 1,000 anos each. They were needed: while chain ends
+  differ, a transfer of the account whose transfer was missed cannot be
+  approved (its previous id is not the same on every validator), so the
+  transfer that had to start the next round came from another account.
+  Every transfer paid the rig's fund account.
+- **A batch that fails once**: a trigger on one validator's
+  `garlic_chain` that fails the first insert and lets every later one
+  through, taken off afterwards.
+- **A leader killed in the middle of handing out a list**: the proxy
+  held back the official list to the chosen validators, and the leader's
+  process got SIGKILL while it waited for their answers, 44 to 68
+  milliseconds after `official list: 1`.
+- **The rig's own faults**, mended on the way. Its sender first sent an
+  account's next transfer as soon as the one before was on the chain of
+  the validator it sent to; another validator, a few milliseconds
+  behind, refused it (`payload.previousTransactionId is not the
+  account's latest transaction`). It then waited for every counted
+  validator's chain. Its first trigger failed every insert, so it also
+  failed the catch-up of point 3 (below). Once it started two voted-out
+  validators in the same second (32.4, the last note).
+- **By hand, between points**: waiting rows that a point had left behind
+  were deleted on all five, and two validators that had been left on a
+  chain of their own on purpose had their database dropped and set up
+  again, the wipe by hand the live network would need.
+
+What it showed, in the plan's order:
+
+1. **Ground.** Five up on empty databases: validator 1 `leading at
+   position 2`, the others `counted at position 2`. Two account
+   creations and five transfers landed at positions 3 to 9 on all five.
+   The long plain run, one account, each transfer sent as soon as the
+   one before was written everywhere, through each validator in turn:
+   in 150 seconds 4,718 transfers in as many rounds, positions 19,541 to
+   24,258, and in a second run of 100 seconds 3,197 more, positions
+   24,259 to 27,455. Neither run has a line `chain ends differ`. The
+   second has no unusual line at all, and all five were equal at its
+   end. Near the end of the first, two validators were voted out by the
+   hand-over case of 32.4, with no line of the look. With three accounts
+   side by side, so that round follows round with no pause: 150 seconds,
+   9,912 transfers in 6,652 rounds, positions 27,456 to 37,367, no line
+   of the look, three refusals of the hand-over case and no vote, all
+   five equal at the end. In all, more than 21,000 rounds were led on
+   this build with nothing held or slowed, and not one of them logged
+   `chain ends differ`.
+2. **One validator behind.** The batch failed on validator 5: `batch
+   write failed: the rig makes this batch fail`, `wrote: 0`, and on the
+   leader `validator 5 wrote 0`. Validator 5 stood at position 19,462
+   with the transfer approved in `pending`, the others at 19,463. A
+   transfer of another account through validator 3, a tenth of a second
+   later. The leader, validator 2: `chain ends differ: 4 validators at
+   position 19463 (3da15fad); validator 5 at position 19462 (320d4fca);
+   own position 19463 (3da15fad)`, `ignore vote bb1c2229 naming
+   validator 5: 3 voters`, three times `voted yes (5: tail at position
+   19462, own 19463)`, `ignore vote bb1c2229 passed`, `the round starts
+   again`, `official list: 1`, and the transfer written by the four at
+   19,464, 44 milliseconds after the first line. Validator 5 wrote
+   nothing. With nothing sent through it: `self-check: ignored by the
+   network` 55 seconds after the vote, `…twice in a row; joining again`
+   a minute later, `replayed 2 links from validator 1, now at position
+   19464`, the include vote, two lines `cleared held pending transaction
+   …: the join takes the leader's rows`, `counted at position 19464`,
+   116 seconds after the vote. All five then held 19,464 links with top
+   position 19,464, and a third transfer, through validator 5, was
+   written by all five.
+   **The same on `0108bc5`**, all five on that code. Validator 3 `wrote
+   0`. At the next transfer its ready list held two ids (`approved
+   pending list sent: 2`) and the others' one, the official list was
+   that one transfer, and validator 3 wrote it at position 19,461, where
+   the others hold the missed transfer: record hash `71911b04` against
+   `320d4fca` one position higher. Its self-check: `behind the network
+   (position 19461, the network's 19462)`, a minute later `…twice in a
+   row; joining again`, and from then on every ten seconds `network
+   tail: position 19462, 4 of 4 agree, leader 1` and four times `chain
+   replay: position 19462: recordHash does not chain on the previous
+   link`. It answered `counted: false` and could not catch up. That is
+   what this build ends. Its database was wiped by hand; started on this
+   build it replayed 19,460 links in 58 seconds and was `counted at
+   position 19462`.
+3. **The leader is behind.** The batch failed on validator 4, which led
+   next: `wrote: 0`, then `validator 4 is the leader`. Four milliseconds
+   later, with no transfer sent: `chain ends differ: 4 validators at
+   position 19469 (1da7ecc5); validator 4 at position 19468 (2fc6129d);
+   own position 19468 (2fc6129d)`, `behind the network (position 19468,
+   the network's 19469); joining again`, `network tail: position 19469,
+   4 of 4 agree, leader 4`, `replayed 1 links from validator 1, now at
+   position 19469`, `dropped held pending transaction 7d100290…: already
+   on the chain`, `leading at position 19469`, 19 milliseconds after it
+   had got the lead. It looked at once because it still held the missed
+   transfer as ready: a leader that missed a write needs no further
+   transaction to find it. Two more transfers were written by all five.
+   **The first try of this point** showed the longer way. The rig's
+   trigger was still in place when the leader tried to catch up, so its
+   replay failed (`chain replay: the rig makes this batch fail`, four
+   times) and it waited its ten seconds, not counting itself. A transfer
+   sent in that time: `validator 5 refused and fails the health check:
+   tail at position 19465, own 19466`, the report to the next validator
+   in the ring, `ignore vote db483751 naming validator 5: 3 voters`,
+   passed, `validator 5 ignored; validator 1 is the leader`, and the
+   transfer was answered after 1.05 seconds and written by the four.
+   Validator 5 caught
+   up at its next try, was voted in and `counted at position 19467`,
+   11.1 seconds after it had stopped counting itself. So a leader that
+   cannot catch up at once does not hold the network.
+4. **A list that reached fewer than half, the next leader with most.**
+   The list reached validator 4 (position 19,513) and was held back from
+   validators 1, 3 and 5; the leader, validator 2, was killed. A
+   transfer of another account through validator 5: `no answer report
+   for validator 2 sent to validator 3`, `ignore vote 6a759b14 naming
+   validator 2: 3 voters`, three yes (`2: no answer: …`), `validator 2
+   ignored; validator 3 is the leader`. Validator 3 held the missed
+   transfer and led at once: `chain ends differ: 3 validators at
+   position 19512 (75d80064); validator 4 at position 19513 (8e2ffe65);
+   own position 19512 (75d80064)`, `ignore vote 524b16e2 naming
+   validator 4: 2 voters`, two times `voted yes (4: tail at position
+   19513, own 19512)`, passed, `the round starts again`, `official list:
+   1`, and the missed transfer written by validators 1, 3 and 5 at
+   19,513 with the record hash validator 4 had, 37 milliseconds after
+   the vote on the dead leader had passed. The transfer that had found
+   the dead leader was not written: `validator 1 did not accept the
+   proof: answered 400: {"error":"receipts[2]: validatorFrom 4 is not a
+   counted validator"}` (32.4). Validator 4, level with the three and
+   ignored: `self-check: ignored by the network` 51 seconds after its
+   vote, `…twice in a row; joining again`, the include vote, `counted at
+   position 19513`, 113 seconds after the vote. It came back by itself.
+   A closing transfer was written by all four.
+   **A second run, in which the three wrote another link first**: one
+   more transfer was approved by all five while the leader still waited,
+   its id below the missed one's. The list reached validator 5 (19,515).
+   The new leader, validator 4: `chain ends differ: 3 validators at
+   position 19514 (c01c7d99); validator 5 at position 19515 (4061d4c7);
+   own position 19514 (c01c7d99)`, the vote, `official list: 2`: the
+   three wrote the other transfer at 19,515 and the missed one at
+   19,516. Validator 5: `self-check: ignored by the network`, `…twice in
+   a row; joining again`, then every ten seconds three times `chain
+   replay: position 19516: recordHash does not chain on the previous
+   link`. Its health: `counted: false`, position 19,515, `4061d4c7`. It
+   stands on another chain and waits for a person, as the plan's
+   decision 10 says. The transfer that had found the dead leader was
+   left again.
+5. **The same, the next leader the one that is ahead.** The list reached
+   validator 3 (19,517), which became the leader when validator 2 was
+   voted out. It had nothing ready, so it did not look. A second later
+   the transfer that had found the dead leader was approved by all four:
+   `chain ends differ: 3 validators at position 19516 (7e583389);
+   validator 3 at position 19517 (05133582); own position 19517
+   (05133582)`, `own chain end is not the network's: nothing is written,
+   validator 4 is the leader`. Validator 4, six milliseconds later:
+   `chain ends differ: 3 validators at position 19516 (7e583389);
+   validator 3 at position 19517 (05133582); own position 19516
+   (7e583389)`, `ignore vote fe9a4dde naming validator 3: 2 voters`, two
+   yes, passed, `the round starts again`, `official list: 2`: the missed
+   transfer at 19,517, the link validator 3 had, and the new one at
+   19,518, written by validators 1, 4 and 5. Validator 3 came back by
+   its self-check, `counted at position 19518`, 104 seconds after its
+   vote. A closing transfer was written by all four.
+6. **No majority.** First run, the new leader among the two that wrote:
+   the list reached validators 2 and 3 (19,520), validators 4 and 5
+   stood at 19,519, validator 1 was killed and voted out. When the next
+   transfer was approved, validator 2: `chain ends differ: validators 2,
+   3 at position 19520 (b975ad9b); validators 4, 5 at position 19519
+   (57ac3d5e); own position 19520 (b975ad9b)`, `nothing is written: no
+   chain end is held by more than half of the counted validators`. With
+   nothing sent, validators 4 and 5: `self-check: behind the network
+   (position 19519, the network's 19520)`, a minute later `…twice in a
+   row; joining again`, `replayed 1 links from validator 2, now at
+   position 19520`, `join: counted`, `dropped held pending transaction
+   bba19944…: already on the chain`, `counted at position 19520`. No
+   vote. They were out of the count for 35 and 54 milliseconds, the
+   later one 102 seconds after the kill. A closing transfer: `official
+   list: 2`, the transfer that had waited and the closing one, written
+   by all four.
+   **Second run, the new leader among the two that did not write.**
+   Validator 4 held the missed transfer and looked at once after the
+   vote on the dead leader, and again a second later: both times the two
+   lines above, with `validators 1, 5 at position 19523 (cb040515);
+   validators 2, 4 at position 19522 (27d604dd)`. Its self-check a
+   minute and a half later: `…twice in a row; joining again`, `replayed
+   1 links`, `dropped held pending transaction …`, `leading at position
+   19523`, and at once `chain ends differ: 3 validators at position
+   19523 (cb040515); validator 2 at position 19522 (27d604dd); own
+   position 19523 (cb040515)`, `ignore vote 89d2786b naming validator 2:
+   2 voters`, passed, `the round starts again`, and the transfer that
+   had waited was written by validators 1, 4 and 5. Validator 2, whose
+   own second check was 23 seconds away, came back by it: `counted at
+   position 19524`, 24.3 seconds after its vote. A closing transfer was
+   written by all four.
+   **Third run, timed so that the other validator's self-check came
+   first.** Validator 4, behind and not the leader: `…twice in a row;
+   joining again`, `replayed 1 links from validator 3, now at position
+   19526`, then `join: behind` at 15:46:05.811, 15:46:15.821 and
+   15:46:25.835, each after a catch-up pass that brought nothing new:
+   every ten seconds, not at full speed. Validator 2, the leader, at
+   15:46:29.097: `…twice in a row; joining again`, `leading at position
+   19526`, and then `validator 4 sent no approved pending list: answered
+   503: {"error":"not counted yet"}`, `ignore vote 1ea1b9a1 naming
+   validator 4: 2 voters`, two times `voted yes (4: does not count
+   itself)`, passed, `the round starts again`, and the transfer that had
+   waited was written by validators 2, 3 and 5 (32.4). Validator 4:
+   `join: validator 2 answered 400: not the leader` at its next try, and
+   at the one after `replayed 1 links`, the include vote, `counted at
+   position 19527`, 17.8 seconds after its vote. A closing transfer was
+   written by all four. At the end of each of the three runs the four
+   held everything that had waited, on one chain.
+7. **Chain ends only.** A final declaration held: the proxy held one
+   answer to an official list for three seconds, which kept leader 1's
+   round open, and a second account's transfer was approved by all five
+   in that time. Then validator 4's copy of the final declaration was
+   held for four seconds. The new leader, validator 2, looked at once.
+   Validator 4's health named leader 1 at that moment, at position
+   19,472 like everyone: no line `chain ends differ`. The round's own
+   first step then met validator 4: `validator 4 sent no approved
+   pending list: answered 400: {"error":"validator 2 is not the
+   leader"}`, `ignore vote 9f3a509a naming validator 4: 3 voters`, three
+   times `voted yes (4: names leader 1, own 2)`, passed, `the round
+   starts again`, and the transfer was written by the other four: the
+   hand-over case of 32.4, made certain by the hold. Validator 4 took
+   its copy in when the proxy passed it on and came back by its
+   self-check 118 seconds after the vote.
+   A health answer held: every answer of validator 1's health page was
+   held for three seconds, for 40 seconds of transfers of three
+   accounts. 30 transfers in 23 rounds; each look of the other four
+   waited for that answer, so their rounds came three seconds apart; the
+   proxy held 16 answers. No line `chain ends differ`, no vote, no
+   self-check line, and all five equal at the end.
+8. **A health page that cannot be read.** With the connection to
+   validator 5's health page cut at once: three transfers, three rounds
+   led by validators 1, 2 and 3, no line, written by all five. With
+   validator 3's health page silent: the look waited out the call
+   timeout, `official list: 1` came 10.0 seconds after the approval, and
+   the transfer was written by all five 10.1 seconds after it was sent,
+   with no line. With validator 3 behind and validator 4's health page
+   cut: `chain ends differ: 3 validators at position 19511 (504539d9);
+   validator 3 at position 19510 (7fe468c2); own position 19511
+   (504539d9); no chain end read from validator 4`, `ignore vote
+   6fd989aa naming validator 3: 3 voters`, validators 2, 4 and 5 voted
+   yes (validator 4 votes although its health page cannot be read),
+   passed, `the round starts again`, written by validators 1, 2, 4 and
+   5. Validator 3 came back by its self-check 100 seconds after the
+   vote.
+9. **Old and new together.** Validators 1 and 2 on `0108bc5`, validators
+   3, 4 and 5 on this build. Five transfers, one through each validator,
+   each round led by another validator: written by all five, and no log
+   has an unusual line, the two rounds led on `0108bc5` among them. Then
+   point 2 with validator 2, on `0108bc5`, the one behind: `validator 2
+   wrote 0`; at the next transfer the leader, validator 4, on this
+   build: `chain ends differ: 4 validators at position 19538 (c5a7eef7);
+   validator 2 at position 19537 (514bf52c); own position 19538
+   (c5a7eef7)`, `ignore vote cf54f237 naming validator 2: 3 voters`,
+   `validator 1 voted yes (2: tail at position 19537, own 19538)` from
+   the voter on `0108bc5` and the same from validators 3 and 5, passed,
+   `the round starts again`, written by validators 1, 3, 4 and 5.
+   Validator 2 wrote nothing more. It came back by the self-check of
+   `0108bc5`, `counted at position 19539`, 111 seconds after the vote,
+   and a further transfer through it was written by all five.
+
+Tried besides the nine points:
+
+- **A vote of the look that does not pass, still differing.** Two
+  validators were stopped and voted out, so three were counted, and
+  validator 5 then missed a write. The leader: `chain ends differ: 2
+  validators at position 40581 (1fd5508c); validator 5 at position 40580
+  (bfdba5ef); own position 40581 (1fd5508c)`, `no ignore vote naming
+  validator 5: below the floor (3 counted of 5 active)`, `nothing is
+  written: the chain ends still differ`. Validator 5 came level by its
+  self-check 104 seconds later (`join: counted`, no vote), and a closing
+  transfer wrote what had waited on all three.
+- **A vote of the look that does not pass, level by then.** Validator 4
+  was behind. A transfer was sent 284 milliseconds before its second
+  self-check, and the proxy held its health answer for a second and a
+  half, so the look read "behind" and got that answer after validator 4
+  had caught up (`…twice in a row; joining again`, `join: counted`,
+  `counted at position 40584`; the leader answers a join request while
+  it leads a round). The leader: `chain ends differ: 4 validators at
+  position 40584 (f7f4131e); validator 4 at position 40583 (f2b8f263);
+  own position 40584 (f7f4131e)`, `validator 4 answers; no vote`, `the
+  round starts again`, `official list: 1`, written by all five. Nobody
+  was voted out.
+- **The hand-over case on `0108bc5`**, all five on that code, three
+  accounts side by side for 150 seconds: 12,714 transfers in 9,024
+  rounds, 37 times `failed: validator N is not the leader`, 29 times
+  `validator N answers; no vote`, one ignore vote that failed and one
+  that passed (`validator 1 voted yes (3: names leader 1, own 2)`); the
+  validator it named was found by its self-check 101 seconds later. The
+  numbers on this build are in 32.4.
+- **Where a late answer loses its time.** For the calls that took 15
+  milliseconds or more the proxy logged three spans. The call was read
+  in 0.0 to 0.2 milliseconds, the connection to the validator stood 0.1
+  to 0.6 milliseconds later, and the rest, 16 to 58 milliseconds in a
+  quiet run, passed inside the validator. Several validators were often
+  slow in the same moment, which points to the disk they share.
+- **What the look costs on the rig.** In the two runs of three accounts
+  a round took 16.6 milliseconds on `0108bc5` and 22.5 on this build: 60
+  rounds a second against 44. The six milliseconds are four health reads
+  on one computer.
+- **A restart while transfers come in**, two accounts as fast as they
+  could. Validator 3 got SIGTERM: `validator 3 sent no approved pending
+  list: no answer: fetch failed: other side closed`, the vote, out; no
+  line of the look. Started again it caught up and asked to join. Its
+  include vote failed once (`join: refused: validator 1 voted no (3:
+  names leader 4, own 2)`: the lead had moved on between the vote's
+  start and that voter's check), then `join: busy`, then `not the
+  leader`, and it was counted again 38 seconds after the vote, when the
+  run ended. At 70 transfers a second the lead and the chain's end move
+  faster than a join. A network's rounds are seconds apart.
+
+What the rig could not show:
+
+- The doorman and the real network: twenty-five validators, the
+  distances between them, a health page read through a doorman. So it
+  says nothing about how often the hand-over case of 32.4 happens there,
+  and nothing about what the look costs there in seconds or in traffic.
+- A list that reached twelve of twenty-four, and the eleven joiners that
+  then wait at the same time: the rig had two and two.
+- A write that is still under way on one validator when a new leader
+  looks. The plan's decision 13 holds for a hand-over by final
+  declaration. After a hand-over by vote, with the old leader named, one
+  validator's write of that leader's list could still be under way and
+  the look would read its old chain end. The rig held a list back; it
+  did not slow a write.
+- Point 5's other end, the three writing another link first. Point 4's
+  second run shows what such a validator then does.
+- A vote of the look that fails because a voter answers no. The two
+  ends of a vote that did not pass were shown with a vote that could not
+  start.
+- The whole pull line and the stop: unchanged since 31.5, not run again.
+
+The end of the rig: the five validators and the proxy stopped, the five
+databases and the role `anosrig` dropped. The Mac's other roles and
+databases were listed before the rig and after it, and the two lists are
+the same. At its end the rig's chain had 40,585 links on all five. The
+rig's folder, with its tools, keys and logs, stayed in the build chat's
+scratchpad and is not kept.
+
+## 33. The proof after a vote (2026-11-19)
+
+Decided 2026-11-19 in a planning chat of its own, in one round of four
+questions, the plan FINAL the same day at
+`~/Desktop/Z-TestNet/forclaude/validator-proof-plan-1.md`. Its first step,
+the code and its papers, was built the same day in a chat of its own, and
+this section is the record of it. It is about one weakness, which the rig
+of section 32 showed three times (32.4, "a transaction that is between
+its approvals and its proof when a vote passes is not written").
+
+The weakness, told with one transfer. Alice sends 5 anos to Bob, and her
+wallet hands the transfer to validator 7. Validator 7 asks each of the
+other 24 validators whether the transfer is good. Each one checks it,
+keeps a copy and sends back a signed yes. When validator 7 has all 24, it
+sends the whole bundle of signed yeses to everyone. Each validator checks
+the bundle: it must hold one yes from every validator that is in the
+network at that moment, no more and no fewer. If it does, that validator
+marks the transfer as ready, and a transfer that is ready on every
+validator gets written. Collecting the yeses and sending the bundle are
+two moments. A validator that is voted out between them leaves a yes in
+the bundle from someone who is no longer in the network. A validator that
+is voted back in between them is missing from the bundle. Either way
+every validator turned the bundle down, and validator 7 did nothing about
+that. It had already marked the transfer as ready on its own side, and it
+told the wallet "accepted". The transfer was never written. The other 24
+threw their copy away after five minutes. Validator 7 kept its copy,
+marked as ready, for good. An account may have only one transfer waiting
+at a time, so from then on validator 7 said no to every new transfer from
+Alice's account. Every validator has to say yes to a transfer, so that
+one no blocked her account everywhere, until the row was deleted by hand
+on validator 7.
+
+The fix is three small changes, all inside the validator that took the
+transfer, and one thing that is left alone. Validator 7 checks again
+before it sends the bundle. It tries a second time. It unblocks the
+account if that fails too. And the wallet keeps saying "accepted".
+
+These words and the code's: a signed yes is a transaction approved
+receipt; the bundle is the proof of acceptance; "in the network" is
+counted, an active row that is not ignored; "marked as ready" is
+`approved = true` on the row in its holding table; "thrown away after
+five minutes" is the sweep of section 21; validator 7 is the originating
+validator.
+
+This plan is about honest validators, as sections 31 and 32 are. Nothing
+touches the doorman, the wallet, the masterpod, the keyholder, the
+database schema, the registry, the genesis files or a settings file.
+There is no new message between validators, no new field in a message,
+no new route, no new variable and no package. The fix changes only what
+the validator that took a submission does, so a validator on this code
+and a validator on older code work together, and the code goes onto the
+validators one at a time. The plan has four steps: the code and its
+papers, which this section records; a rig of five validators (33.5); the
+pull papers; the records. The first two are done. The rig found no
+fault in the code.
+
+### 33.1 The decisions, as they apply to the code
+
+- **One function, called from the four places a submission comes in.**
+  `src/validators/acceptance.js`, new: `proveAcceptance({ transactionId,
+  approvals, askApproval, markApproved, sendProof, takeMarkBack })`.
+  `receiveCreateAccount` (`src/accounts/accounts.service.js`),
+  `receiveAnosTransfer` (`src/transfer/transfer.service.js`),
+  `receiveTransaction` (`src/fund/fund.service.js`, a stake and a fund
+  proposal) and `receiveAttachment`
+  (`src/attachments/attachments.service.js`, the nine kinds of
+  follow-up) call it at their end, where each marked its own row and
+  sent the proof before. What comes before it is as it was: the row
+  stored unapproved, the approval sent to the counted peers,
+  `settleNoAnswers` (sections 19.1 and 29), and the return with
+  `approved: false` when not every answer is an approval. Each caller
+  hands over what differs, as small functions: `askApproval(peers)`,
+  the approval send it already has, to the peers named;
+  `markApproved()`, the mark on its own row or copy;
+  `sendProof(receipts)`, the proof with these receipts; and, for a
+  transaction, `takeMarkBack()`.
+- **Check again before sending the bundle** (the plan's decision 2).
+  `bringInLine(approvals, askApproval)`, private, same file. Right
+  before a proof is built it reads the counted peers again
+  (`findCountedPeers`, the own table) and brings the approvals in line
+  with them. The approval of a validator that is not counted any more
+  is left out. A validator that is counted now and has given no
+  approval is asked for it, with the message that exists, sent to that
+  validator alone, and its result takes its place in id order. A
+  validator that already holds the transaction answers its approved
+  receipt again (check 2b of `receiveTransactionApproval`, 3b of
+  `receiveAttachmentApproval`). One that does not hold it runs every
+  check and stores the row.
+- **A validator that was just voted back in is asked up to five times**
+  (decision 7). After an include vote the others count it at once, but
+  it answers `503 not counted yet` until it has taken in the leader's
+  waiting rows and counts itself (`joinThrough`, section 19): a second
+  or two. One ask in that moment would fail the transaction. So a
+  validator that answers and does not approve is asked again after
+  `ASK_AGAIN_AFTER_MS` (1000), the counted peers read again each time,
+  `ASKS` (5) asks in all. One that gives no answer at all is not waited
+  for. The cost of a real refusal is four seconds.
+- **A validator that is counted now and still does not approve**
+  (decision 11), after its five asks or by giving no answer: the
+  transaction is not approved, as after any refusal. `proveAcceptance`
+  resolves with `{ approvals, approved: false }`. No report, no
+  minute's wait, nothing marked, no proof. The rows are swept
+  (section 21).
+- **The own mark first, then the proof**, as before (decision 12). The
+  other order would leave approved rows on every other validator if
+  the originating validator died in between.
+- **Try a second time** (decisions 3 and 10). When not every validator
+  accepted the proof: one line, a wait of `SECOND_TRY_AFTER_MS` (1000),
+  `bringInLine` once more, and the proof again, to every counted peer,
+  with a new `sentAt` and a new signature. One pass is not enough
+  because the proof of a vote reaches the validators at slightly
+  different moments, so in that moment no list of receipts is right
+  for all of them. A validator that accepted the first proof holds its
+  row approved whatever it answers the second, so it counts as
+  accepted. A second proof is a message that exists: a receiver whose
+  row is approved already passes the same checks, marks nothing and
+  answers the accepted receipt. When the second `bringInLine` finds a
+  validator that is counted now and does not approve, the second proof
+  is not sent, one line says so, and the next decision looks at the
+  answers to the first.
+- **Unblock the account if it still fails** (decisions 4 and 8). When
+  every answer to the proofs that went out was a plain refusal by a
+  validator's own check, status `400`, the originating validator takes
+  its own mark back: `takeMarkBack()`, which for a transaction is the
+  new `takeApprovalBack(table, transactionId)` of
+  `src/held-transactions/held-transactions.js`. Its statement is
+  `UPDATE <table> SET approved = false WHERE transaction_id = $1 AND
+  approved`, and the table must be one of `HELD_TABLE_NAMES` or it
+  throws. One line is logged. The row is then unapproved here as it is
+  on the others, the sweep of section 21 drops it by its age, and the
+  account can send again, about five minutes after the submission. The
+  transaction is not written. Why `400` and nothing else: a validator
+  answers a proof it refuses with `400` (`proofOfAcceptance` in
+  `src/validators/validators.handlers.js`), and it marks its row as its
+  last step, after every check, so a `400` means it marked nothing. Any
+  other answer, none at all, a `503`, or a `502` or `504` from a
+  doorman, may come from a validator that did mark its row, and a mark
+  taken back then would leave approved rows on others with no way to
+  the write. So in that case, and when some validators accepted and
+  some refused, the mark stays as it did before this build, and one
+  line names who did not accept.
+- **The status a validator answered.** `sendProofOfAcceptance`
+  (`src/validators/validators.messages.js`): a result that is not
+  accepted now carries `status`, the HTTP status that validator
+  answered, undefined when it gave no answer. It is a field of a result
+  in memory, not of a message. `sendProofOfAttachmentAcceptance` is not
+  changed: nothing reads a status there.
+- **Follow-ups get the first two changes and not the third**
+  (decision 6). A follow-up travels the same way, an approval and then
+  a proof, and has the same gap, with a larger harm: the others keep
+  their copy for good, because no sweep drops a follow-up, and a slot
+  that holds one refuses a second. `receiveAttachment` calls
+  `proveAcceptance` with no `takeMarkBack`: nothing would drop a copy
+  whose mark was taken back. The kind's effect (`kind.onAccepted`) is
+  applied here after the proof, as before, and now only when
+  `proved.approved`: not when a validator that is counted by then did
+  not approve. What a follow-up whose proof stays refused leaves behind
+  is as it was before this build.
+- **What a handler sees** (decision 13). The result keeps its shape.
+  `approvals` are the ones the last proof carried. `proof` has one
+  entry per validator the last proof went to, an entry accepted when
+  that validator accepted either proof. `approved` stays true when the
+  mark was taken back. So `src/util/submission-response.js`,
+  `src/transfer/transfer.handlers.js` and
+  `src/accounts/accounts.handlers.js` log every `validator N accepted
+  the proof` and `validator N did not accept the proof: <reason>` as
+  before and answer `202`. They are not changed.
+- **The wallet's answer stays `202`** (decision 5).
+- **The lines**, word for word (decision 14). `<id>` is the
+  transaction's id as the wallet sent it. For a follow-up it is the id
+  of the transaction the follow-up attaches to.
+
+  ```text
+  validator N is not counted any more: its approval is left out of the proof
+  validator N is counted now: it is asked for its approval
+  validator N did not approve: <reason>; it is asked once more
+  the proof of <id> was not accepted by every validator; it goes once more
+  validator N did not approve: <reason>; the proof does not go again
+  no validator accepted the proof of <id>: the approval here is taken back
+  the proof of <id> is still not accepted by validator N: the approval here stays
+  ```
+
+  The last one reads `validators N, M` for more than one. None of the
+  seven is logged while nobody is voted in or out.
+- **Section 29 changes for the sending side** (decision 9). 29.1 says
+  that a refusal of the proof of acceptance is not acted on (decision 7
+  of `~/Desktop/Z-TestNet/forclaude/validator-refusal-plan-1.md`). The
+  originating validator now acts on it, as above. The receiving side is
+  as it was. A proof that gets no answer twice, and a refused final
+  declaration, stay as that plan left them.
+- **The cost** (decision 15). One more read of the own table for every
+  submission, and nothing else while nobody is voted in or out. After a
+  refused proof: one second and one more proof. By the planner's count
+  the worst case adds about 30 seconds to a submission: twice four
+  waits for a validator that was just voted back in, and two proofs
+  that each run into the call timeout. The wallet's proxy ends a call
+  after 120 seconds (`proxyTimeoutMs` in
+  `~/Desktop/Z-TestNet/web_app/server/config.js`), and the worst case
+  before this build, a silent validator and a silent leader, already
+  came to about 110. A validator finishes its work whether or not the
+  wallet still waits. Not measured on the network.
+- **No new setting, message, field in a message, route, table or
+  package** (decision 17). The new file has three numbers,
+  `SECOND_TRY_AFTER_MS`, `ASKS` and `ASK_AGAIN_AFTER_MS`, and the
+  status `REFUSED` (400). They are constants in the file, not settings.
+- **What stays** (the plan's section 4). Every message, route, table
+  and setting, and the registry. "Every counted validator answers, or
+  the network stops": no quorum. The receiving side: a proof must still
+  carry one receipt from every validator the receiver counts, no more
+  and no fewer. A proof that some validators accepted and others still
+  refuse or do not answer: the row stays approved where it was
+  accepted, as before, and one line names who did not accept. That
+  needs a validator whose own table differs from the others' for longer
+  than a second, or one that is silent twice. A follow-up whose proof
+  stays refused: its copy here stays approved and its kind's effect is
+  applied here, as before. A submission that comes in through a
+  validator on older code. The wallet: its answer is `202` whatever
+  happened, it never sends the same signed submission twice, and the
+  Resubmit button of an account creation shows only while the
+  masterpod's mark is empty. The minute an originating validator waits
+  for a validator that was only restarting (31.4). A transaction that
+  is not approved because a validator that was just voted back in did
+  not answer in its five asks: its rows are swept after five minutes,
+  as after any refusal.
+- **Out of this build.** The follow-ups are the plan's section 5. On
+  the after-production list already
+  (`~/Desktop/Z-TestNet/after_production_todos`), and not changed by
+  this build: an answer to the wallet that says approved or not, in
+  place of `202`; a follow-up that stays stuck, and an age limit for a
+  slot; silence to the proof of acceptance, a second try for the final
+  declaration, and the quorum. Written in the plan and on no other
+  list: the receiving side taking a proof that carries a receipt from a
+  validator that was voted out since; a message that tells the others
+  to drop a row at once; a follow-up's effect applied on the
+  originating validator although its proof was refused; a row that is
+  left approved on one validator and is copied, with its mark, by a
+  validator that joins through that one; a send to one peer and
+  `noticeIgnoredAnswers`, where one validator that wrongly answers
+  `validator N is ignored` is more than half; more than two tries, or a
+  longer wait.
+
+### 33.2 The rollout
+
+- **One validator at a time, no shutdown**, as in 31.2 and 32.2. The
+  order is the user's: validator 1 first, watched, then the others one
+  at a time, each counted again before the next one starts. Nothing but
+  the validator's program restarts: no `npm ci`, no database step, no
+  doorman pull, no setting. A start prints the same lines as before
+  this build.
+- **The line for a worker** is the line of 31.2 and 32.2, with its
+  question about the leader, as the round's `pull_steps.md` in
+  `~/Desktop/Z-TestNet/upcoming_validator_pulls` gives it. The pull
+  papers of this build are the plan's third step and are written on the
+  user's word.
+- **While validators on older code are about.** A submission that comes
+  in through a validator on this code is covered, whatever code the
+  others run: the approval, the proof and the answers to them are the
+  messages all 25 know today. A submission that comes in through a
+  validator on older code is as it was before this build. No mix is
+  worse than before: a validator on older code checks a proof as it
+  always did, and a second proof is to it a proof like any other.
+- **What to look for on a validator**, in its journal:
+
+  ```text
+  its approval is left out|is asked for its approval|it goes once more|is taken back|still not accepted
+  ```
+
+  None of these lines is expected while nobody is voted in or out. `is
+  taken back` and `still not accepted` are the two worth a look. The
+  first means a transaction was not written and its account is free
+  again after five minutes. The second means a row is left approved on
+  some validators, as it could be before this build.
+- **The way back** is the one of the round's papers: `git reset --hard`
+  to the commit before this build and a restart. This build leaves
+  nothing in the database.
+
+### 33.3 Files
+
+New: `src/validators/acceptance.js` (`proveAcceptance`; the private
+`bringInLine` and `sleep`; the four constants).
+Changed: `src/validators/validators.messages.js` (`status` on a result
+of `sendProofOfAcceptance` that is not accepted, the comment of that
+function, and one sentence at the end of the opening comment),
+`src/held-transactions/held-transactions.js` (one import and the new
+`takeApprovalBack`), `src/transfer/transfer.service.js`,
+`src/accounts/accounts.service.js` and `src/fund/fund.service.js` (two
+imports each, the end of `receiveAnosTransfer`, `receiveCreateAccount`
+and `receiveTransaction`, and one sentence in the comment of each),
+`src/attachments/attachments.service.js` (one import, the end of
+`receiveAttachment`, and its comment), and
+`src/held-transactions/unapproved-sweep.js` (one sentence in the opening
+comment, no code). On the user's word also the comments that 33.4 lists,
+which touch one file more, by a comment only:
+`src/validators/validators.service.js`. In the docs: the README
+("Create-account submission"; "Follow-ups"; "Ignoring and joining", the
+new paragraph "The proof after a vote" and three words in "The report
+and the originator's wait"; "Validator-to-validator messages", at the
+two proofs; two lines of "Project layout"; one clause in "Database") and
+this section.
+Not changed: the code of `src/validators/validators.service.js` (a proof
+is checked as before), `src/votes/` (`settleNoAnswers` and the votes are
+used as they are), the handlers and `src/util/submission-response.js`,
+the code of `src/held-transactions/unapproved-sweep.js` and
+`written-rows.js`,
+`src/validators/join.service.js`, `src/server.js`, the nine kinds of
+follow-up, every file under `deploy/`, `network/`, `db/` and `scripts/`,
+and no package file. The doorman is not touched.
+
+### 33.4 Notes from the build
+
+- **The build was made on main at `0712b16`**, the build of section 32,
+  which is the commit the plan was written against, with a clean
+  working tree (`git status --short` and `git log --oneline -3` at
+  about 18:20 on this Mac's clock on 2026-11-19, which is 02:20 UTC on
+  2026-11-20, before the first edit). GitHub's `main` stood at
+  `6b27427` then: the commits of sections 31 and 32 were not pushed.
+  Before the first edit every **Old** block of the plan's sections 1.2
+  to 1.5 was in its file exactly once, fifteen places in all, and
+  `src/validators/acceptance.js` was not there.
+- **The code is the plan's text, not a retyping of it.** A throwaway
+  script outside the repo read the plan's 21 code blocks, wrote the
+  first as `src/validators/acceptance.js`, and put each New block in
+  the place of its Old block. A second script then compared the plan
+  with the files (below, "Checks").
+- **Eight source files, where the plan counts seven.** Seven is the
+  number of files whose code changes. The plan's section 1.6 also names
+  the opening comment of `src/held-transactions/unapproved-sweep.js`,
+  and that file got its one sentence. Its code is unchanged, as the
+  plan's 1.9 says.
+- **Where the plan gives words and no code** (its 1.6 and 1.7). Each
+  comment carries the day, 2026-11-19, and the plan's words. The
+  comments above `receiveAnosTransfer`, `receiveCreateAccount` and
+  `receiveTransaction` got one sentence, the same in all three, right
+  after "…the proof of acceptance bundling those receipts": that last
+  step is now `proveAcceptance`, and the three things it does. The
+  comment above `receiveAttachment` got its sentences after "…and the
+  kind's effect is applied here", which is the end of the sentence the
+  plan quotes from: the first two things, and that the mark of a
+  follow-up is not taken back. The opening comment of
+  `validators.messages.js` got one sentence after its last: the
+  approval sends take the list of peers also for the approval asked of
+  a validator that is counted by the time of the proof. The comment
+  above `sendProofOfAcceptance` got one sentence in front of the lines
+  the plan's 1.2 changes: `receipts` are the approvals of the
+  validators counted when the proof is built, and the proof of one
+  transaction may go a second time. The opening comment of
+  `unapproved-sweep.js` got one sentence at the end of its first
+  paragraph. In the README: "Create-account submission" has the three
+  things in three sentences and the seven lines after the sentence that
+  ends "…and logs `validator N accepted the proof`"; "Follow-ups" has
+  one sentence after "…each peer marks its copy approved"; the new
+  paragraph "The proof after a vote" stands right after "The report and
+  the originator's wait"; each of the two proofs in
+  "Validator-to-validator messages" has one short paragraph under its
+  payload; and in "Project layout" the line of `acceptance.js` stands
+  after the one of `chain-ends.js`.
+- **The import ring.** `acceptance.js` imports `src/config/env.js` and
+  `src/validators/validators.queries.js`, and neither imports it back.
+  It is imported by the four service files and by nothing else.
+  `held-transactions.js` now imports `src/db/pool.js`, which imports
+  `pg` and `env.js` and nothing of this repo besides. No newly imported
+  name is used while a module loads, only inside functions.
+- **Comments and doc lines the plan does not name** were first left as
+  they were, where this build makes them say less than the code does,
+  and listed for the user, who said to bring them in line (2026-11-19,
+  "Go ahead and change the comments and start the rig"). Brought in
+  line, each with the day. In `src/validators/validators.messages.js`:
+  the comments of `sendTransactionApproval` and `sendAttachmentApproval`
+  (the list of peers was "the one re-send after no answer"; it also
+  serves the approval asked of a validator that is counted by the time
+  of the proof), and the comment of `sendProofOfAttachmentAcceptance`
+  (`receipts` were "those answers"; they are the approvals of the
+  validators counted when the proof is built, and that proof may go a
+  second time too). In `src/transfer/transfer.service.js`,
+  `src/accounts/accounts.service.js` and
+  `src/attachments/attachments.service.js`: the sentence of the receive
+  comment that says what is returned (`approvals` are in line with the
+  validators counted by the time of the proof, as the last proof
+  carried them; `proof` has one entry per validator the last proof went
+  to; for a transaction `approved` stays true when the mark was taken
+  back). In the first two of these that sentence also named an entry of
+  `proof` as `{ id, status, body }`, which was wrong before this build;
+  it now reads `{ id, accepted, reason? }`. The comment of
+  `receiveTransaction` in `src/fund/fund.service.js` says "exactly as
+  those two do" and needed no change. In
+  `src/held-transactions/unapproved-sweep.js`: the second paragraph of
+  the opening comment (the steps of an approval round "add up to well
+  under two minutes"; by the plan's count this build adds about half a
+  minute to the worst case, which stays far under the five minutes). In
+  `src/validators/validators.service.js` and
+  `src/attachments/attachments.service.js`: the comments of the two
+  proof receivers (a row that is approved already was "the same proof
+  twice"; it is also met by the second proof, which carries other
+  receipts). In the README, "Database": "a refused approval leaves such
+  rows behind" (a proof that every validator refused leaves one too).
+  Comments and doc words only: no line of code changed with them.
+  `src/validators/validators.service.js`, which the plan's 1.9 lists as
+  not changed, has that one comment changed and no code.
+- **Read in the code, not tried: a follow-up that reaches the
+  originating validator in the second before a mark is taken back.**
+  Between its own mark and the take-back, a second at the least, the
+  row is approved on the originating validator alone. A follow-up for
+  that transaction that reaches this validator in that time passes
+  "approved on this validator", is stored here unapproved, and is
+  refused by every other validator (`attachment: this transaction is
+  not approved yet`). The sweep then drops the row, and a follow-up
+  that is kept in the row goes with it. A guardian's vote is a row of
+  `guardian_votes`,
+  which the sweep does not touch (section 21 counts on an unapproved
+  row having no child rows), so that one row would stay behind without
+  its proposal, on that one validator. It needs a guardian's vote in
+  the very second in which every validator refused a new proposal
+  twice. Before this build the row stayed approved for good, with such
+  a follow-up stuck in it. Named here, not closed.
+- **Checks.** `node --check` passed on the eight source files, the
+  seven of the plan and `unapproved-sweep.js`, with Node 24.22.0. The
+  imported names were read against their modules' exports:
+  `proveAcceptance` in `src/validators/acceptance.js`;
+  `takeApprovalBack` in `src/held-transactions/held-transactions.js`;
+  `query` in `src/db/pool.js`; `env` in `src/config/env.js`;
+  `findCountedPeers` in `src/validators/validators.queries.js`. The
+  link check of 31.4, run from a folder outside the repo: Node linked
+  the whole module graph from `src/server.js` with an empty environment
+  and stopped at the first settings read (`Error: Missing required
+  environment variable: PGDATABASE`), after every import of every
+  module had been matched to an export. No key file was read, no
+  database connection made, no server started. The same kind of load
+  behind one wrong name asked of `acceptance.js` stopped with
+  `SyntaxError: … does not provide an export named`, so the check does
+  see a wrong name. The plan's blocks against the built files, by a
+  throwaway script: 21 blocks between a line of three backticks plus
+  `js` and the next three backticks; the first is the whole of
+  `acceptance.js`, byte for byte; each of the ten blocks under **New**
+  is in its file exactly once, fifteen places in all. One check more
+  than the plan lists, also with a throwaway script outside the repo: a
+  byte-for-byte copy of the built `acceptance.js` was run on 24 made-up
+  layouts, with stand-ins for its two imports, for the sends and for
+  the two waits, and with receivers that judge a proof by checks 2, 4
+  and 5 of `receiveProofOfAcceptance`. What was expected of each layout
+  was written down from the plan's decisions before the run, and all 24
+  came out so: nothing changed; a validator voted out before the proof;
+  one voted back in that approves at once, says no five times, gives no
+  answer, answers `not counted yet` twice and then approves, answers it
+  five times, or is voted out again while it is asked; one voted out
+  and another voted back in; two voted back in, one of them silent; a
+  vote that lands while the first proof travels, in both directions; a
+  validator that took the first proof and refuses the second; every
+  validator refusing both proofs; the same with one answer missing,
+  with one `200` among them, with a `504` from all, and for a
+  follow-up; one validator that keeps refusing; a validator silent to
+  the first proof that takes the second; a network of one; a validator
+  voted back in between the two proofs that then says no, so that the
+  second proof does not go; the originating validator itself voted out;
+  a validator voted out between the two proofs after it took the first.
+  In every layout the own row was marked once at the most and before
+  any proof, and the mark was never taken back while any validator had
+  marked its row. The planning chat had run the same text on 22 layouts
+  of its own, and the statement of `takeApprovalBack` in a scratch
+  schema that was rolled back (the plan, "What the plan stands on").
+  `git status` showed the ten files of the first step and no other, on
+  `main` at `0712b16`. After the comments were brought in line:
+  `node --check` on nine source files, `validators.service.js` now
+  among them, the link check with the same answer, the plan's blocks
+  against the files with the same result, and `git status` with eleven
+  files. After the rig: `node --check` on the nine files again, the
+  link check again with the same answer, the plan's blocks against the
+  files again, the 24 layouts again, and the rig's copy of the code
+  compared with the working tree: equal in `src/`, `db/`, `network/`,
+  `deploy/` and `scripts/`, but for the rig's own registry and genesis
+  pair. `git status` showed the eleven files of 33.3 and no other, on
+  `main` at `0712b16`, with nothing staged.
+- **Before the rig** nothing of this build had run between two
+  validators, and no statement of it against a database in the build
+  chat. The rig was the first run.
+- **The rig found no fault in the code of this build**, and no line of
+  code changed after the first step: the source files the rig ran are
+  the ones the plan's blocks describe, with the comments in line. Every
+  one of the seven lines was logged between running validators, and
+  every branch of `acceptance.js` ran there at least once (33.5), but
+  for one: a validator that accepted the first proof and refuses the
+  second, which only the layouts above have. `takeApprovalBack` ran
+  through all three callers, on `pending`.
+- **Seen on the rig, known and left as it is.** Three things stopped or
+  disturbed the rig's long runs, and none of them is in this plan. The
+  hand-over case of 32.4, a healthy validator voted out when the lead
+  changes hands: it is on the after-production list
+  (`~/Desktop/Z-TestNet/after_production_todos`), and the rig met it in
+  every run at full speed. A round that ended without writing is led
+  again only at the next transaction that is accepted (32.1; among the
+  follow-ups of
+  `~/Desktop/Z-TestNet/forclaude/validator-resilience-plan-2.md`): on
+  the rig, with every account that could send holding a transfer that
+  waited, there was none, and nothing more was written until the leader
+  was restarted. And on a network of five, two validators voted out are
+  the floor: a third that then stops cannot be voted out, and when it
+  comes back one link short it cannot catch up while the other four
+  stand at three different chain ends. Each is told in 33.5.
+
+### 33.5 The rig
+
+The rig (the plan's section 2), 2026-11-19, 18:50 to 19:25 on this Mac's
+clock, everything in the build chat's scratchpad and nothing in the repo.
+It started on the user's word ("Go ahead and change the comments and
+start the rig"), after the comments of 33.4 were in line. Built as the
+rig of 32.5 was, from the tools that rig had left in its build chat's
+scratchpad, with these differences:
+
+- **Two copies of the code**, without `.git`, `node_modules` linked: the
+  working tree (every tracked file and the new one, 117 files), and
+  `0712b16` from `git archive`. They differed in the eleven files of
+  33.3 and nothing else. The rig's own registry and genesis pair went
+  into both.
+- **Five databases**, `anosrig1` to `anosrig5`, under a role of the
+  rig's own, `anosrig`, by `scripts/setup-db.sh`, on Homebrew PostgreSQL
+  17.11. A key per validator in owner-only files, five machine files,
+  the network's own settings as they are.
+- **The proxy** stood in front of all five, as in 32.5, with three
+  things more. A rule can name the validator a call comes from and the
+  transaction it is about. And a call can wait at a gate until the rig
+  lets it go. So the rig could hold one validator's answer to the
+  approval call of one originating validator, hold an originating
+  validator's proof on its way to chosen validators, and keep a
+  joiner's join request at the leader's door until the moment it wanted
+  the include vote.
+- **Four accounts**: the rig's OG account, two more (x and y) created
+  through a validator with a stand-in for the masterpod and paid 1,000
+  anos each, and later a fourth (z) for one of the extra checks. Every
+  plain transfer paid the rig's fund account.
+- **How a vote was put between the approvals and the proof.** A
+  validator V was made one link short: a trigger failed one batch on
+  it, as in 32.5. The transfer under test, T, went in through validator
+  A while the proxy held one answer to A's approval call for six
+  seconds. Three tenths of a second later a transfer of another account
+  went in through a third validator, the leader's look (section 32)
+  found V behind, and V was voted out. So A stood between its approvals
+  and its proof when the vote passed, for certain. For a return, V's
+  process was stopped after its vote and started again with its join
+  request held at the gate.
+- **By hand.** A validator that had been voted out was brought back by
+  a restart where its return was not the point. In point 7 and in the
+  run on `0712b16` it came back by its own self-check. A wrong flag was
+  set and reset by hand in points 5, 6 and 8 and in three of the extra
+  checks. Waiting rows that a refused proof had left were deleted by
+  hand after points 6, 8 and 9, in the run on `0712b16` and after the
+  extra checks, each time with a line in the rig's output.
+
+What it showed, in the plan's order. "A" is the validator the transfer
+comes in through, "V" the validator that is voted out or back in.
+
+1. **Ground.** Five up on empty databases: validator 1 `leading at
+   position 2`, the others `counted at position 2`. Two account
+   creations and five transfers landed at positions 3 to 9 on all five.
+   Then 60 transfers of the three accounts, 12 through each validator,
+   each on all five chains before the next was sent, in 12.4 seconds:
+   positions 10 to 69, every validator led 12 rounds, all five equal at
+   the end (69 links, one digest over every record hash), no unusual
+   line, and none of the seven lines of 33.1 in any log.
+2. **A validator voted out between the approvals and the proof.** The
+   batch failed on validator 2 (`wrote: 0`), which stood at position 69
+   with the others at 70. T, `6c606cad…` of account y, went in through
+   validator 1, and validator 3's answer to its approval call was held.
+   The other transfer went in through validator 5. The leader,
+   validator 4: `chain ends differ: 4 validators at position 70
+   (5d4e029e); validator 2 at position 69 (90745e82); own position 70
+   (5d4e029e)`, `ignore vote 40257098 naming validator 2: 3 voters`,
+   three times `voted yes (2: tail at position 69, own 70)`, passed,
+   `the round starts again`, and the other transfer written by the four
+   at 71, all within 0.4 seconds of T's send. Six seconds after the
+   send the held answer went back. Validator 1: `validator 2 is not
+   counted any more: its approval is left out of the proof`, `validator
+   3 approved`, `validator 4 approved`, `validator 5 approved`, `all
+   validators approve`, three times `accepted the proof`. T was written
+   by the four at position 72, 44 milliseconds after the held answer
+   had gone back. The wallet was answered `202` after 6.0 seconds,
+   which is the hold. The point ran five times on this build, with
+   another validator in each part (A was validator 1, 4, 1, 4 and 2):
+   the same line, and the transfer written by the four, each time.
+   **The same on `0712b16`**, all five on that code. The batch failed
+   on validator 1; T, `6753d82f…`, went in through validator 4;
+   validator 1 was voted out (`ignore vote 7f54ba0d`). Validator 4 sent
+   its proof with validator 1's receipt in it. Validators 2, 3 and 5:
+   `failed: receipts[0]: validatorFrom 1 is not a counted validator`.
+   Validator 4: three times `did not accept the proof: answered 400:
+   {"error":"receipts[0]: validatorFrom 1 is not a counted
+   validator"}`, and `202` to the wallet. T was never written.
+   Validator 1 came back by its self-check, `counted at position 110`,
+   61 seconds after its vote. The others dropped their copies of T 300
+   to 360 seconds after the send (`dropped unapproved pending
+   transaction 6753d82f…: older than 300 seconds`). Validator 4's row
+   was still there and approved 362 seconds after the send. The
+   account's next transfer, through validator 2: `validator 4 failed:
+   answered 400: {"error":"transaction: a transaction for this
+   accountId is already pending"}`, not approved. That is what this
+   build ends.
+3. **A validator voted back in between the approvals and the proof.**
+   Validator 2 was out and stopped. Started again, it caught up
+   (`replayed 3 links`), and its join request waited at the gate. T,
+   `02ec51d1…` of account x, went in through validator 3 with validator
+   4's answer held for five seconds, and 153 milliseconds later the
+   gate opened. The leader, validator 1: `join of validator 2 started;
+   rounds held`, `include vote b7ee7ba0 naming validator 2: 3 voters`,
+   three yes, passed. Validator 2: `join: included`, three lines
+   `cleared held pending transaction …`, `held rows of pending: 1
+   received, 1 stored`, which is T, and `counted at position 72`, 1.0
+   second after the vote. When the held answer went back, validator 3:
+   `validator 2 is counted now: it is asked for its approval`,
+   `validator 2 approved` with the other three, `accepted the proof`
+   from all four, and T written by all five at position 73.
+   **A second run, with V not ready yet.** Validator 1 was out; the
+   answer to A's approval call was held for 1.3 seconds and validator
+   1's `ready` for 2.5 seconds, so that it counted itself 3.5 seconds
+   after its include vote. A, validator 2: `validator 1 is counted now:
+   it is asked for its approval`, then three times, a second apart,
+   `validator 1 did not approve: answered 503: {"error":"not counted
+   yet"}; it is asked once more`. The fourth ask was approved, the
+   proof accepted by all four, and T, `35307552…`, written by all five
+   at position 77. The wallet was answered `202` after 4.4 seconds.
+4. **A vote while the proof travels.** The batch failed on validator 5.
+   T, `fe75126a…`, went in through validator 3: four approvals at once,
+   its own row marked, and the proof, which the proxy held for five
+   seconds on its way to validators 1, 2, 4 and 5. In that time the
+   other transfer went in and validator 5 was voted out (`ignore vote
+   ba71ab8c`). When the proof arrived, validators 1, 2 and 4: `failed:
+   receipts[3]: validatorFrom 5 is not a counted validator`. Validator
+   5, which is told nothing of its vote, accepted it. Validator 3: `the
+   proof of fe75126a… was not accepted by every validator; it goes
+   once more`, a second later `validator 5 is not counted any more: its
+   approval is left out of the proof`, then `accepted the proof` from
+   validators 1, 2 and 4, and T written by the four at position 80.
+   **A second run, the proof held on its way to two validators only.**
+   Validators 4 and 5 took the first proof at once (`approved:
+   d3eca945…`), before the vote. Validators 1 and 2 got it five seconds
+   later, after the vote, and refused it with the line above. `…it goes
+   once more`, `validator 5 is not counted any more…`, and the second
+   proof was accepted by validators 1 and 2 and by validator 4, whose
+   row was approved already. T was written by the four at position 83.
+   So some took the first proof and some the second.
+5. **Every validator refuses.** On validator 1 alone, by hand,
+   validator 3's row got `ignored = true`. T, `86d0e13f…` of account x,
+   through validator 1: approvals from validators 2, 4 and 5, and both
+   proofs refused by all three, `failed: no receipt from validator 3`,
+   a second apart. Validator 1: `the proof of 86d0e13f… was not
+   accepted by every validator; it goes once more`, then `no validator
+   accepted the proof of 86d0e13f…: the approval here is taken back`,
+   three times `did not accept the proof: answered 400: {"error":"no
+   receipt from validator 3"}`, and `202` to the wallet after 1.0
+   second. Its row was unapproved, like the rows of the three. With
+   nothing sent: validator 1 `dropped unapproved pending transaction
+   86d0e13f…: older than 300 seconds` 319 seconds after the send, and
+   validators 4, 2 and 5 the same line 335, 349 and 355 seconds after
+   it. Validator 1's table was put right by hand, and a new transfer of
+   account x, through validator 2, was written by all five at position
+   84, with no line of the plan.
+6. **One validator keeps refusing.** On validator 4 alone, by hand,
+   validator 2's row got `ignored = true`. T, `baeb3368…` of account y,
+   through validator 1: four approvals, then validator 4 refused both
+   proofs (`failed: receipts[0]: validatorFrom 2 is not a counted
+   validator`) and validators 2, 3 and 5 accepted. Validator 1: `…it
+   goes once more`, then `the proof of baeb3368… is still not accepted
+   by validator 4: the approval here stays`. Its row stayed approved,
+   as the rows of validators 2, 3 and 5 did; validator 4's was not; and
+   nothing was taken back. T was written nowhere: the leader's round
+   came to `official list: 0`. This is the case that stays (33.1, "What
+   stays"). The rig put validator 4's table right and deleted the five
+   rows by hand, and a closing transfer was written by all five.
+7. **The dying leader**, point 4 of 32.5, first run. The list of the
+   leader, validator 5, reached validator 2 (position 86) and was held
+   back from validators 1, 3 and 4, and validator 5 got SIGKILL. A
+   transfer of another account, `a4626153…`, through validator 3: `no
+   answer report for validator 5 sent to validator 1: answered 200`.
+   Validator 1: `ignore vote 60e9029b naming validator 5: 3 voters`,
+   three yes, `validator 5 ignored; validator 1 is the leader`; then
+   `chain ends differ: 3 validators at position 85 (5a7aea2f);
+   validator 2 at position 86 (45e85a07); own position 85 (5a7aea2f)`,
+   `ignore vote b3d7ddc6 naming validator 2: 2 voters`, two yes,
+   passed 20 milliseconds after the first vote, `the round starts
+   again`, and the missed transfer written by validators 1, 3 and 4 at
+   86. Validator 3, a second after its send: `validator 2 is not
+   counted any more: its approval is left out of the proof`, `validator
+   1 approved`, `validator 4 approved`, two times `accepted the proof`,
+   and the transfer that had found the dead leader was written by
+   validators 1, 3 and 4 at position 87. The wallet was answered `202`
+   after 1.0 second. In 32.5 that transfer was left unwritten, both
+   times. Validator 2 came back by its self-check (`self-check: ignored
+   by the network`, a minute later `…twice in a row; joining again`,
+   `replayed 1 links`, the include vote, `counted at position 87`), 93
+   seconds after its vote. A closing transfer was written by the four.
+8. **A follow-up.** An escrow transfer E, `504ae520…`, 5 anos from
+   account x to account y, was approved by all five and waited in
+   `escrow_transfers`. The batch failed on validator 5. The success
+   signature for E, signed by x, went in through validator 3, and
+   validator 1's answer to its attachment approval was held for six
+   seconds; the other transfer went in, and validator 5 was voted out
+   (`ignore vote f65e11e9`). Validator 3: `validator 5 is not counted
+   any more: its approval is left out of the proof`, three times
+   `accepted the proof`; validators 1, 2 and 4: `approved attachment:
+   28a17f61…`. E was written by the four at position 91 and left
+   `escrow_transfers` for `logs`, outcome `written`.
+   **Once with every validator refusing.** A second escrow transfer,
+   `e9676e41…`, approved by all five. On validator 1 alone, by hand,
+   validator 3's row got `ignored = true`, and the success signature
+   went in through validator 1. Validators 2, 4 and 5 refused both
+   proofs: `failed: no receipt from validator 3`. Validator 1: `…it
+   goes once more`, then `the proof of e9676e41… is still not accepted
+   by validators 2, 4, 5: the approval here stays`. No line `taken
+   back`. On validator 1 the success signature was approved; on
+   validators 2, 4 and 5 it was there and not approved; validator 3 had
+   none; the escrow was written nowhere. That is what a follow-up whose
+   proof stays refused leaves behind, as before this build. The rig
+   deleted the escrow's rows by hand.
+9. **Old and new together.** Validators 1 and 2 on `0712b16`,
+   validators 3, 4 and 5 on this build. Ten transfers, two through each
+   validator, the rounds led by validators on both codes: written by
+   all five at positions 93 to 102, and no log has a line of the plan
+   or an unusual line. Point 2 with A on this build (validator 3), the
+   vote's round led by validator 2 on `0712b16`: `validator 5 is not
+   counted any more: its approval is left out of the proof`, `accepted
+   the proof` from validators 1 and 2, on `0712b16`, and from validator
+   4, and T written by the four at position 106. Point 2 with A on
+   `0712b16` (validator 1): validators 2, 4 and 5 refused the proof,
+   `receipts[1]: validatorFrom 3 is not a counted validator`, T was not
+   written, validator 1's row stayed approved, and no log has a line of
+   the plan. That is the limit during a round of pulls: a submission is
+   covered when the validator it comes in through runs this build.
+
+Tried besides the nine points:
+
+- **The cure that was read in the code and never tried.** After point 2
+  on `0712b16`, with validator 4's row still approved, the account's
+  next transfer had left unapproved rows on the other four, and the rig
+  deleted those by hand: they would have blocked the account for five
+  more minutes, past the ten minutes a transfer is taken in for. Then
+  the same signed T went in again, through validator 2, 363 seconds
+  after its first send. Validator 4 answered it as the same approval
+  twice (`correct`), every validator approved, `accepted the proof`
+  came from all four, validator 4's row being approved already, and T
+  was written by all five at position 111. So the cure holds, for a
+  sender that keeps the signed transfer and sends it again between the
+  sixth and the tenth minute. The wallet does neither.
+- **A stake**, which goes through `receiveTransaction`
+  (`fund.service.js`): 10 anos of account y for `daoVote`, plain,
+  written by all five, the `stakes` row on all five, no line of the
+  plan. And once with every validator refusing, as in point 5: `…it
+  goes once more`, `no validator accepted the proof of 4a809fca…: the
+  approval here is taken back`, the row unapproved.
+- **An account creation**, which goes through `receiveCreateAccount`:
+  a new account z, through a validator whose table was wrong by hand as
+  in point 5. Both proofs refused, `no validator accepted the proof of
+  f933177a…: the approval here is taken back`, the row unapproved. The
+  rig deleted the rows by hand in place of the five minutes, and the
+  same signed submission, sent in again through another validator, was
+  written by all five; account z is in `accounts` on all five.
+- **Five asks that run out.** As point 3, with V's `ready` given no
+  answer once, so that V counted itself only 21 seconds after its
+  include vote. A: `validator 3 is counted now: it is asked for its
+  approval`, four times `…; it is asked once more`, and after the
+  fifth ask `validator 3 failed: answered 503: {"error":"not counted
+  yet"}` from the handler. The transfer was not approved, nothing was
+  marked, no proof went out, and the wallet was answered `202` after
+  5.4 seconds. The five rows were unapproved, V's among them, which it
+  had pulled from the leader.
+- **The include vote while the first proof travels, and five asks that
+  run out.** A's proof, with three receipts, was held for four seconds;
+  the include vote on validator 1 passed in that time; validators 3, 4
+  and 5 then refused it, `failed: no receipt from validator 1`.
+  Validator 2: `…it goes once more`, `validator 1 is counted now: it
+  is asked for its approval`, four times `…; it is asked once more`,
+  then `validator 1 did not approve: answered 503: {"error":"not
+  counted yet"}; the proof does not go again` and `no validator
+  accepted the proof of 8dc02112…: the approval here is taken back`.
+  The wallet was answered `202` after 9.1 seconds. With this run every
+  one of the seven lines has been logged between running validators.
+- **A validator that gives no answer to the ask.** As point 3, with the
+  connection for A's ask to V cut by the proxy. `validator 4 is counted
+  now: it is asked for its approval`, and at once, with no second ask,
+  `validator 4 failed: no answer: fetch failed: other side closed`. Not
+  approved, nothing marked.
+- **A missing answer among the refusals.** As point 5, with the proxy
+  cutting both proofs on their way to one of the three validators. Two
+  refused with `400`, twice, and one gave no answer, twice. `the proof
+  of 8cd7f6f5… is still not accepted by validators 3, 4, 5: the
+  approval here stays`, and validator 1's row stayed approved. An
+  answer that is missing may come from a validator that did mark its
+  row, so the mark is not taken back (33.1).
+- **A long plain run on this build.** Three accounts side by side, as
+  fast as they could, for 100 seconds, nothing held: 9,738 transfers in
+  6,749 rounds, positions 4,422 to 14,159, the slowest answer 44
+  milliseconds, none refused. Every one of the 9,738 is on the chain of
+  every counted validator, no waiting row was left, and no log has one
+  of the seven lines. The hand-over case of 32.4 voted one healthy
+  validator out 49 seconds into the run (`validator 4 sent no approved
+  pending list: answered 400: {"error":"validator 3 is not the
+  leader"}`), and it came back by its self-check 78 seconds later. No
+  transfer stood between its approvals and its proof at that vote.
+- **A second long run on this build, 180 seconds, and what stopped
+  it.** Thirteen seconds in, the hand-over case again: `validator 2
+  sent no approved pending list: answered 400: {"error":"validator 1 is
+  not the leader"}`, then `ignore vote f922b9ef failed: validator 3
+  voted no (2: ok)`, and the round ended with nothing written. A
+  transfer of each of the three accounts was approved on all five and
+  waited. A round that ended early is led again at the next transaction
+  (32.1, "What stays"), and the rig had no other account to send one:
+  each account's own next transfer was refused at the door, `a
+  transaction for this accountId is already pending`, 1,011 times, and
+  nothing more was written for the rest of the run. It is no fault of
+  this build: the three proofs had been accepted by every validator,
+  and no log has one of the seven lines. The rig restarted the leader,
+  which led at once (`official list: 3`), and the three were written
+  by all five. Every one of the 1,146 transfers answered `202` in that
+  run is on all five chains.
+- **A long run with restarts on `0712b16`**, all five on that code:
+  three accounts side by side for 100 seconds, and two validators
+  restarted in that time, as a round of pulls does. It says nothing
+  about this build and is told because it stopped the rig. Within ten
+  seconds of the first restart the hand-over case voted two healthy
+  validators out (`ignore vote ae5325e6 naming validator 4`, `ignore
+  vote 8a70e644 naming validator 3`). Three were counted when the
+  second restart took validator 5 down: `no ignore vote naming
+  validator 5: below the floor (3 counted of 5 active)`, `validator 5
+  gave no answer twice; the round ends`, and nothing more was written.
+  Validator 5 came up one link short and could not catch up, `no
+  majority tail: 4 of 4 health answers carry a chain tail`, since the
+  other four stood at three different chain ends; the two that were
+  voted out could not come back for the same reason. 4,300 transfers
+  had been answered `202`, and four of them were not on every chain
+  when the run ended. No proof was refused in that run: no log has `is
+  not a counted validator` or `no receipt from`. The rig stopped the
+  two validators that were far behind, validator 5 then found most at
+  one chain end and was counted again, and the two were started one
+  after the other and voted back in. Three of the four transfers were
+  then on every chain; the fourth had not been approved, and the rig
+  deleted its rows by hand. A rig of five on one disk makes this far
+  likelier than a network of twenty-five: two validators out are
+  already the floor here.
+
+What the rig could not show:
+
+- The doorman and the real network: twenty-five validators, the
+  distances between them, and a `502` or `504` from a doorman as the
+  answer to a proof. The rig's missing answer was a cut connection.
+- A vote that lands between the approvals and the proof by itself.
+  Every vote that did was put there by a hold of 1.3 to 6 seconds. On
+  one computer the gap is a few milliseconds wide, and in the long
+  plain runs the one vote that passed met no transfer in it.
+- A validator that accepted the first proof and refuses the second.
+  The layouts of 33.4 have it; on the rig a validator that had taken
+  the first proof accepted the second as well (point 4, second run).
+- `takeApprovalBack` on the four holding tables other than `pending`.
+  The planning chat ran its statement on all five in a scratch schema.
+- A follow-up of another kind than the escrow's success signature, and
+  a fund proposal.
+- A restart while transfers come in, on this build. 31.5 and 32.5 have
+  it for theirs; the run above, on `0712b16`, shows why the rig did not
+  repeat it.
+- The whole pull line and the stop: unchanged since 31.5, not run
+  again.
+
+The end of the rig: the five validators and the proxy stopped, the five
+databases and the role `anosrig` dropped. The Mac's other roles and
+databases were listed before the rig and after it, and the two lists are
+the same (19 databases, 5 roles). At its end the rig's chain had 15,310
+links on all five, with one digest over every record hash, no waiting
+row and no child row. Over the whole rig the five logs hold the seven
+lines 43 times: `its approval is left out of the proof` 10 times, `it
+is asked for its approval` 5, `it is asked once more` 11, `it goes once
+more` 9, `the proof does not go again` once, `the approval here is
+taken back` 4 times and `the approval here stays` 3. No log has a
+thrown error. The rig's folder, with its tools, keys and logs, stayed
+in the build chat's scratchpad and is not kept.

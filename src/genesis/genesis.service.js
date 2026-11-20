@@ -3,7 +3,7 @@ import { canonicalHash } from '../crypto/canonical.js';
 import { decodeDigest, sha256 } from '../crypto/hash.js';
 import { decodePublicKey } from '../crypto/signatures.js';
 import { pool } from '../db/pool.js';
-import { findTail, insertLink } from '../garlic-chain/garlic-chain.queries.js';
+import { findTail, insertLink, prepareChainWrite } from '../garlic-chain/garlic-chain.queries.js';
 import { findState, insertGenesisAccount } from './genesis.queries.js';
 import fundAccount from './fund-account.json' with { type: 'json' };
 import ogAccount from './og-account.json' with { type: 'json' };
@@ -56,7 +56,9 @@ const GENESIS_ACCOUNTS = [
  * Both accounts go in one database transaction, in transaction_id order
  * like a batch (accounts.service.js writeTransactions): rows written in one
  * transaction share a created_at, and findTail breaks that tie by
- * transaction_id, so the one written last must have the largest id.
+ * transaction_id, so the one written last must have the largest id. The
+ * transaction opens with prepareChainWrite (garlic-chain.queries.js), like
+ * every write of links, so the two links get positions 1 and 2.
  */
 export async function runGenesis() {
   const fundAccountId = decodeDigest(fundAccount.payload.accountId);
@@ -76,6 +78,7 @@ export async function runGenesis() {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await prepareChainWrite(client);
     let previousRecordHash = await findTail(client);
     for (const account of accounts) {
       previousRecordHash = await writeGenesisAccount(client, account, previousRecordHash);

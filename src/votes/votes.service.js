@@ -12,7 +12,7 @@ import {
   findNextCounted,
   setIgnored,
 } from '../validators/validators.queries.js';
-import { findCountedSender, releaseBusy, runLeader, takeBusy } from '../validators/validators.service.js';
+import { findCountedSender, isStopping, releaseBusy, runLeader, takeBusy } from '../validators/validators.service.js';
 import { verifyPayloadSignature } from '../validators/validators.signing.js';
 import {
   IGNORE,
@@ -57,7 +57,8 @@ const queue = [];
 
 /**
  * Handles a vote request from the starter. The checks of checkRequest,
- * then this validator's own check of each named validator (checkReachable).
+ * then this validator's own check of each named validator (checkReachable;
+ * in an ignore vote it also asks whether the validator counts itself).
  * The vote is yes for ignore when no named validator is reachable, yes for
  * include when every one is, no otherwise. Returns { ok: true, vote,
  * results, receipt } with the signed vote, or { ok: false, reason }.
@@ -67,7 +68,7 @@ export async function receiveIgnoreVote(body) {
   if (!checked.ok) return checked;
   const { payload, named } = checked;
 
-  const checks = await Promise.all(named.map((row) => checkReachable(row)));
+  const checks = await Promise.all(named.map((row) => checkReachable(row, { mustCount: payload.action === IGNORE })));
   const results = {};
   let reachable = 0;
   for (const [i, row] of named.entries()) {
@@ -263,8 +264,9 @@ async function applyProof(request, receipts) {
  * Runs one vote as its starter: `validatorIds` the named validators,
  * `action` ignore or include. For an ignore vote, this validator's own
  * check of each id comes first: an id ignored already, not an active row,
- * or reachable (checkReachable) is dropped with a line (`validator N
- * answers; no vote`), an empty list is nothing, and the floor is checked
+ * or reachable (checkReachable, which here also asks whether the validator
+ * counts itself) is dropped with a line (`validator N answers; no vote`),
+ * an empty list is nothing, and the floor is checked
  * before anything is sent. Then the request goes to every counted
  * validator except this one and the named; the vote passed when every one
  * answered yes. Otherwise it failed: the row is stored with outcome failed
@@ -291,7 +293,7 @@ export async function runVote(validatorIds, action, { retried = false } = {}) {
         console.log(`validator ${id} is not an active validator; no vote`);
         continue;
       }
-      const check = await checkReachable(row);
+      const check = await checkReachable(row, { mustCount: true });
       if (check.reachable) {
         console.log(`validator ${id} answers; no vote`);
         continue;
@@ -409,9 +411,12 @@ export async function handleReport(validatorIds, reporter) {
  * takeBusy): when a round, a vote or a join holds the flag, the ids go
  * into the report queue instead, drained when that section ends. After the
  * vote the queue is drained and runLeader called, as at the end of every
- * busy section.
+ * busy section. Once the process is stopping (validators.service.js
+ * isStopping) it does nothing: no vote starts and nothing is queued, so
+ * drainReports comes to an end.
  */
 export async function startVote(validatorIds) {
+  if (isStopping()) return;
   if (!takeBusy()) {
     queue.push(validatorIds);
     console.log(`report naming validator${plural(validatorIds)} ${validatorIds.join(', ')} queued: busy`);

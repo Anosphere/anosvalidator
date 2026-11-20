@@ -15,6 +15,7 @@ import { findStake } from '../stakes/stakes.queries.js';
 import { findAccount } from '../transfer/transfer.queries.js';
 import { isObject } from '../util/is-object.js';
 import { settleNoAnswers } from '../votes/votes.messages.js';
+import { proveAcceptance } from '../validators/acceptance.js';
 import {
   ATTACHMENT_APPROVAL,
   PROOF_OF_ATTACHMENT_ACCEPTANCE,
@@ -83,14 +84,23 @@ export const KINDS = Object.freeze([
  * other active validator, each answer checked as an attachment approved
  * receipt; then, if every one approved, the own copy is marked approved, the
  * proof of attachment acceptance bundling the receipts goes to everyone, and
- * the kind's effect is applied here.
+ * the kind's effect is applied here. Since 2026-11-19 the mark and the proof
+ * are proveAcceptance (src/validators/acceptance.js, docs/schemas.md section
+ * 33), as for a transaction: right before the proof the approvals are
+ * brought in line with the validators counted by then, and a proof that not
+ * every validator accepted goes once more, a second later. The mark of a
+ * follow-up is not taken back: no sweep drops a follow-up.
  *
  * Returns { ok: false, reason }, or { ok: true, transactionId, approvals,
  * approved, proof } exactly as the transaction flows do, so the handlers
  * log alike: the held transaction's id as the signer sent it, one
  * { id, approved, reason? } per validator called, whether every one
  * approved, and, when they did, one { id, accepted, reason? } per validator
- * the proof went to. Written as if nothing can fail, like them.
+ * the proof went to. Since 2026-11-19 `approvals` are in line with the
+ * validators counted by the time of the proof, as the last proof carried
+ * them, and `proof` has one entry per validator the last proof went to,
+ * accepted when that validator accepted either proof (acceptance.js
+ * proveAcceptance). Written as if nothing can fail, like them.
  */
 export async function receiveAttachment(body, kinds) {
   const verified = await verifyAttachment(body, kinds);
@@ -112,16 +122,22 @@ export async function receiveAttachment(body, kinds) {
     return { ...outcome, approved: false };
   }
 
-  // Every validator approved: our own copy first, then tell them all, then
-  // whatever the kind does once approved.
-  await kind.markApproved(transactionId, stored.ref);
-  const proof = await sendProofOfAttachmentAcceptance({
+  // Every validator approved: the proof of acceptance (src/validators/
+  // acceptance.js proveAcceptance), our own copy first, then whatever the
+  // kind does once approved. No takeMarkBack: no sweep drops a follow-up.
+  const proved = await proveAcceptance({
     transactionId: body.payload.transactionId,
-    attachmentId: attachmentId.toString('hex'),
-    receipts: approvals.map((approval) => approval.receipt),
+    approvals,
+    askApproval: (peers) => sendAttachmentApproval({ attachment: body, transactionId, attachmentId, peers }),
+    markApproved: () => kind.markApproved(transactionId, stored.ref),
+    sendProof: (receipts) => sendProofOfAttachmentAcceptance({
+      transactionId: body.payload.transactionId,
+      attachmentId: attachmentId.toString('hex'),
+      receipts,
+    }),
   });
-  await kind.onAccepted(transactionId, stored.ref);
-  return { ...outcome, approved: true, proof };
+  if (proved.approved) await kind.onAccepted(transactionId, stored.ref);
+  return { ...outcome, ...proved };
 }
 
 /**
@@ -213,8 +229,10 @@ export async function receiveAttachmentApproval(body) {
  *      originating one.
  * The registry is read once, up front. If all of it holds, the attachment
  * is marked approved here and the kind's effect applied; an attachment
- * approved already (the same proof twice) gets neither again, and the
- * accepted receipt is answered either way.
+ * approved already (the same proof twice, or since 2026-11-19 the second
+ * proof of one follow-up, with other receipts: src/validators/
+ * acceptance.js) gets neither again, and the accepted receipt is answered
+ * either way.
  *
  * Returns { ok: true, receipt } with the signed attachment accepted receipt
  * to answer with, or { ok: false, reason }.
@@ -277,7 +295,8 @@ export async function receiveProofOfAttachmentAcceptance(body) {
   }
 
   // Approved here, then the kind's effect, unless it was approved already
-  // (the same proof twice): then neither, and the receipt alone. The mark
+  // (the same proof twice, or a second proof with other receipts): then
+  // neither, and the receipt alone. The mark
   // is false only if another request got here first, and that one applies
   // the effect.
   if (!located.approved) {

@@ -5,7 +5,7 @@ import { ACCOUNT_KEYS } from './account-keys.js';
 import { ACCOUNT_TYPES } from './account-types.js';
 import { pool } from '../db/pool.js';
 import { FUND_PROPOSAL, TRANSFER_TO_FUND, writeFundProposal, writeTransferToFund } from '../fund/fund.service.js';
-import { findTail, insertLink } from '../garlic-chain/garlic-chain.queries.js';
+import { findTail, insertLink, prepareChainWrite } from '../garlic-chain/garlic-chain.queries.js';
 import {
   ASSISTED_TRANSFERS,
   ESCROW_TRANSFERS,
@@ -14,6 +14,7 @@ import {
   HELD_TABLE_NAMES,
   LOCKED_TRANSACTIONS,
   PENDING,
+  takeApprovalBack,
 } from '../held-transactions/held-transactions.js';
 import { deleteLocked } from '../locked-transactions/locked-transactions.queries.js';
 import {
@@ -26,6 +27,7 @@ import { ARBITRATED_SUCCESS, WRITTEN, moveToArchives, moveToLogs } from '../reco
 import { isTransferType, writeAnosTransfer } from '../transfer/transfer.service.js';
 import { fetchAnosAccount } from '../masterpod/masterpod.client.js';
 import { isObject } from '../util/is-object.js';
+import { proveAcceptance } from '../validators/acceptance.js';
 import { sendProofOfAcceptance, sendTransactionApproval } from '../validators/validators.messages.js';
 import { settleNoAnswers } from '../votes/votes.messages.js';
 import { findExisting, insertAccount } from './accounts.queries.js';
@@ -140,13 +142,23 @@ export function checkCreateAccountSignaturesAndIds(body) {
  * other active validator, wait for all of them, and check each answer as a
  * transaction approved receipt; then, if every one approved, mark its own
  * pending row approved and send everyone the proof of acceptance bundling
- * those receipts.
+ * those receipts. Since 2026-11-19 that last step is proveAcceptance
+ * (src/validators/acceptance.js, docs/schemas.md section 33): right before
+ * the proof the approvals are brought in line with the validators counted
+ * by then; a proof that not every validator accepted goes once more, a
+ * second later; and when every validator refused, the mark on the own row
+ * is taken back, so the sweep drops the row.
  *
  * Returns { ok: false, reason }, or { ok: true, transactionId, approvals,
  * approved, proof } with the id as the caller sent it, one
  * { id, approved, reason? } per validator called, whether every one
- * approved, and, when they did, one { id, status, body } per validator the
- * proof went to. A unique-key conflict on the insert gets the same
+ * approved, and, when they did, one { id, accepted, reason? } per validator
+ * the proof went to. Since 2026-11-19 `approvals` are in line with the
+ * validators counted by the time of the proof, as the last proof carried
+ * them; `proof` has one entry per validator the last proof went to,
+ * accepted when that validator accepted either proof; and `approved` stays
+ * true when the mark was taken back (acceptance.js proveAcceptance). A
+ * unique-key conflict on the insert gets the same
  * reason the manual check would have given; it only happens when two
  * requests race past check 4 at the same moment.
  *
@@ -192,13 +204,17 @@ export async function receiveCreateAccount(body) {
     return { ...outcome, approved: false };
   }
 
-  // Every counted validator approved: our own row first, then tell them all.
-  await markApproved(transactionId);
-  const proof = await sendProofOfAcceptance({
+  // Every counted validator approved: the proof of acceptance
+  // (src/validators/acceptance.js proveAcceptance), our own row first.
+  const proved = await proveAcceptance({
     transactionId: body.payload.transactionId,
-    receipts: approvals.map((approval) => approval.receipt),
+    approvals,
+    askApproval: (peers) => sendTransactionApproval({ transaction: body, transactionId, peers }),
+    markApproved: () => markApproved(transactionId),
+    sendProof: (receipts) => sendProofOfAcceptance({ transactionId: body.payload.transactionId, receipts }),
+    takeMarkBack: () => takeApprovalBack(PENDING, transactionId),
   });
-  return { ...outcome, approved: true, proof };
+  return { ...outcome, ...proved };
 }
 
 /**
@@ -257,6 +273,10 @@ export async function writeApproved(transactionIds) {
  * none of these, or a database error on one of the writes. A connection
  * that drops still throws, like every other query.
  *
+ * The transaction opens with prepareChainWrite (garlic-chain.queries.js):
+ * a lock that only another writer of links waits for, and the position
+ * counter set to the chain's end.
+ *
  * Each link's record_hash is the SHA-256 of its trans_hash followed by the
  * previous link's record_hash, both as raw bytes. The previous link is the
  * newest row in the chain when the batch starts (findTail), then the link
@@ -266,6 +286,7 @@ async function writeTransactions(rows) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await prepareChainWrite(client);
     let previousRecordHash = await findTail(client);
     for (const row of rows) {
       const { transactionType } = row.ogTransaction.payload;
