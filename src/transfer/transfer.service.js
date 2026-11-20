@@ -10,11 +10,13 @@ import {
   HELD_TABLES,
   LOCKED_TRANSACTIONS,
   PENDING,
+  takeApprovalBack,
 } from '../held-transactions/held-transactions.js';
 import { LOCKED_CONFLICT_REASONS } from '../locked-transactions/locked-transactions.queries.js';
 import { PENDING_CONFLICT_REASONS } from '../pending/pending.queries.js';
 import { moveStake } from '../stakes/stakes.queries.js';
 import { isObject } from '../util/is-object.js';
+import { proveAcceptance } from '../validators/acceptance.js';
 import { sendProofOfAcceptance, sendTransactionApproval } from '../validators/validators.messages.js';
 import { settleNoAnswers } from '../votes/votes.messages.js';
 import { findAccount, findExisting, findLatestTransactionId } from './transfer.queries.js';
@@ -340,13 +342,23 @@ export async function checkTransferSignaturesAndIds(body, { client } = {}) {
  * other active validator, wait for all of them, and check each answer as a
  * transaction approved receipt; then, if every one approved, mark its own
  * row approved, in whichever table holds it, and send everyone the proof of
- * acceptance bundling those receipts.
+ * acceptance bundling those receipts. Since 2026-11-19 that last step is
+ * proveAcceptance (src/validators/acceptance.js, docs/schemas.md section
+ * 33): right before the proof the approvals are brought in line with the
+ * validators counted by then; a proof that not every validator accepted
+ * goes once more, a second later; and when every validator refused, the
+ * mark on the own row is taken back, so the sweep drops the row.
  *
  * Returns { ok: false, reason }, or { ok: true, transactionId, approvals,
  * approved, proof } exactly as receiveCreateAccount does: the id as the
  * caller sent it, one { id, approved, reason? } per validator called,
- * whether every one approved, and, when they did, one { id, status, body }
- * per validator the proof went to. Written as if nothing can fail, like the
+ * whether every one approved, and, when they did, one { id, accepted,
+ * reason? } per validator the proof went to. Since 2026-11-19 `approvals`
+ * are in line with the validators counted by the time of the proof, as the
+ * last proof carried them; `proof` has one entry per validator the last
+ * proof went to, accepted when that validator accepted either proof; and
+ * `approved` stays true when the mark was taken back (acceptance.js
+ * proveAcceptance). Written as if nothing can fail, like the
  * create-account flow.
  */
 export async function receiveAnosTransfer(body) {
@@ -372,13 +384,17 @@ export async function receiveAnosTransfer(body) {
     return { ...outcome, approved: false };
   }
 
-  // Every counted validator approved: our own row first, then tell them all.
-  await table.markApproved(transactionId);
-  const proof = await sendProofOfAcceptance({
+  // Every counted validator approved: the proof of acceptance
+  // (src/validators/acceptance.js proveAcceptance), our own row first.
+  const proved = await proveAcceptance({
     transactionId: body.payload.transactionId,
-    receipts: approvals.map((approval) => approval.receipt),
+    approvals,
+    askApproval: (peers) => sendTransactionApproval({ transaction: body, transactionId, peers }),
+    markApproved: () => table.markApproved(transactionId),
+    sendProof: (receipts) => sendProofOfAcceptance({ transactionId: body.payload.transactionId, receipts }),
+    takeMarkBack: () => takeApprovalBack(heldIn, transactionId),
   });
-  return { ...outcome, approved: true, proof };
+  return { ...outcome, ...proved };
 }
 
 /**

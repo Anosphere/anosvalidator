@@ -11,7 +11,10 @@ import { HELD_TABLE_NAMES } from './held-transactions.js';
  * originating validator never sends the proof of acceptance, and nothing
  * tells the others to drop their rows. Those rows would stay for good, and
  * since account_id is unique in every holding table, the account could send
- * nothing more through a validator that holds one.
+ * nothing more through a validator that holds one. Since 2026-11-19 a row
+ * whose approved mark the originating validator took back, because every
+ * validator refused its proof of acceptance (src/validators/acceptance.js),
+ * is unapproved too, and goes the same way.
  *
  * So every validator drops, on its own, any held row that is still
  * unapproved UNAPPROVED_AGE_LIMIT_SECONDS after it was stored
@@ -19,7 +22,9 @@ import { HELD_TABLE_NAMES } from './held-transactions.js';
  * no trace but a log line. Safe because an approval round is over long
  * before the limit: the send with its timeout, the wait for an ignore vote
  * and the one re-send, then the proof, add up to well under two minutes
- * against the five minutes set in network/testnet.env. A row unapproved
+ * against the five minutes set in network/testnet.env; since 2026-11-19
+ * the asks and the second proof of src/validators/acceptance.js can add
+ * about half a minute to that, which is still far under it. A row unapproved
  * past the limit can no longer become approved, so no two validators can
  * disagree about a transaction that counts. An unapproved row has no
  * follow-ups and no child rows (a follow-up is only accepted on an approved

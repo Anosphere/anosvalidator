@@ -26,7 +26,10 @@ import { signPayload, verifyPayloadSignature } from './validators.signing.js';
  * so a caller can tell no answer from a refusal. The approval sends and
  * the leader calls take an optional list of peers, for the one re-send
  * after no answer (src/votes/votes.messages.js settleNoAnswers,
- * validators.service.js settleRoundAnswers).
+ * validators.service.js settleRoundAnswers). Since 2026-11-19 the approval
+ * sends take that list for one thing more: the approval asked of a
+ * validator that is counted by the time of the proof and has given none
+ * (acceptance.js bringInLine).
  */
 
 /**
@@ -61,7 +64,9 @@ export const TRANSACTION_ACCEPTED = 'transactionAccepted';
  * receipt (checkTransactionApproved). Resolves with one
  * { id, approved: true, receipt } or { id, approved: false, reason } per
  * validator called, in ascending id order. `peers`, optional, is the list
- * to send to instead of every counted peer: the one re-send after no answer.
+ * to send to instead of every counted peer: the one re-send after no answer
+ * and, since 2026-11-19, the approval asked of a validator that is counted
+ * by the time of the proof (acceptance.js bringInLine).
  *
  * Receipt shape; the payload is what is signed:
  *
@@ -217,10 +222,16 @@ export function checkApprovedShape(receipt) {
  * POST /proof-of-acceptance, once every one of them has answered the approval
  * call with a valid transaction approved receipt and this validator has marked
  * its own pending row approved. `receipts` are those answers, untouched, in
- * ascending validator order. Waits for all of them and checks each answer as
+ * ascending validator order. Since 2026-11-19 they are the approvals of the
+ * validators counted when the proof is built, and the proof of one
+ * transaction may go a second time, with other receipts (acceptance.js
+ * proveAcceptance). Waits for all of them and checks each answer as
  * a transaction accepted receipt (checkTransactionAccepted). Resolves with
- * one { id, accepted: true, receipt } or { id, accepted: false, reason } per
- * validator called, in ascending id order.
+ * one { id, accepted: true, receipt } or { id, accepted: false, reason,
+ * status } per validator called, in ascending id order: `status` is the
+ * HTTP status that validator answered, undefined when it gave no answer
+ * (noAnswer: true). proveAcceptance (acceptance.js) tells a plain refusal,
+ * a 400, from every other answer by it.
  *
  *   payload: {
  *     transactionId:        the transaction being accepted, as the submitter sent it
@@ -249,7 +260,7 @@ export async function sendProofOfAcceptance({ transactionId, receipts }) {
   return answers.map((answer, i) => {
     const checked = checkTransactionAccepted(answer, { from: peers[i], transactionId: transactionIdBytes });
     return checked.reason
-      ? { id: peers[i].id, accepted: false, reason: checked.reason, ...(checked.noAnswer && { noAnswer: true }) }
+      ? { id: peers[i].id, accepted: false, reason: checked.reason, status: answer.status, ...(checked.noAnswer && { noAnswer: true }) }
       : { id: peers[i].id, accepted: true, receipt: checked.receipt };
   });
 }
@@ -346,7 +357,9 @@ export const ATTACHMENT_ACCEPTED = 'attachmentAccepted';
  * checks each answer as an attachment approved receipt. Resolves with one
  * { id, approved: true, receipt } or { id, approved: false, reason } per
  * validator called, in ascending id order. `peers`, optional, is the list
- * to send to instead of every counted peer: the one re-send after no answer.
+ * to send to instead of every counted peer: the one re-send after no answer
+ * and, since 2026-11-19, the approval asked of a validator that is counted
+ * by the time of the proof (acceptance.js bringInLine).
  *
  *   payload: {
  *     attachment:           the follow-up exactly as received ({ payload, signatures })
@@ -414,7 +427,10 @@ export function buildAttachmentAccepted({ transactionId, attachmentId, validator
  * the approval with a valid attachment approved receipt and this validator
  * has marked its own copy approved. `transactionId` and `attachmentId` are
  * hex, as the wire carries them; `receipts` are those answers, untouched, in
- * ascending validator order. Waits for all of them and checks each answer as
+ * ascending validator order. Since 2026-11-19 they are the approvals of the
+ * validators counted when the proof is built, and the proof of one
+ * follow-up may go a second time, with other receipts (acceptance.js
+ * proveAcceptance). Waits for all of them and checks each answer as
  * an attachment accepted receipt. Resolves with one
  * { id, accepted: true, receipt } or { id, accepted: false, reason } per
  * validator called, in ascending id order.

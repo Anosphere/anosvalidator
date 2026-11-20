@@ -203,8 +203,9 @@ async function verifyTransaction(transaction) {
  * The registry is read once, up front; 2, 4 and 5 all work from that one
  * snapshot. If all of it holds, this validator's row, in whichever table
  * holds the transaction, is marked approved; a row approved already (the
- * same proof twice) leaves the mark false, which is no refusal, and the
- * accepted receipt is answered either way.
+ * same proof twice, or since 2026-11-19 the second proof of one
+ * transaction, with other receipts: acceptance.js) leaves the mark false,
+ * which is no refusal, and the accepted receipt is answered either way.
  *
  * Returns { ok: true, receipt } with the signed transaction accepted receipt
  * to answer with (validators.messages.js), or { ok: false, reason }.

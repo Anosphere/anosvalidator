@@ -255,6 +255,8 @@ of them. A row still unapproved `UNAPPROVED_AGE_LIMIT_SECONDS` (300) after
 it was stored is dropped by the validator holding it, a plain delete in any
 of the five, once a minute (`src/held-transactions/unapproved-sweep.js`;
 docs/schemas.md section 21): a refused approval leaves such rows behind,
+and since 2026-11-19 so does a proof of acceptance that every validator
+refused (section "Ignoring and joining", "The proof after a vote"),
 and an account can send nothing through a validator that holds one.
 
 Conventions used in the schema:
@@ -531,7 +533,23 @@ every other active validator, waits for all of them, and checks each answer
 as a transaction approved receipt, logging `validator N approved` or
 `validator N failed: <reason>` and, when every one approved, `all validators
 approve`. In that case it marks its own pending row approved, sends everyone
-the proof of acceptance and logs `validator N accepted the proof`. Written as
+the proof of acceptance and logs `validator N accepted the proof`. Since
+2026-11-19 (`src/validators/acceptance.js`, `docs/schemas.md` section 33)
+it does three things more there. Right before it builds the proof it reads
+again who is counted: the approval of a validator that was voted out since
+is left out, and a validator that was voted back in since is asked for its
+approval. A proof that not every validator accepted goes once more, a
+second later, with the approvals brought in line again. And when every
+validator refused the proof, it takes the mark on its own row back, so the
+sweep of unapproved rows drops that row and the account can send again.
+The lines it logs for these: `validator N is not counted any more: its
+approval is left out of the proof`; `validator N is counted now: it is
+asked for its approval`; `validator N did not approve: <reason>; it is
+asked once more`; `the proof of <id> was not accepted by every validator;
+it goes once more`; `validator N did not approve: <reason>; the proof does
+not go again`; `no validator accepted the proof of <id>: the approval here
+is taken back`; `the proof of <id> is still not accepted by validator N:
+the approval here stays` (`validators N, M` for more than one). Written as
 if nothing can fail: a validator that is down makes the request fail with a
 `500`, the pending row already in place, and nothing yet happens when a
 validator refuses.
@@ -720,7 +738,10 @@ kind's own checks; a place to store it. Then the object is stored whole,
 `approved = false`, and goes round the validators with the attachment
 messages (section "Validator-to-validator messages"): the originating
 validator marks it approved once every peer answered, sends the proof, and
-each peer marks its copy approved. When a validator marks a follow-up
+each peer marks its copy approved. Since 2026-11-19 the proof of a
+follow-up is built and sent as a transaction's is (section "Create-account
+submission"), and its mark is not taken back. When a validator marks a
+follow-up
 approved it applies the kind's effect, if the kind has one, and the handler
 starts a leader round, since the follow-up may have completed a transfer.
 The signer's answer is `202` + `{ transactionId }` once stored on the
@@ -1122,12 +1143,57 @@ most `NO_ANSWER_WAIT_SECONDS` (60), until every one of them is ignored;
 then it sends the approval once more to the ones still counted. A second no
 answer is `validator N gave no answer twice` and fails the submission as a
 refusal does; otherwise the own row is marked approved and the proof goes
-to the counted peers as before. A refusal from a peer that passes the
-health check is handled as before, no report. The receiver of a report
+to the counted peers as before (the next paragraph). A refusal from a peer
+that passes the health check is handled as before, no report. The receiver
+of a report
 answers `200 {}` at once; if it may start a vote (it is the leader, or the
 ids hold its leader and it is the next in the ring) it runs the vote; if it
 is busy, the ids wait in a queue. Since 2026-11-19 the originator's check
 of a peer that refused asks about `counted` too, as an ignore vote does.
+
+**The proof after a vote** (`src/validators/acceptance.js`, since
+2026-11-19; `docs/schemas.md` section 33). An originator collects its
+approvals from the validators that are counted when it asks. Each receiver
+checks the proof against the validators it counts when the proof arrives:
+one receipt from every counted validator but the originator, no more and no
+fewer. A vote that passed in between, an ignore vote or an include vote,
+made the two differ, and every receiver refused the proof: `receipts[i]:
+validatorFrom N is not a counted validator`, or `no receipt from validator
+N`. Nothing reacted to that. The transaction was never written. The
+originator had marked its own row approved by then, and from then on it
+refused every transaction of that account. Now the originator does three
+things. One: right before it builds the proof it reads its counted peers
+again. The approval of a validator that is not counted any more is left
+out: `validator N is not counted any more: its approval is left out of the
+proof`. A validator that is counted now and has given no approval is asked
+for it, with the approval message that exists: `validator N is counted now:
+it is asked for its approval`. A validator that was just voted back in
+answers `503 not counted yet` for a second or two, until it has taken in
+the leader's waiting rows. So one that answers and does not approve is
+asked again after a second, five asks in all: `validator N did not approve:
+<reason>; it is asked once more`. One that gives no answer at all is not
+waited for. If it still has not approved then, the transaction is not
+approved, as after any refusal: nothing is marked and no proof is sent.
+Two: the own row is
+marked and the proof goes out, and when not every validator accepted it, it
+goes once more a second later, the approvals brought in line again: `the
+proof of <id> was not accepted by every validator; it goes once more`. The
+proof of a vote reaches the validators at slightly different moments, so in
+that moment no list of receipts is right for all of them. A validator that
+accepted the first proof counts as accepted, whatever it answers the
+second. When a validator that is counted by then does not approve, the
+second proof is not sent: `validator N did not approve: <reason>; the proof
+does not go again`. Three: when every validator refused, each of them with
+a `400`, the originator takes the mark on its own row back: `no validator
+accepted the proof of <id>: the approval here is taken back`. The sweep of
+unapproved rows then drops its row as it drops the others', the account can
+send again, and the transaction is not written. When some validators
+accepted, or an answer is missing or is not a `400`, the mark stays, as it
+did before: `the proof of <id> is still not accepted by validator N: the
+approval here stays`. A follow-up gets one and two and not three: no sweep
+drops a follow-up. The wallet's answer stays `202`. Only the originator
+changes, with the messages that exist, so a validator on this code and a
+validator on older code work together.
 
 **One busy flag** per validator covers a round, a vote and a join it leads,
 so none of them overlap; whoever ends a busy section runs the queued
@@ -1381,6 +1447,11 @@ payload: {
 signature: { key }
 ```
 
+Since 2026-11-19 the receipts are those of the validators that are counted
+when the proof is built, and the proof of one transaction may be sent a
+second time, with other receipts (section "Ignoring and joining", "The
+proof after a vote").
+
 The receiver checks the shape; the originating validator's signature; that
 it holds the transaction in one of the five holding tables and has not
 approved it yet; each receipt (an active validator other than the
@@ -1457,6 +1528,10 @@ payload: {
 }
 signature: { key }
 ```
+
+Since 2026-11-19 its receipts, too, are those of the validators that are
+counted when the proof is built, and it may be sent a second time, with
+other receipts.
 
 The receiver checks the shape, the originating validator's signature, that
 it holds this attachment for this transaction unapproved (the holding table
@@ -1702,7 +1777,7 @@ src/
     locked-transactions.queries.js  insert, look up, approve, list due and delete locked rows; the cancellation slot
     locked-transfer-cancel.js       the lockedTransferCancel follow-up kind
   held-transactions/     the registry of the five holding tables
-    held-transactions.js one entry per table (insert, find, markApproved, findApproved, conflictReasons); findHeld
+    held-transactions.js one entry per table (insert, find, markApproved, findApproved, conflictReasons); findHeld; takeApprovalBack
     held-rows.service.js the held rows a joiner pulls: readHeldRows (the leader), storeHeldRows (the joiner)
     written-rows.js      the two deletes of a validator that comes back: dropWrittenHeldRows (already on the chain), clearHeldRows (before the pull of a join)
   garlic-chain/          the chain: its SQL, the chunk read and the replay (section "Ignoring and joining")
@@ -1745,6 +1820,7 @@ src/
     join.service.js        joining: the counted flag, the leader's side (the hold, the three join messages) and the joiner's loop every boot runs
     self-check.js          the self-check: once a minute a counted validator compares itself with most of the others, and joins again when it is out of step twice in a row
     chain-ends.js          the look before a round: the leader reads every counted validator's chain end from its health and judges it (lookAtChainEnds, judgeChainEnds; most win, five findings)
+    acceptance.js          the proof of acceptance as the originator sends it (proveAcceptance): the approvals brought in line with the validators counted by then, a second proof, the own mark taken back when every validator refused
     validators.signing.js  loads the key file; own public key; sign a payload with own key; verify one with a peer's
     registry.service.js    applies network/testnet.registry.json at boot: the shape checks, the five rules, the hash
     registry.queries.js    the apply's SQL

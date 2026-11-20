@@ -5,6 +5,7 @@ import {
   insertAssisted,
   markAssistedApproved,
 } from '../assisted-transfers/assisted-transfers.queries.js';
+import { query } from '../db/pool.js';
 import {
   ESCROW_CONFLICT_REASONS,
   findEscrow,
@@ -125,4 +126,21 @@ export async function findHeld(transactionId) {
     if (row) return { table, approved: row.approved, ogTransaction: row.ogTransaction };
   }
   return null;
+}
+
+/**
+ * Takes the approved mark of a held row back. `table` is one of
+ * HELD_TABLE_NAMES, `transactionId` the 32 raw bytes. The validator that
+ * took a transaction does this when every other validator refused its
+ * proof of acceptance (src/validators/acceptance.js): the row is then
+ * unapproved here as it is on them, and the sweep (unapproved-sweep.js)
+ * drops it by its age. Returns true when a row changed.
+ */
+export async function takeApprovalBack(table, transactionId) {
+  if (!HELD_TABLE_NAMES.includes(table)) throw new Error(`${table} is not a holding table`);
+  const { rowCount } = await query(
+    `UPDATE ${table} SET approved = false WHERE transaction_id = $1 AND approved`,
+    [transactionId],
+  );
+  return rowCount === 1;
 }
