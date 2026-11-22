@@ -3,15 +3,18 @@ import { decodeDigest } from '../crypto/hash.js';
 import { isAppointedPurpose } from '../stakes/stake-purposes.js';
 
 /**
- * The one call this server makes to the masterpod: POST /get-anos-account
- * (wallet spec 4.4), asked twice over. At a create-account submission it
- * asks whether a vouched anoPod made the account (the binding,
- * accounts.service.js receiveCreateAccount); at a transferToFund for
- * moderator, attestor, validator or masterPod it asks whether that anoPod
- * is appointed for the purpose (the appointment, fund.service.js
- * checkAppointment, docs/schemas.md section 24; validator and masterPod
- * since 2026-11-10, section 26). Shaped like the keyholder's
+ * The two calls this server makes to the masterpod. The first: POST
+ * /get-anos-account (wallet spec 4.4), asked twice over. At a
+ * create-account submission it asks whether a vouched anoPod made the
+ * account (the binding, accounts.service.js receiveCreateAccount); at a
+ * transferToFund for moderator, attestor, validator or masterPod it asks
+ * whether that anoPod is appointed for the purpose (the appointment,
+ * fund.service.js checkAppointment, docs/schemas.md section 24; validator
+ * and masterPod since 2026-11-10, section 26). Shaped like the keyholder's
  * masterpod.client.js: a fetch with a timeout, every failure one outcome.
+ * The second, since 2026-11-22 (docs/schemas.md section 34), is
+ * reportWaitingTransfers, at the end of this file: what
+ * masterpod-reports.js sends.
  */
 
 /** How long the masterpod has to answer. */
@@ -53,4 +56,29 @@ export async function fetchAnosAccount(accountId) {
   if (anopodId === null || body?.vouched !== true) return { bound: false };
   const role = isAppointedPurpose(body.role) ? body.role : null;
   return { bound: true, anopodId, role };
+}
+
+/**
+ * Tells the masterpod about waiting transfers: POST
+ * /report-waiting-transfers (docs/schemas.md section 34; the masterpod's
+ * spec section 25) with `message`, { payload, signature } as
+ * masterpod-reports.js built and signed it. Returns null when the
+ * masterpod answered 200, else a few words that say what went wrong, for
+ * the log: the status, or the fetch's own error. A redirect is not
+ * followed.
+ */
+export async function reportWaitingTransfers(message) {
+  let response;
+  try {
+    response = await fetch(`${env.masterpodUrl}/report-waiting-transfers`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(message),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (err) {
+    return err.message;
+  }
+  return response.status === 200 ? null : `status ${response.status}`;
 }

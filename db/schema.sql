@@ -971,3 +971,29 @@ COMMENT ON COLUMN ignore_votes.started_by    IS 'The starter: the leader, or the
 COMMENT ON COLUMN ignore_votes.outcome       IS 'passed or failed.';
 COMMENT ON COLUMN ignore_votes.record        IS '{ request, receipts }: the signed request and every receipt kept, as JSON.';
 COMMENT ON COLUMN ignore_votes.created_at    IS 'When the row was inserted. Set by default, never changed.';
+
+
+-- ---------------------------------------------------------------------------
+-- masterpod_reports: the waiting transfers this validator has told the
+-- masterpod about (docs/schemas.md section 34). A guarded, a vault or an
+-- assisted transfer, or a break-glass move, waits in locked_transactions or
+-- assisted_transfers; once it is approved and settled, the report job
+-- (src/masterpod/masterpod-reports.js) sends it to the masterpod, which
+-- tells the account's owner. A row here says the masterpod has answered
+-- for that transfer, so it is not sent again. A row is never changed or
+-- deleted; it stays after its transfer is written or cancelled.
+-- Stand-alone table: no foreign keys.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS masterpod_reports (
+  -- The reported transfer. SHA-256 digest, 32 raw bytes.
+  transaction_id  BYTEA        PRIMARY KEY
+                               CHECK (octet_length(transaction_id) = 32),
+
+  -- When the masterpod answered for it.
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  masterpod_reports                IS 'The waiting transfers this validator has told the masterpod about: one row per transfer, written when the masterpod answered for it. Rows are never changed or deleted.';
+COMMENT ON COLUMN masterpod_reports.transaction_id IS 'The reported transfer. SHA-256 digest, 32 raw bytes.';
+COMMENT ON COLUMN masterpod_reports.created_at     IS 'When the masterpod answered for it. Set by default, never changed.';

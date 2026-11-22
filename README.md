@@ -72,7 +72,7 @@ Shared values, in `network/testnet.env`:
 | `GUARDIAN_VOTE_ANOS`       | `1000`         | Guardian stake behind one vote on a fund proposal, in whole anos |
 | `GUARDIAN_VOTE_PERCENT`    | `70`           | Share of the votes cast a proposal needs to pass              |
 | `GUARDIAN_VOTE_MINUTES`    | `10080`        | How long a proposal is open for votes, in minutes: a week (60 on the testnet until 2026-11-12) |
-| `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) and for every moderator, attestor, validator or masterPod stake (the appointment check, `docs/schemas.md` sections 24 and 26) |
+| `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) and for every moderator, attestor, validator or masterPod stake (the appointment check, `docs/schemas.md` sections 24 and 26). Since 2026-11-22 it is also told of every transfer that has started to wait, at `/report-waiting-transfers` (`docs/schemas.md` section 34) |
 | `WEB_ORIGIN`               | `<fill in>`    | The wallet's origin for CORS, scheme, host and port, no path; a comma-separated list when there is more than one |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`          | Allowed clock difference on a signed account-level request, each way; nonces are kept twice this long |
 | `VALIDATOR_CALL_TIMEOUT_SECONDS` | `10`     | How long a call to another validator waits for its answer; past it, no answer (section "Ignoring and joining") |
@@ -81,7 +81,7 @@ Shared values, in `network/testnet.env`:
 | `NO_ANSWER_WAIT_SECONDS`   | `60`           | How long an originator waits for the vote before it sends once more, after no answer or after a refusal from a validator that fails the health check |
 | `CHAIN_CHUNK_LINKS`        | `100`          | Links in one chain chunk, at most |
 | `HELD_ROWS_PAGE`           | `100`          | Rows in one page of held rows, at most |
-| `UNAPPROVED_AGE_LIMIT_SECONDS` | `300`      | How long a held row may stay unapproved; past it, the validator holding it drops it (section "Database") |
+| `UNAPPROVED_AGE_LIMIT_SECONDS` | `300`      | How long a held row may stay unapproved; past it, the validator holding it drops it (section "Database"). The same age is how old an approved held row has to be before it is reported to the masterpod (`docs/schemas.md` section 34) |
 
 Machine values, in `.env`:
 
@@ -241,6 +241,12 @@ Tables:
   the keyholder's table as it is: `nonce` and `expires_at`, swept by the
   next insert. Added after the others were in use, so `npm run db:setup`
   adds it to an existing database without a reset.
+- `masterpod_reports`: the waiting transfers this validator has told the
+  masterpod about (2026-11-22, `docs/schemas.md` section 34): one row per
+  transfer, `transaction_id` and `created_at`, written when the masterpod
+  answered for it, so that it is not sent again. Rows are never changed
+  or deleted. Added after the others were in use, so `npm run db:setup`
+  adds it to an existing database without a reset.
 
 The five tables `pending`, `locked_transactions`, `assisted_transfers`,
 `escrow_transfers` and `fund_proposals` are the **holding tables**: a
@@ -258,6 +264,32 @@ docs/schemas.md section 21): a refused approval leaves such rows behind,
 and since 2026-11-19 so does a proof of acceptance that every validator
 refused (section "Ignoring and joining", "The proof after a vote"),
 and an account can send nothing through a validator that holds one.
+
+Since 2026-11-22 (`docs/schemas.md` section 34) every validator tells the
+masterpod of the transfers that wait long enough to be cancelled: a
+guarded or a vault transfer in `locked_transactions`, an assisted transfer
+or a break-glass move in `assisted_transfers`. It is the second call this
+server makes to the masterpod, `POST MASTERPOD_URL/report-waiting-transfers`
+(`src/masterpod/masterpod.client.js`, 5-second timeout, no redirect
+followed). A job (`src/masterpod/masterpod-reports.js`) runs once at the
+start and then once a minute, on every validator, counted or not. It reads
+every row of the two tables that is approved, was stored more than
+`UNAPPROVED_AGE_LIMIT_SECONDS` (300) ago and is not in `masterpod_reports`
+yet, and sends them in one message, `{ payload: { validatorId, transfers:
+[ { transactionId, accountId, transactionType, amount, writesAt } ] },
+signature: { key } }`, signed with this validator's key like a message to
+another validator: at most 100 transfers, the oldest first, the rest with
+the next run. When the masterpod answers `200` the ids are written to
+`masterpod_reports` and are not sent again. Any other answer, or none,
+writes nothing, and the next run sends the same rows again. The masterpod
+acts on the first validator's report of a transfer and tells the anoPod
+that made the account, by email, on the phone and in the wallet, so that
+a transfer that is not the owner's can be cancelled while it waits. The
+job reads the two tables and writes its own; it changes nothing a transfer
+needs, and an error in it is one log line. The journal's lines: `reported
+<n> waiting transfers to the masterpod`; `report to the masterpod failed:
+<reason>`, once for as long as the reason stays the same; `the masterpod
+takes reports again`.
 
 Conventions used in the schema:
 
@@ -1754,7 +1786,8 @@ src/
   util/version.js        the commit and tag git reports, read once at boot, for /health
   auth/                  the account level: require-account.js, signed-request.js, common-checks.js, nonces.queries.js;
                          the attestor gate on top of it: require-attestor.js
-  masterpod/masterpod.client.js  the one call to the masterpod: /get-anos-account, the binding check of create-account and the appointment check of a moderator, attestor, validator or masterPod stake
+  masterpod/masterpod.client.js  the two calls to the masterpod: /get-anos-account, the binding check of create-account and the appointment check of a moderator, attestor, validator or masterPod stake; and, since 2026-11-22, /report-waiting-transfers
+  masterpod/masterpod-reports.js  the report of waiting transfers: once a minute, every approved guarded, vault and assisted transfer and break-glass move that the masterpod has not been told of yet, in one signed message
   reads/                 feature: the five signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer, get-locked-transfer),
                          the two attestor reads (list-assisted-transfers, list-disputed-escrows) and the three public reads (list-dao-stakes, list-fund-proposals, get-fund-proposal)
     reads.router.js, reads.handlers.js, reads.service.js, reads.queries.js

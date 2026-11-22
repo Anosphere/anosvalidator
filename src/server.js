@@ -5,6 +5,7 @@ import { closePool, query } from './db/pool.js';
 import { checkChainWrite } from './garlic-chain/garlic-chain.queries.js';
 import { runGenesis } from './genesis/genesis.service.js';
 import { startUnapprovedSweep, stopUnapprovedSweep } from './held-transactions/unapproved-sweep.js';
+import { startMasterpodReports, stopMasterpodReports } from './masterpod/masterpod-reports.js';
 import { startJoinLoop } from './validators/join.service.js';
 import { applyRegistry } from './validators/registry.service.js';
 import { startSelfCheck, stopSelfCheck } from './validators/self-check.js';
@@ -78,6 +79,11 @@ const server = app.listen(env.port, () => {
   // what most of the others say, and joins again when it is out of step
   // twice in a row.
   startSelfCheck();
+  // And the report of waiting transfers to the masterpod
+  // (src/masterpod/masterpod-reports.js): once now, then every minute,
+  // so that an account's owner hears of a transfer that has started to
+  // wait.
+  startMasterpodReports();
 });
 
 /** How long a stop waits for a round, a vote or a join that is under way, in milliseconds. */
@@ -95,6 +101,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   stopUnapprovedSweep();
   stopSelfCheck();
+  stopMasterpodReports();
   console.log(`\n${signal} received, shutting down...`);
 
   // Safety net: never hang forever if a connection refuses to close.
