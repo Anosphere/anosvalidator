@@ -249,6 +249,26 @@ is the table the row left, `outcome` why (section 7), `record` the whole
 row as JSON plus its child rows: `{ row }`, `{ row, arbitrations }` or
 `{ row, votes }`. Logs may be purged after a time; archives are kept.
 
+### masterpod_reports
+
+Added 2026-11-22 (section 34).
+
+```sql
+CREATE TABLE IF NOT EXISTS masterpod_reports (
+  transaction_id  BYTEA        PRIMARY KEY CHECK (octet_length(transaction_id) = 32),
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+```
+
+The waiting transfers this validator has told the masterpod about: one row
+per transfer, written when the masterpod answered `200` for it, so that the
+report job (`src/masterpod/masterpod-reports.js`, section 34.3) does not
+send it again. `created_at` only, like `logs` and `archives`: a row is
+never changed or deleted, and it stays after its transfer is written or
+cancelled. No foreign key. Each validator fills the table for itself, with
+the moment the masterpod answered that validator; nothing compares it
+between validators.
+
 ### Changes to existing tables
 
 - `garlic_chain_apply_anos_transfer` fires for eight link types:
@@ -889,12 +909,18 @@ need no edit:
 
 | Variable                   | Default                 | Meaning |
 | -------------------------- | ----------------------- | ------- |
-| `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked: the binding check of create-account and, since 2026-11-08, the appointment check of a moderator or attestor stake (section 24), since 2026-11-10 also of a validator or masterPod stake (section 26) |
+| `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked: the binding check of create-account and, since 2026-11-08, the appointment check of a moderator or attestor stake (section 24), since 2026-11-10 also of a validator or masterPod stake (section 26). Since 2026-11-22 it is also told of every transfer that has started to wait, at `/report-waiting-transfers` (section 34) |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`                   | the window of a signed account-level request, each way; nonces live twice this long |
 
 Since the testnet build (2026-10-27) these live in two files, the committed
 `network/testnet.env` and the machine file `.env`, and `MASTERPOD_URL` is
 required: section 14.
+
+`UNAPPROVED_AGE_LIMIT_SECONDS` came with section 21: a held row that is
+still unapproved that many seconds after it was stored is dropped by the
+validator holding it. Since 2026-11-22 the same age is how old an approved
+held row has to be before it is reported to the masterpod (section 34).
+No value changed with that build, and no variable was added.
 
 ## 11. Notes from the build (2026-10-23)
 
@@ -2612,7 +2638,10 @@ validator with this change and one without it work together.
 - What a person sees: nothing. Honest validators send no redirect.
 - Left as it is, on purpose (the plan's decision 5): the call to the
   masterpod (`src/masterpod/masterpod.client.js`), the only other `fetch`
-  under `src/`. The masterpod is our own server.
+  under `src/`. The masterpod is our own server. (Since 2026-11-22 that
+  file makes two calls to the masterpod, section 34. The second, the
+  report of waiting transfers, was written with `redirect: 'manual'`; the
+  first is as this note left it.)
 - Checked. `git status --short` showed a clean tree at b2dcc2d at the
   start, and this step's three files and no others at the end:
   `src/validators/validators.client.js`, this file and `README.md`.
@@ -2849,6 +2878,11 @@ no package file and no schema file changes; the doorman is not touched.
   vault one (section 28): it is then never written and never removed. The
   slots are JSON columns with no time of their own, so an age limit there
   needs a time per slot. Not in this build; a testnet-month follow-up.
+
+Since 2026-11-22 the age is used a second time: an approved row of
+`locked_transactions` or `assisted_transfers` that was stored more than
+`UNAPPROVED_AGE_LIMIT_SECONDS` ago is reported to the masterpod (section
+34).
 
 ## 22. The break-glass transfer (2026-11-08)
 
@@ -3193,9 +3227,10 @@ when `payload.stakeFor` is `moderator` or `attestor`
 `isAppointedPurpose`), asks the masterpod for the sending account:
 `POST MASTERPOD_URL/get-anos-account { accountId }`
 (`src/masterpod/masterpod.client.js` `fetchAnosAccount`, 5-second
-timeout), the one call this server makes to the masterpod, the same the
-binding check of create-account makes. The masterpod answers
-`200 { accountId, anopodId, vouched, role }` with `role` `"moderator"`,
+timeout), one of the two calls this server makes to the masterpod (two
+since 2026-11-22: the other is the report of waiting transfers, section
+34), the same the binding check of create-account makes. The masterpod
+answers `200 { accountId, anopodId, vouched, role }` with `role` `"moderator"`,
 `"attestor"` or `null`. The client returns `{ bound: true, anopodId, role }`
 on a 200 whose `anopodId` decodes to 32 bytes and whose `vouched` is true,
 `role` the answer's when it is one of the two names and `null` otherwise
@@ -6789,3 +6824,476 @@ more` 9, `the proof does not go again` once, `the approval here is
 taken back` 4 times and `the approval here stays` 3. No log has a
 thrown error. The rig's folder, with its tools, keys and logs, stayed
 in the build chat's scratchpad and is not kept.
+
+## 34. The report of waiting transfers to the masterpod (2026-11-22)
+
+Decided in two talking chats of 2026-11-20 and a planning chat of
+2026-11-20 and 2026-11-21, the plan FINAL on 2026-11-21 at
+`~/Desktop/Z-TestNet/forclaude/security-alerts-plan-1.md` ("Security
+alerts plan 1: an email and a notification on the phone when a transfer
+starts to wait, when a recovery is started, and when the alert settings
+change"). Why, in the user's words (the plan's decision 1): "The real use
+case is to prevent a thief." "We would actually want the alert to
+originate from the validators." "It would mainly be useful for guarded,
+vaulted and assissted accounts." "With spending it's too late to do
+anything." "This means a bad trade could be cancelled."
+
+One example. Nok has a guarded account with 5,000 anos. A thief who has a
+copy of her keys sends them away. A transfer out of a guarded account
+waits seven days on the validators before it is written, and until this
+plan nobody told Nok that one had started to wait. Now every validator
+that holds the waiting transfer tells the masterpod, about five minutes
+after it was sent. The masterpod tells Nok: an email, a notification on
+her phone and a line on the wallet's Notifications page. She opens the
+wallet and cancels the transfer, with the cancel of section 28.
+
+The plan has five steps: the masterpod (its spec, section 25: a pod's
+list of emails and phones, the route `POST /report-waiting-transfers` and
+the sender), the wallet on the Home Screen and the wallet's page
+"Security alerts" (the wallet's spec, section 11), this repo, and the
+records. This section is the record of step 4, built on 2026-11-22 in a
+chat of its own: one new table, one new file, one new function and seven
+lines in `src/server.js`. No route, no setting and no npm package. The
+code that receives, stores, approves, writes or cancels a transfer is not
+touched: no line of `src/transfer/`, `src/validators/`,
+`src/held-transactions/`, `src/locked-transactions/` or
+`src/assisted-transfers/` changed. Nothing touches the doorman, the
+keyholder, the registry or the genesis files, and nothing changes on the
+masterpod's doormen (34.4).
+
+### 34.1 The decisions, as they apply to the code
+
+- **Every validator reports, and the first report counts** (the plan's
+  decision 22). About five minutes after a transfer is sent, every
+  validator that holds it tells the masterpod. The masterpod acts on the
+  first report and ignores the rest. One validator alone could set off a
+  false alert, and it cannot move money. Each validator keeps a small
+  table of what the masterpod has taken, and tries every minute. In the
+  code: every validator runs the job, counted or not. No validator waits
+  for another, asks another or learns what another reported. The report
+  is no validator-to-validator message, and it changes nothing a round
+  writes.
+- **The code that stores and approves a transfer is not touched**
+  (decision 23). The new job reads the two tables in which these
+  transfers wait, once a minute: `locked_transactions` (a guarded or a
+  vault transfer) and `assisted_transfers` (an assisted transfer and a
+  break-glass move). The new table, `masterpod_reports`, holds what the
+  masterpod has taken. A transaction that waits in `pending`,
+  `escrow_transfers` or `fund_proposals` is not reported.
+- **A transfer is reported once it is approved and was stored more than
+  `UNAPPROVED_AGE_LIMIT_SECONDS` ago** (decision 23), 300 on the network.
+  That setting is the age after which a validator drops a row that never
+  got approved (section 21). An approved row of that age is settled: an
+  approval round is over long before it, so its approved mark is no
+  longer taken back (`src/validators/acceptance.js`, section 33). A
+  younger row waits for the age, so that no alert goes out for a transfer
+  that is then never written. No new setting.
+
+### 34.2 The table
+
+At the end of `db/schema.sql`:
+
+```sql
+CREATE TABLE IF NOT EXISTS masterpod_reports (
+  -- The reported transfer. SHA-256 digest, 32 raw bytes.
+  transaction_id  BYTEA        PRIMARY KEY
+                               CHECK (octet_length(transaction_id) = 32),
+
+  -- When the masterpod answered for it.
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+```
+
+with a `COMMENT ON` for the table and for each of the two columns. One
+row per transfer this validator has told the masterpod about, written
+when the masterpod answered `200` for it. The job reads the table to
+leave out what was taken, and nothing else reads it. A row is never
+changed or deleted: it stays after its transfer is written or cancelled,
+and for good (the plan's known limit 16: the rows are small). So the
+table has `created_at`, no `updated_at` and no trigger, like `logs` and
+`archives`. No foreign key. `CREATE TABLE IF NOT EXISTS`, so `npm run
+db:setup` adds it to a database that is in use and changes no other table
+(34.4). It is a validator's own table: each validator notes the moment
+the masterpod answered that validator, and nothing compares the table
+between validators.
+
+### 34.3 The job and the message
+
+`src/masterpod/masterpod-reports.js`, new, built like the sweep of
+section 21 (`src/held-transactions/unapproved-sweep.js`).
+`reportWaiting()` is one run. `startMasterpodReports()`, called by
+`src/server.js` in the callback of `app.listen` after `startSelfCheck()`,
+runs it at once and then every minute (`REPORT_EVERY_MS = 60_000`), with
+the timer unref'd. `stopMasterpodReports()`, called in `shutdown` after
+`stopSelfCheck()`, clears the timer. Every validator runs the job,
+counted or not.
+
+One run, in four steps:
+
+1. **The read.** One statement over the two tables:
+
+   ```sql
+   SELECT t.transaction_id, t.account_id, t.og_transaction, t.future_date
+   FROM (
+     SELECT transaction_id, account_id, og_transaction, future_date, created_at FROM locked_transactions WHERE approved
+     UNION ALL
+     SELECT transaction_id, account_id, og_transaction, future_date, created_at FROM assisted_transfers WHERE approved
+   ) t
+   WHERE t.created_at < now() - make_interval(secs => $1)
+     AND NOT EXISTS (SELECT 1 FROM masterpod_reports r WHERE r.transaction_id = t.transaction_id)
+   ORDER BY t.created_at, t.transaction_id
+   LIMIT $2
+   ```
+
+   with `env.unapprovedAgeLimitSeconds` and `REPORT_LIMIT = 100`: every
+   row that is approved, older than the age and not yet in
+   `masterpod_reports`, the oldest first, at most a hundred. The rest go
+   with the next run. With no row the run ends here: no call and no log
+   line.
+2. **The message.** For `POST MASTERPOD_URL/report-waiting-transfers`:
+
+   ```
+   payload: {
+     validatorId:  this validator's id, a number
+     transfers: [ {
+       transactionId:    the transfer's id, 64 hex characters
+       accountId:        the sending account's id, 64 hex characters
+       transactionType:  og_transaction.payload.transactionType: guardedAnosTransfer,
+                         vaultAnosTransfer, assistedAnosTransfer or breakGlassTransfer
+       amount:           og_transaction.payload.amount: millionths, a decimal string
+       writesAt:         future_date as an ISO 8601 string, or null
+     }, ... ]            1 to 100 entries, in the order of the read
+   }
+   signature: { key }
+   ```
+
+   `writesAt` is the moment the transfer may be written. A guarded and a
+   vault transfer have one, and so has a break-glass move out of a
+   guarded or a vault account. It is `null` for an assisted transfer and
+   for a move out of a spending or an assisted account (section 3,
+   `assisted_transfers`). The receiving account is not in the message.
+   The message is signed like a message to another validator:
+   `signPayload` of `src/validators/validators.signing.js`, this
+   validator's P-256 key over the RFC 8785 canonical bytes of `payload`,
+   64 bytes r||s as hex in `signature.key` (section 9). The masterpod
+   checks it against this validator's public key, which it keeps in a
+   file of its own, `network/validators.json`: the ids and the public
+   keys of `network/testnet.registry.json` (its spec, 25.8).
+3. **The call.** `reportWaitingTransfers(message)`, new at the end of
+   `src/masterpod/masterpod.client.js`: a `fetch` with the JSON body, the
+   5-second timeout of the other call (`TIMEOUT_MS`) and `redirect:
+   'manual'`. It returns `null` when the masterpod answered `200`, else a
+   few words for the log. It does not read the answer's body.
+4. **The note.** After a `200` the ids of the message are written to
+   `masterpod_reports` in one statement, `INSERT ... SELECT
+   unnest($1::bytea[]) ON CONFLICT (transaction_id) DO NOTHING`. Those
+   transfers are not sent again.
+
+What each answer leads to:
+
+| The masterpod's answer | What this validator does |
+| --- | --- |
+| `200`, with `{ taken }`, how many of the transfers were new to the masterpod (not read here) | the ids go into `masterpod_reports`; the log says `reported <n> waiting transfers to the masterpod` |
+| any other status: a `404` (a masterpod from before its step 1), a `503` (`validator keys not loaded`), a `429` (`too many reports today`: this validator's reports have written 1,000 transfers in 24 hours), a `400` or a `401` (a message it does not take), a redirect, a `500` | nothing is written, and the next run sends the same transfers again; the log says `report to the masterpod failed: status <N>` |
+| no answer within five seconds, or no connection | the same; the log says `report to the masterpod failed: The operation was aborted due to timeout`, or `report to the masterpod failed: fetch failed` |
+
+The three log lines:
+
+- `reported <n> waiting transfers to the masterpod`, after each `200`
+  (`reported 1 waiting transfer to the masterpod` for one).
+- `report to the masterpod failed: <reason>`, on the error stream. The
+  reason is the status, the `fetch`'s own error, or a database error's
+  message (34.4 has the one of a database without the table). A failure
+  is logged only when its reason differs from the failure before it, so
+  a masterpod that is down for a day is one line and not one line a
+  minute.
+- `the masterpod takes reports again`, in front of the first `reported`
+  line after a failure.
+
+A run with nothing to report makes no call and prints nothing. So after
+a failure the journal's last word stays `failed` until the next transfer
+is reported, also when the masterpod has been back for long.
+
+What the job never does. It never throws: any error, a database error
+too, is the one log line, and the next run tries again. A run that is
+still under way when the next one is due makes the next one do nothing.
+It writes to `masterpod_reports` alone, and it reads the two holding
+tables with a plain read that holds up no write, so nothing here can
+stop, delay or change a transfer. A transfer that is written or
+cancelled before the masterpod could be told is never reported: its row
+has left the holding table, and nothing is left to cancel. Nothing is
+said again while a transfer waits, at its cancel or when it is written.
+
+What the masterpod does with a report is its own record (its spec,
+25.4). In short: the first report of a transfer writes a row there and
+tells the anoPod that made the account; the same facts from another
+validator add nothing; both are answered `200`.
+
+### 34.4 The pull
+
+- **A round of pulls, with one database line.** The code reaches the
+  validators with a round of pulls, whose papers are in
+  `~/Desktop/Z-TestNet/upcoming_validator_pulls`. This build's entry
+  goes into the `pull_steps.md` of the round it goes out with, once the
+  build is committed and the user has named the round; it was not
+  written when this section was. Besides the pull and the restart of the
+  validator's program there is one line on the worker, after the pull
+  and before the restart:
+
+  ```text
+  sudo -u postgres sh /opt/anos/anossoftware/scripts/setup-db.sh
+  ```
+
+  It is the script that set the worker's database up, run again
+  (`scripts/bootstrap-worker.sh` runs the same line). The role, its
+  password and the database are there already, so those steps change
+  nothing. Then it applies the whole of `db/schema.sql` in one
+  transaction as the role `anossoftware`: that adds the one table,
+  `masterpod_reports`, and changes no other. It prints one line:
+
+  ```text
+  ./.env: role 'anossoftware' and database 'anos' are ready (schema applied; the registry is applied by the server at boot).
+  ```
+
+  Nothing is installed (`package-lock.json` did not change, so no `npm
+  ci`), no setting changes, and the doorman and the keyholder are not
+  touched.
+- **A validator that was restarted without the line** keeps working as
+  before. Its journal shows once
+
+  ```text
+  report to the masterpod failed: relation "masterpod_reports" does not exist
+  ```
+
+  and it reports nothing. The line can be run at any time afterwards,
+  with no restart: the next minute's run finds the table. The journal's
+  next lines are then `the masterpod takes reports again` and `reported
+  <n> waiting transfers to the masterpod`, once there is a transfer to
+  report. So the line may also come after the restart, where a round's
+  paste pulls and restarts in one line.
+- **What a validator's journal shows afterwards.** The job's first run
+  is at the start, so its line can stand among the lines of a start,
+  right after `listening`. With the table there and nothing to report, a
+  start prints the lines it printed before this build. With a transfer
+  to report it also prints `reported <n> waiting transfers to the
+  masterpod`, and without the table it prints the `failed` line above.
+  A paste that shows the journal's last eight lines after a restart then
+  shows one line fewer of the start itself. Later the `reported` line
+  comes whenever this validator has told the masterpod of one or more
+  transfers. While nothing waits on the network it does not come.
+- **The day of the first pull** (decision 23). The first validator that
+  takes this build begins to report at its start, once its table is
+  there: every transfer that waits at that moment and is older than five
+  minutes, also one that was sent days before, the hundred oldest with
+  each run and a minute between two runs. So each such transfer gets its
+  one alert that day. It is true, and the transfer can still be
+  cancelled.
+- **Old code and new code together.** The report is between one
+  validator and the masterpod, and no other validator sees it. A
+  validator on this code and a validator on older code work together as
+  before, and the code goes onto the validators one at a time. From the
+  first validator on, a transfer is reported by those that have the code
+  (the plan's known limit 7), and one report is enough.
+- **The masterpod first.** Its step 1 has to be deployed before the first
+  validator pulls. By the record of that step it is: the route answers
+  on the live masterpod since 2026-11-22 (UTC), and the masterpod's
+  alerts are switched on since the same day. Against a masterpod without
+  the route the journals would show `report to the masterpod failed:
+  status 404` once, and the reports would go through by themselves once
+  the route is there.
+- **The masterpod's doormen are not touched.** Each validator calls
+  `https://api.anocloud.com` from an address of its own, at most once a
+  minute, with up to 100 transfers in the one call. The doormen refuse
+  an address above 50 requests in 10 seconds. So no validator's address
+  goes on the line `acl is_wallet` of the doormen's
+  `/etc/haproxy/haproxy.cfg`.
+- **The way back** is the one of the round's papers: `git reset --hard`
+  to the commit before this build, and a restart. The table and its rows
+  stay, and the older code does not read them. A validator that takes
+  the build again later does not report a second time what its table
+  holds.
+
+### 34.5 Files
+
+New: `src/masterpod/masterpod-reports.js` (`reportWaiting`,
+`startMasterpodReports`, `stopMasterpodReports`; the private `failed`;
+the two constants).
+Changed: `db/schema.sql` (the block of `masterpod_reports` at its end),
+`src/masterpod/masterpod.client.js` (`reportWaitingTransfers` at its end,
+and the opening comment, which now says two calls), `src/server.js` (the
+import, five lines in the callback of `app.listen`, one line in
+`shutdown`), `network/testnet.env` (one sentence more in the comment of
+`MASTERPOD_URL` and in the comment of `UNAPPROVED_AGE_LIMIT_SECONDS`; no
+value). In the docs: this section; above it, section 3 (the entry
+`masterpod_reports`), section 10 (the row of `MASTERPOD_URL`, and one
+closing paragraph on the age), the note of 19.5 on the call to the
+masterpod (one dated sentence in brackets), section 21 (one sentence at
+its end) and 24.1 ("one of the two calls"); the README ("Configuration",
+the rows of `MASTERPOD_URL` and of `UNAPPROVED_AGE_LIMIT_SECONDS`;
+"Database", the table's entry and one paragraph on the job; two lines of
+"Project layout").
+Not changed: every file under `src/transfer/`, `src/validators/`,
+`src/held-transactions/`, `src/locked-transactions/` and
+`src/assisted-transfers/`, `src/config/env.js`, every file under
+`scripts/` and `deploy/`, `network/testnet.registry.json`, and no package
+file. The doorman is not touched.
+
+### 34.6 Notes from the build
+
+- **The build was made on main at `8d1c5cd`**, the commit the plan was
+  written against, with a clean working tree (`git status --short` at
+  about 10:20 on this Mac's clock on 2026-11-22, which is 18:20 UTC,
+  before the first edit). The spec ended with section 33, so this
+  section is 34, as the plan names it.
+- **The code is the plan's text, not a retyping of it.** A throwaway
+  script outside the repo took the three blocks of the plan's 4.1, 4.2
+  and 4.3 out of the plan file by their line numbers. The new file is
+  the plan's 4.3 byte for byte, and it equals the file the planning chat
+  had run (4,831 bytes). The same holds for the new function (890 bytes)
+  and for the table's block (1,559 bytes with the two empty lines in
+  front of it, the file's own distance between two tables). The lines of
+  `src/server.js` are the plan's 4.4. The plan counts "four lines" there;
+  its 4.4 gives seven, the import, four lines of comment and the two
+  calls, and those are built.
+- **Where the plan gave words and no place.** In section 3 the entry
+  stands after `logs and archives` and before "Changes to existing
+  tables". In section 10 the sentence on `MASTERPOD_URL` went into that
+  variable's row, and the sentence on the age into a closing paragraph,
+  since section 10 had not named that variable. In section 21 the
+  sentence is a paragraph of its own after the last note. "Wherever the
+  spec says that this server makes one call to the masterpod" was found
+  in two places: 24.1, which now says "one of the two calls", and the
+  note in 19.5 on what the redirect build left alone, which keeps its
+  words and gained a dated sentence in brackets. In the README the
+  second call is told in "Database", in a paragraph after the one on the
+  holding tables, and in the line of `masterpod.client.js` in "Project
+  layout"; the two passages on `/get-anos-account` ("Create-account
+  submission", "Stakes and transfer to fund") are as they were. The
+  README gives no count of tables.
+- **Places the plan does not name**, left as they are and listed for the
+  user. In `src/config/env.js`, the comment of `masterpodUrl` names the
+  binding check alone (as 24.4 and 26.4 left it) and the comment of
+  `unapprovedAgeLimitSeconds` names the sweep alone. Three sentences say
+  that every table has `created_at` and `updated_at`: the head comment
+  of `db/schema.sql`, with no exception, and the opening of section 3
+  above and "Conventions used in the schema" in the README, both with
+  `logs` and `archives` as the two that have `created_at` only.
+  `masterpod_reports` is one more table with `created_at` only, as
+  `ignore_votes` already was; `nonces` has neither. Section 1 says the
+  validators' copies of every table stay identical, which this table is
+  not meant to be. The opening comment of
+  `src/validators/validators.signing.js` speaks of messages between
+  validators alone, and its `signPayload` now signs the report to the
+  masterpod too; the plan lets no line under `src/validators/` change.
+  "No timer anywhere", in section 6 above and in the README's part on
+  the leader round, speaks of what starts a round; the sweep and the
+  self-check were timers before, and this job is one more. And the
+  README's "Ignoring and joining" and the list in 19.5 say that adding a
+  validator is a pull and a restart on every VM. Since the masterpod's
+  step 1 a new registry row, or a changed key, also needs the same
+  change in the masterpod's `network/validators.json` and a deploy of
+  the masterpod (its spec, 25.8). Until then that validator's reports
+  are answered `401`, its journal shows `report to the masterpod failed:
+  status 401` once, and it sends the same rows every minute; the other
+  validators' reports still set the alerts off.
+- **One refusal holds a whole message back, and no honest row can cause
+  one.** The masterpod refuses a message whole when one entry is not
+  what it expects (`400 invalid transfer`), and this job would then send
+  the same hundred oldest rows every minute. So the two sides were
+  compared, with `transferOf` in
+  `masterpodsoftware/src/alerts/validator-reports.js` at `93e8f43`: the
+  type is one of the four the two tables hold; an amount here is a
+  decimal string of a positive number up to the BIGINT maximum, 19
+  digits, where the masterpod takes 1 to 39 digits; the ids are 32
+  bytes; the day is a moment of the database or `null`. A message of 100
+  transfers is at most 27,595 bytes, and the masterpod takes a JSON body
+  of more than a megabyte.
+- **A `status 500` once, on a busy moment.** By the masterpod's own
+  record (its spec, 25.11; not run here), two validators' messages that
+  name the same two new transfers in opposite order at the very same
+  moment can make its database end one of the two requests. That
+  validator's journal then shows `report to the masterpod failed: status
+  500`, and its next run goes through. This job orders a message by each
+  validator's own `created_at`, so two validators can differ in that
+  order.
+- **Checks** (the plan's 4.6). `git status --short` showed a clean tree
+  at the start and this step's seven files and no others at the end.
+  `node --check` passes on the three code files. The schema, on this
+  Mac's PostgreSQL 17.11 in one transaction that was rolled back, as the
+  role `anossoftware`: the file of `8d1c5cd` built 15 tables, the new
+  file on top made 16, a second run left 16, and a fresh schema from the
+  new file alone has 16; one fingerprint over every column, constraint,
+  index, trigger and comment says that the 15 tables of before are
+  unchanged, that the second run changed nothing, and that the tables on
+  top equal the fresh ones; a transfer id of 31 bytes and a row with no
+  id are refused. Then the real modules of the working folder over that
+  scratch schema, with a stand-in for `src/db/pool.js`, a validator key
+  made for the run in a file for its owner alone, and a made-up
+  masterpod in place of `fetch`: 83 checks, none bad. With the plan's
+  six rows: a `503` and no answer at all write nothing; a `200` takes
+  three, the oldest first, the assisted transfer with no day and the two
+  others with theirs; a failure is logged once and not again while it
+  stays the same; the masterpod's own `verifySignature` takes the
+  signature with the key in the registry's form, and refuses it over a
+  changed amount; with the table dropped the job takes nothing, does
+  not throw, and logs the line of 34.4 once. Also there: 152 rows due at
+  once go as 100 and 52, two rows of one moment go in the order of their
+  ids, a second run while the first is under way does nothing, a second
+  start makes no second timer, and the two holding tables are byte for
+  byte as they were. The planning chat's own 20 checks, unchanged, pass
+  on the built files too.
+- **Beyond the plan's checks**, all on this Mac, nothing kept. (1) The
+  two halves together: the job, in a process of its own for validator 4
+  and for validator 9, sent with Node's own `fetch` to a listener on
+  127.0.0.1 that ran the masterpod's own app (`masterpodsoftware` at
+  `93e8f43`) over a scratch schema, its sender stopped and its email and
+  phone part off. 46 checks, none bad: the masterpod's route answered
+  `200` with `taken` 3, wrote the three transfers and the alerts for the
+  two pods that made the accounts, and its own words made the plan's
+  email from them; validator 9's report of the same three was answered
+  `200` with `taken` 0 and added nothing; a changed amount, an unknown
+  validator and one validator's signature under another's id were
+  refused. Against a plain listener: a `503`, a `404`, a `429`, a `302`
+  that was not followed, and no answer (given up after five seconds)
+  each wrote nothing and logged its one line; a port that nothing
+  listens on logged `fetch failed`. (2) The database line of 34.4, as
+  dash runs it, against a PostgreSQL of the moment in the scratch folder
+  (127.0.0.1 alone, never this Mac's own server), with the real
+  `src/db/pool.js` and real commits, 27 checks: without the line the
+  journal has its one line and nothing is taken; the line prints its one
+  line in about 55 milliseconds and adds the table; the next run takes
+  what waits, with no restart; a second run of the line changes nothing.
+  While a write is under way on a table the line waits for it and then
+  goes through. When the line and a write each hold what the other
+  needs, PostgreSQL ends one of the two after a second with `deadlock
+  detected`. In the trial it was the line: it printed
+  `psql:db/schema.sql:394: ERROR:  deadlock detected` in place of its
+  one line, nothing was changed, and the line went through when it was
+  run again. When it is the validator's write of that instant, that
+  write fails as any write of a round can; section 31, J has what the
+  leader does then. The line holds its locks for the length of its one
+  transaction, so the two can cross only in that instant. A connection
+  that is cut in the middle of the job's read is one log line (`report
+  to the masterpod failed: terminating connection due to administrator
+  command`), the process stays up, and the next run goes through: the
+  job uses the pool's own `query`, which listens for errors while its
+  statement runs. (3) The built `src/server.js`, in a scratch copy of
+  the repo, was loaded with a key file that does not exist: every module
+  is found and every imported name is there, and the start stops at the
+  key file, before any connection, with the words the commit before
+  stops with. A copy with one imported name misspelled stops earlier,
+  with the fault named. (4) `network/testnet.env` gives Node, `sh` and
+  `dash` the same 27 values as before. (5) A second reader, a separate
+  agent told only to find faults, read the change against the plan's
+  section 4 after the checks and changed nothing. It found the table's
+  block, the new function, the new file and the lines of `src/server.js`
+  to be the plan's byte for byte, and no file outside the plan's list.
+  Six things it found in this section's own sentences were put right or
+  added to the list of places above.
+- **Not tried.** A validator's real start with the new lines, and its
+  stop: no validator was started, as the plan has it, and validator 1's
+  pull is the first. The real masterpod: no call left this Mac, since
+  the masterpod's alerts are on and a report would have told a real
+  person. A real email or notification for a transfer. The database line
+  on a worker, with `sudo` and Debian's PostgreSQL. A day's traffic of
+  the job.
