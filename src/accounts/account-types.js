@@ -5,12 +5,13 @@
  * submission can ask for.
  *
  * The type decides how an account spends (src/transfer/transfer.service.js):
- * a spending account sends plain anosTransfers, escrowTransfers and
- * transfers to the fund; a guarded account sends guardedAnosTransfers and a
- * vault account vaultAnosTransfers, each held in locked_transactions for
- * that account's time lock; an assisted account sends
- * assistedAnosTransfers, held in assisted_transfers until two attestors
- * have attested to each (src/assisted-transfers/).
+ * a spending account sends plain anosTransfers, escrowTransfers,
+ * transfers to the fund and payments to the fund (paymentToFund,
+ * docs/schemas.md section 35); a guarded account sends
+ * guardedAnosTransfers and a vault account vaultAnosTransfers, each held
+ * in locked_transactions for that account's time lock; an assisted
+ * account sends assistedAnosTransfers, held in assisted_transfers until
+ * two attestors have attested to each (src/assisted-transfers/).
  */
 export const SPENDING = 'spending';
 export const GUARDED = 'guarded';

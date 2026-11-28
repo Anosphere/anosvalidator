@@ -271,22 +271,28 @@ between validators.
 
 ### Changes to existing tables
 
-- `garlic_chain_apply_anos_transfer` fires for eight link types:
+- `garlic_chain_apply_anos_transfer` fires for nine link types:
   `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`,
   `assistedAnosTransfer`, `escrowTransfer`, `breakGlassTransfer` (since
-  2026-11-08, section 22), `transferToFund` and `transferFromFund`. Its
-  error messages name `NEW.type` instead of `anosTransfer`.
+  2026-11-08, section 22), `transferToFund`, `transferFromFund` and, the
+  ninth, `paymentToFund` (since 2026-11-27, section 35). Its error
+  messages name `NEW.type` instead of `anosTransfer`.
 - The comments on `locked_transactions` no longer say assisted accounts
   have a time lock. They do not.
-- `pending`, `garlic_chain`, `accounts` and `validators` are unchanged.
+- `garlic_chain` gains one index (2026-11-27, section 35.4):
+  `garlic_chain_fund_payments_idx` on `(account_id, position)`, a partial
+  index that holds the links of type `paymentToFund` alone, for the read
+  `/list-fund-payments`. Its columns are unchanged.
+- `pending`, `accounts` and `validators` are unchanged.
 
 ## 4. Transactions
 
 A transaction is `{ payload, signatures }` with `payload.transactionType`
 naming its kind. The four existing kinds, `accountCreation`,
 `anosTransfer`, `guardedAnosTransfer` and `vaultAnosTransfer`, are
-unchanged and documented in the README. Four kinds are added here, and a
-fifth, the `breakGlassTransfer`, on 2026-11-08 (4.5, section 22).
+unchanged and documented in the README. Four kinds are added here, a
+fifth, the `breakGlassTransfer`, on 2026-11-08 (4.5, section 22), and a
+sixth, the `paymentToFund`, on 2026-11-27 (4.6, section 35).
 
 Shared by every transfer kind, old and new, unless a section says
 otherwise: the transfer payload of the README (`accountId`,
@@ -475,6 +481,52 @@ does the same. After the write the row moves to `logs`, outcome `written`,
 as an assisted transfer does. The attestations are the same two, from two
 attestors with attestor stake, neither the sender (5.2); the cancel is
 either 5.3 by the account's own keys or 5.7 by the break-glass pair.
+
+### 4.6 paymentToFund
+
+Added 2026-11-27 (section 35). A payment into the fund that is no stake,
+sent from a **spending** account at `POST /payment-to-fund`. The transfer
+payload plus one field:
+
+```
+payload: {
+  ...the transfer payload, with
+  transactionType: "paymentToFund"
+  accountIdTo:     the fund's account id
+  paymentFor:      a short word that says what the payment is for: 1 to 32 letters and digits, the first a letter
+}
+signatures: the sender's, any two pairs
+```
+
+Extra checks: `accountIdTo` is the fund; `paymentFor` has that form,
+`/^[A-Za-z][A-Za-z0-9]{0,31}$/`, checked as part of the shape and refused
+with `payload.paymentFor must be 1 to 32 letters and digits, the first a
+letter`; `createdAt` is within `LOCK_OFFSET_MINUTES` of the validator's
+clock, before or after. The rest is what a `transferToFund` passes,
+without the stake: the sender is a spending account, the signatures, the
+`transactionId`, `previousTransactionId`, the uniqueness checks and the
+balance. There is no minimum amount, and no validator keeps a list of the
+words: what a payment may be for is the masterpod's to know. The two
+words of the design are `businessLicense` and, for later, `businessAI`.
+Held in `pending` like a plain transfer and written at the next round as
+one link of type `paymentToFund`, with the balance trigger. No `stakes`
+row is touched, and nothing pays a payment back.
+
+One more check, on the receiving validator only, after the checks above
+and before anything is stored: it asks the masterpod
+`POST MASTERPOD_URL/check-fund-payment { payload }`, with the payment's
+payload as it was signed and without the signatures
+(`src/masterpod/masterpod.client.js` `checkFundPayment`, 5-second
+timeout, no redirect followed). The question has three outcomes. `200
+{ ok: true }` lets the payment go on. `200 { ok: false, reason }` with a
+reason of 1 to 60 letters, digits and spaces refuses it with that reason.
+Anything else refuses it with `the masterpod could not confirm this
+payment`: no answer in time, no connection, a redirect, any status but
+200, a body that is not JSON or that says neither; one line in the log
+then says why, `no answer from the masterpod about a payment: <the
+status, or the error>`. The handler logs `failed: <reason>` and answers
+`400 { error }` like any refusal. The peers approving the payment, the
+replay of a chain chunk and the held-row checks do not ask.
 
 ## 5. Follow-ups
 
@@ -675,6 +727,8 @@ The write, one database transaction per validator, rows in id order:
 - `breakGlassTransfer`: one link, the balance trigger, the sender's stakes
   row moved to the receiver (section 22).
 - `transferToFund`: one link, the balance trigger, the stake added.
+- `paymentToFund` (since 2026-11-27, section 35): one link, the balance
+  trigger. No stake.
 - `fundProposal`: the proposal link, then the payout links in index order,
   the balance trigger for each, the stakes reduced for payouts with
   `stakeFor`, rows at zero deleted.
@@ -723,6 +777,7 @@ through their wallets:
 | POST   | `/create-account`          | `accountCreation` (unchanged) |
 | POST   | `/anos-transfer`           | `anosTransfer`, `guardedAnosTransfer`, `vaultAnosTransfer`, `assistedAnosTransfer`, `escrowTransfer`, `breakGlassTransfer` (4.5) |
 | POST   | `/transfer-to-fund`        | `transferToFund` |
+| POST   | `/payment-to-fund`         | `paymentToFund` (4.6, since 2026-11-27) |
 | POST   | `/fund-proposal`           | `fundProposal` |
 | POST   | `/attestation`             | `attestation` |
 | POST   | `/assisted-transfer-cancel`| `assistedTransferCancel` |
@@ -761,18 +816,28 @@ keyholder's). Every held-transfer read below answers `type`, the payload's
 
 Public, unsigned (added 2026-11-08: one read for the DAO voting ledger on
 the masterpod, section 23, the first route of the kind, and two more the
-same day for the wallet's Guardians page, section 25): reads with no
-envelope, no signature and no middleware. The body must be an object (`400
-bad request shape`). Everything they answer is the fund's public business:
+same day for the wallet's Guardians page, section 25; two more came on
+2026-11-27 with the payment to the fund, both for the masterpod, section
+35): reads with no envelope, no signature and no middleware. The body
+must be an object (`400 bad request shape`). Everything the first three
+answer is the fund's public business:
 each `transferToFund` link names its purpose on the chain, a written
 proposal's payouts are on the chain as `transferFromFund` links, and the
-votes are the guardians' public act on the fund's money.
+votes are the guardians' public act on the fund's money. Of the two of
+2026-11-27, `/list-fund-payments` answers what is on the chain too: each
+`paymentToFund` link names its sender, its amount and what it paid for.
+`/confirm-transaction` is not about the fund alone: it says yes or no to
+one transfer that the asker describes, of any type that has a sender and
+a receiver, and an asker learns nothing about a transfer that it could
+not describe (35.3).
 
 | Method | Path                 | Answers |
 | ------ | -------------------- | ------- |
 | POST   | `/list-dao-stakes`   | body `{}`; `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`: every `stakes` row with `dao_vote_stake > 0`, `accountId` hex, `daoVoteStake` millionths as a decimal string, account id ascending; `total` their sum as a decimal string (`"0"` with no rows); `asOf` the server clock at the read, ISO 8601. Read by the masterpod for its snapshot of DAO voting weights |
 | POST   | `/list-fund-proposals` | body `{ status: 'open' \| 'decided', limit?, offset?, from?, to? }`; `200 { settings, proposals: [ item ] }`: for `open` the `fund_proposals` rows (at most one), for `decided` the `archives` rows that left `fund_proposals`, newest first, `limit` default 20 at most 200, after `offset` rows, with `created_at` at or after `from` and before `to` when given; `settings` the validator's `{ anosPerVote, minimumStake, percent, minutes }`; an `item` the proposal with its status, its tally and its votes (section 25.1). Bad values are `400 invalid status`, `invalid limit`, `invalid offset`, `invalid from` and `invalid to` |
 | POST   | `/get-fund-proposal` | body `{ transactionId: hex }`; `200 { settings, proposal }`, the item plus `proposerWeight` and `payouts: [ { index, accountIdTo, amount, reason, stakeFor } ]`, looked for in `fund_proposals` first, then in `archives`; `400 invalid transactionId` unless 64 hex characters; `404 unknown proposal` |
+| POST   | `/list-fund-payments` | body `{ accountId: hex, afterPosition?: a whole number from 0, limit?: 1 to 200 (default 200) }`; `200 { asOf, payments: [ { transactionId, position, amount, paymentFor, createdAt } ] }`: the links of type `paymentToFund` whose sender is that account, `position` ascending, above `afterPosition` when given, at most `limit`; `amount` millionths as a decimal string; `paymentFor` and `createdAt` as the payment's signed payload has them, so `createdAt` is the payload's date and not the link's `created_at`; `asOf` the server clock at the read, ISO 8601. An account with no such payment, and an id that is no account's, answer an empty list. Bad values are `400 invalid accountId` unless 64 hex characters, `invalid afterPosition` and `invalid limit`. For the masterpod, which reads an account's payments from it (added 2026-11-27, section 35.3) |
+| POST   | `/confirm-transaction` | body `{ transactionId: hex, accountId: hex, accountIdTo: hex, amount: millionths as a decimal string }`, one transfer as the asker describes it; `200 { written: true, type, position, writtenAt }` when a link on this validator's chain has that id and that sender, that receiver and that amount, with the link's type, its position and the moment this validator wrote it; in every other case `200 { written: false }` and nothing more, never a `404`. Bad values are `400 invalid transactionId`, `invalid accountId` and `invalid accountIdTo`, each unless 64 hex characters, and `invalid amount`. For the masterpod, which asks before it marks a payment on a business site complete (added 2026-11-27, section 35.3) |
 
 `/create-account` gained a fifth check after uniqueness, on the receiving
 validator only: the masterpod is asked `POST /get-anos-account { accountId }`
@@ -793,8 +858,9 @@ The transaction messages are unchanged: `transactionApproval` answered by
 `transactionApproved`, `proofOfTransactionAcceptance` answered by
 `transactionAccepted`, and the three leader calls. The receiver of a
 transaction approval picks the checks by `payload.transaction.payload.
-transactionType`, now one of nine kinds (the `breakGlassTransfer` since
-2026-11-08, section 22), and stores the transaction in the
+transactionType`, now one of ten kinds (the `breakGlassTransfer` since
+2026-11-08, section 22, the `paymentToFund` since 2026-11-27, section
+35), and stores the transaction in the
 same holding table the originating validator used. The proof's receiver
 looks for the transaction across the five holding tables.
 
@@ -898,7 +964,8 @@ The existing `GUARDED_LOCK_MINUTES`, `VAULT_LOCK_MINUTES` and
 how far a proposal's `createdAt` may be from the validator's clock. Since
 2026-11-11 (section 27) it also bounds the date of every transfer without
 a lock: the `createdAt` of a plain, an assisted and an escrow transfer, of
-a `transferToFund` and of a break-glass move out of a spending or assisted
+a `transferToFund`, of a `paymentToFund` (since 2026-11-27, section 35)
+and of a break-glass move out of a spending or assisted
 account must be within `LOCK_OFFSET_MINUTES` of the validator's clock,
 before or after. Through that it is also how long the sender's cancel of
 an assisted transfer and the buyer's cancel of an escrow trade wait.
@@ -909,7 +976,7 @@ need no edit:
 
 | Variable                   | Default                 | Meaning |
 | -------------------------- | ----------------------- | ------- |
-| `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked: the binding check of create-account and, since 2026-11-08, the appointment check of a moderator or attestor stake (section 24), since 2026-11-10 also of a validator or masterPod stake (section 26). Since 2026-11-22 it is also told of every transfer that has started to wait, at `/report-waiting-transfers` (section 34) |
+| `MASTERPOD_URL`            | `http://localhost:3100` | where `/get-anos-account` is asked: the binding check of create-account and, since 2026-11-08, the appointment check of a moderator or attestor stake (section 24), since 2026-11-10 also of a validator or masterPod stake (section 26). Since 2026-11-22 it is also told of every transfer that has started to wait, at `/report-waiting-transfers` (section 34). Since 2026-11-27 it is also asked `/check-fund-payment` before a payment to the fund is taken (section 35) |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`                   | the window of a signed account-level request, each way; nonces live twice this long |
 
 Since the testnet build (2026-10-27) these live in two files, the committed
@@ -1885,7 +1952,9 @@ Step 1:
   `checkTransferSignaturesAndIds` (transfer.service.js),
   `checkTransferToFundSignaturesAndIds` and
   `checkFundProposalSignaturesAndIds` (fund.service.js), each taking an
-  optional `client` for its account read.
+  optional `client` for its account read. (Since 2026-11-27 a fifth
+  helper, `checkPaymentToFundSignaturesAndIds` in fund.service.js, for
+  the `paymentToFund`, which has no side effect: section 35.)
 - **The catch-up pass.** `catchUp()` in the same file, on `sweepHealth()`:
   the health of every active row but this one (`validators.queries.js
   findMemberPeers`), the answers carrying `chain` grouped by tail, the
@@ -2223,7 +2292,9 @@ line `chain replay: <reason>`, the reason naming the position:
    transfer types, the shape, the signatures under the type's rule against
    the sender's account as the own table has it by then and the
    transactionId rule; `transferToFund` and `fundProposal`, the shape,
-   signature and id parts of their verify functions; `transferFromFund`, no
+   signature and id parts of their verify functions (since 2026-11-27
+   the `paymentToFund` too, by a fifth helper, with no side effect:
+   section 35); `transferFromFund`, no
    signatures, the link follows a `fundProposal` link or a
    `transferFromFund` link of the same proposal (at the start of a chunk
    that is the own tail link, its proposal found by id), and its payload is
@@ -2641,7 +2712,9 @@ validator with this change and one without it work together.
   under `src/`. The masterpod is our own server. (Since 2026-11-22 that
   file makes two calls to the masterpod, section 34. The second, the
   report of waiting transfers, was written with `redirect: 'manual'`; the
-  first is as this note left it.)
+  first is as this note left it. Since 2026-11-27 it makes three, section
+  35: the third, the question before a payment to the fund is taken, was
+  written with `redirect: 'manual'` too.)
 - Checked. `git status --short` showed a clean tree at b2dcc2d at the
   start, and this step's three files and no others at the end:
   `src/validators/validators.client.js`, this file and `README.md`.
@@ -3229,7 +3302,9 @@ when `payload.stakeFor` is `moderator` or `attestor`
 (`src/masterpod/masterpod.client.js` `fetchAnosAccount`, 5-second
 timeout), one of the two calls this server makes to the masterpod (two
 since 2026-11-22: the other is the report of waiting transfers, section
-34), the same the binding check of create-account makes. The masterpod
+34; three since 2026-11-27: the third is the question before a payment
+to the fund is taken, section 35), the same the binding check of
+create-account makes. The masterpod
 answers `200 { accountId, anopodId, vouched, role }` with `role` `"moderator"`,
 `"attestor"` or `null`. The client returns `{ bound: true, anopodId, role }`
 on a 200 whose `anopodId` decodes to 32 bytes and whose `vouched` is true,
@@ -4852,7 +4927,10 @@ file changes; the doorman is not touched.
   worker script would report such a validator after its ninety seconds,
   without that line. On a worker the database user owns its tables
   (`scripts/setup-db.sh` applies the schema as that user), so the check is
-  expected to pass there.
+  expected to pass there. (Since 2026-11-27, section 35, the script's two
+  patterns also name `Balance trigger check failed`, the stop line of the
+  check of the balance trigger. `Chain write check failed` is still not
+  among them.)
 - **The import ring.** `self-check.js` is imported by `server.js` only
   and `written-rows.js` by `join.service.js` only, and neither uses an
   imported name while it loads, only inside functions. `votes.service.js`
@@ -6913,7 +6991,9 @@ and for good (the plan's known limit 16: the rows are small). So the
 table has `created_at`, no `updated_at` and no trigger, like `logs` and
 `archives`. No foreign key. `CREATE TABLE IF NOT EXISTS`, so `npm run
 db:setup` adds it to a database that is in use and changes no other table
-(34.4). It is a validator's own table: each validator notes the moment
+(34.4; since 2026-11-27 the same run also puts the new list of link
+types into the balance trigger and adds one index, section 35.4). It is
+a validator's own table: each validator notes the moment
 the masterpod answered that validator, and nothing compares the table
 between validators.
 
@@ -7049,7 +7129,9 @@ validator add nothing; both are answered `200`.
   password and the database are there already, so those steps change
   nothing. Then it applies the whole of `db/schema.sql` in one
   transaction as the role `anossoftware`: that adds the one table,
-  `masterpod_reports`, and changes no other. It prints one line:
+  `masterpod_reports`, and changes no other. (Since 2026-11-27 the same
+  line also puts the new list of nine link types into the balance trigger
+  and adds one index: section 35.4.) It prints one line:
 
   ```text
   ./.env: role 'anossoftware' and database 'anos' are ready (schema applied; the registry is applied by the server at boot).
@@ -7070,7 +7152,13 @@ validator add nothing; both are answered `200`.
   next lines are then `the masterpod takes reports again` and `reported
   <n> waiting transfers to the masterpod`, once there is a transfer to
   report. So the line may also come after the restart, where a round's
-  paste pulls and restarts in one line.
+  paste pulls and restarts in one line. (All of this point is true for
+  version 3 of the validator's code alone, the version this section's
+  build made. Since 2026-11-27 a validator on version 4 does not start
+  without the line, and that also holds for one that takes versions 3
+  and 4 in one pull: its journal shows `Balance trigger check failed:
+  ...` every five seconds until the line has run, sections 35.4 and
+  35.5.)
 - **What a validator's journal shows afterwards.** The job's first run
   is at the start, so its line can stand among the lines of a start,
   right after `listening`. With the table there and nothing to report, a
@@ -7120,7 +7208,8 @@ New: `src/masterpod/masterpod-reports.js` (`reportWaiting`,
 the two constants).
 Changed: `db/schema.sql` (the block of `masterpod_reports` at its end),
 `src/masterpod/masterpod.client.js` (`reportWaitingTransfers` at its end,
-and the opening comment, which now says two calls), `src/server.js` (the
+and the opening comment, which now says two calls; three since
+2026-11-27, section 35), `src/server.js` (the
 import, five lines in the callback of `app.listen`, one line in
 `shutdown`), `network/testnet.env` (one sentence more in the comment of
 `MASTERPOD_URL` and in the comment of `UNAPPROVED_AGE_LIMIT_SECONDS`; no
@@ -7297,3 +7386,925 @@ file. The doorman is not touched.
   person. A real email or notification for a transfer. The database line
   on a worker, with `sudo` and Debian's PostgreSQL. A day's traffic of
   the job.
+
+## 35. The payment to the Fund (2026-11-27)
+
+Decided in a design talk and a planning chat of 2026-11-27, the plan
+FINAL that evening at
+`~/Desktop/Z-TestNet/forclaude/validator-fund-payment-plan-1.md`
+("Validator fund payment plan 1: a payment to the Fund that says what it
+is for, the validator's question to the masterpod, and two public
+reads"). It is plan 1 of the business pods addition, whose design is
+`~/Desktop/Z-TestNet/forclaude/business-pods-proposal-1.md`, and it
+builds the validators' part of that design's parts 7 and 13 and nothing
+else of it. Why, in the user's words (the plan's decisions 1 to 6):
+
+- A type of its own. "We would also need a new type of pament to the
+  fund and a way to read from it.  Business pods payments would go to
+  the Fund.  I think this is a new type.  Because it's not stake, which
+  currently, is the only type of payment people make to the fund." And
+  later: "I'm thinking just adding the type is easier."
+- One uniform type, and every payment says what it is for. "it's
+  probably better to have a uniform type, otherwise it won't be known
+  what the payment was for.  Whether it was for license or in the
+  future, something else. I'm thinking for example, of business buy AI
+  credits, they don't get free Joy." The user's names for the two
+  purposes are `businessLicense` and `businessAI`.
+- The payment carries the amount and no months. "It might be easier for
+  the masterpod to just read the amount of anos that went in, and leave
+  it at that.  It actually has time stamps of each and can just have a
+  historical record of how many months an anos bought at that time and
+  do the calculation." So no price reaches a validator.
+- Before a validator takes a payment, its one call to the masterpod
+  answers two things. "I suppose the call from the validator to the
+  masterpod would answer 2 question, are they a valid business, and
+  would this be allowed, like will this take them past the 12 month paid
+  in advance limit."
+- There is a way to read the payments (the words of the first point).
+- For a payment on a business site, the masterpod asks the validators to
+  confirm. "Then the wallet tells that it paid successfully, then the
+  masterpod calls the validators to confirm, then marks payment
+  complete." Why: "This way the business never receives a payment but
+  doesn't know who the hell it came from."
+
+What it builds. A business pod will pay its fee into the fund. On the
+validators that payment is a new transaction type, `paymentToFund`, with
+a field `paymentFor` that says in one word what the payment is for. The
+validator that receives a payment asks the masterpod before it takes it.
+The masterpod can read an account's payments from any validator, and it
+can ask any validator whether one transfer that it describes is written.
+
+What it does not build. The masterpod's side: the table of business
+pods, the prices, the answer to the validator's question, and the
+masterpod's own calls to a validator. And the wallet's pages. Both come
+with a later plan. So nothing a person sees changes with this section,
+and no payment of the new type can be made: until the masterpod has its
+route, every validator refuses every payment of the new type (35.2).
+
+The plan has five steps: the validator (this repo), the doorman, the
+signing server, the chain verify script, and the documentation outside
+the three programs. This section is the record of step 1, built on
+2026-11-27 in a chat of its own. 20 files change in 53 places, and no
+file is new: 17 JavaScript files, three of them for comments alone, the
+schema file, two comments in the network's settings file, and the worker
+script. After the build's report two more files changed in one comment
+each, on the user's word (35.7). No table changes, no setting is added,
+no value of a setting changes, and there is no new npm package. The
+functions of the stake keep their bodies. Nothing touches the keyholder,
+the registry or the genesis files.
+
+### 35.1 The decisions, as they apply to the code
+
+The plan's decisions 9 to 14 are the user's, from the planning chat.
+Decisions 15 to 35 are the planner's readings: 15 to 21 were told to the
+user and drew no objection, and 22 to 35 are details of the build that
+the user was not asked about.
+
+- **Only the masterpod knows the purposes** (decision 9). A validator
+  checks only that `paymentFor` is a short word, and keeps no list. In
+  the code that is one constant, `PAYMENT_FOR` in
+  `src/fund/fund.service.js`, and no purpose's name anywhere (decision
+  29: `businessLicense` and `businessAI` stand in examples and in the
+  documents only). So a later purpose is work in the masterpod and the
+  wallet, with no round of pulls. What it gives up: a misspelled purpose
+  is stopped by the masterpod's answer, not by the validator's own
+  check.
+- **Only the validator that receives a payment asks the masterpod**
+  (decision 10). `receivePaymentToFund` asks. The other validators
+  approve the payment without asking, and a validator that replays the
+  chain or takes waiting rows over at a join does not ask. A payment is
+  refused when the masterpod cannot be reached. An appointed stake works
+  this way since section 24.
+- **The read of an account's payments is public and unsigned** (decision
+  11), as `/list-dao-stakes` is. Anybody who knows an account's id can
+  read what that account paid into the fund with the new type: the
+  amounts, what each was for, and the dates.
+- **The read that confirms one transfer says yes or no to a transfer
+  that the asker describes** (decision 12): its id, both accounts and
+  the amount. A read that gives a transfer to anybody who has its id, as
+  the design's part 13 has it, is not taken.
+- **The names** (decision 13). The type is `paymentToFund` and its field
+  `paymentFor`. The wallet's route on a validator is `POST
+  /payment-to-fund`. The validator's question on the masterpod is `POST
+  /check-fund-payment`. The reads are `POST /list-fund-payments` and
+  `POST /confirm-transaction`. The design's `/pay-fund` and
+  `/get-transaction` are not taken.
+- **A validator on this code does not start when the round's database
+  line was not run** (decision 14). 35.4 has the check.
+- **The question's body is `{ payload }`** (decision 15): the payment's
+  payload as the wallet signed it, without the signatures. The design's
+  part 7 has three fields there. With the whole payload the masterpod
+  also has the payment's own date and its id, and a later purpose that
+  needs one more field in the payment needs no round of pulls.
+- **The question has three outcomes** (decision 16), **a reason of the
+  masterpod is passed on only when it is a short phrase** (decision 22),
+  and **the journal says why there was no answer** (decision 34). 35.2
+  has all three.
+- **The form of `paymentFor`** (decision 17) is 1 to 32 letters and
+  digits, the first a letter, and **it is part of the shape check**
+  (decision 23), `checkPaymentToFundShape`. The doorman and the signing
+  server copy that shape check with its reasons in their own steps, so a
+  payment with a bad word will not reach a validator.
+- **No minimum amount** (decision 18). Apart from that and the stake, a
+  payment passes what a stake passes.
+- **`/list-fund-payments` pages** with `afterPosition` and `limit`
+  (decision 19), **its `createdAt` is the payload's date** (decision
+  20), **`/confirm-transaction` answers a yes and a no with a 200**
+  (decision 25), and **an id in the two reads is 64 hex characters**
+  (decision 26). 35.3 has them.
+- **Each validator's doorman pulls and restarts in the same round**
+  (decision 21), and **the round's folder is made when the user names
+  the round** (decision 33). 35.5.
+- **The new functions stand beside the stake's as copies without the
+  stake** (decision 24). No function of the stake changes. The network
+  is live, and a shared body would put the stake's checks into a change
+  they do not need. The price: a later change to one of these checks has
+  to be made in both, and in the doorman's and the signing server's copy
+  of the shape.
+- **One partial index** (decision 27), **what the check at the start
+  reads** (decision 28), and **the worker script knows the check's
+  line** (decision 35). 35.4.
+- **A comment in the new code points to "docs/schemas.md section 35" and
+  carries no date** (decision 30). This section carries the day in its
+  heading.
+- **Five steps, one commit each** where the folder is a repository
+  (decision 31). A step does not wait for the deploy of the step before
+  it.
+- **The masterpod's route is the switch** (decision 32). Until it exists
+  every payment is refused. The later plan that builds it turns it on
+  only when all 25 validators, all 25 doormen and both signing servers
+  run this plan's code.
+
+### 35.2 The payment and the question
+
+**The payment.** The business wallet's server sends it to one validator,
+through that validator's doorman, when the owner of a business pod pays.
+It is built and signed as every transfer is.
+
+```
+POST /payment-to-fund
+payload: {
+  accountId:             the paying account
+  transactionId:         the SHA-256 of the canonical payload without it
+  previousTransactionId: the paying account's newest link
+  transactionType:       "paymentToFund"
+  amount:                millionths of an anos, a decimal string
+  accountIdTo:           the fund's account id
+  createdAt:             ISO 8601, now
+  paymentFor:            a short word, for one "businessLicense"
+}
+signatures: the sender's, any two pairs
+
+202 { transactionId }     the validator took it, stored it and sent it round
+400 { error: <reason> }   refused; nothing is stored
+```
+
+The route is in `src/fund/fund.router.js` and its handler,
+`paymentToFund`, in `src/fund/fund.handlers.js`, as the stake has them.
+`receivePaymentToFund` (`src/fund/fund.service.js`) hands the shared
+`receiveTransaction` a check that runs `verifyPaymentToFund` and then
+`askMasterpodAboutPayment`. The checks, in their order:
+
+1. The shape (`checkPaymentToFundShape`): the body and the payload are
+   objects, the seven fields of a transfer are strings,
+   `transactionType` is `paymentToFund`, `paymentFor` is a string of the
+   form `/^[A-Za-z][A-Za-z0-9]{0,31}$/`, and `signatures` is an object.
+   A bad word is refused with `payload.paymentFor must be 1 to 32
+   letters and digits, the first a letter`.
+2. The three ids are SHA-256 digests, and the amount is a positive whole
+   number of millionths as a decimal string.
+3. `accountIdTo` is the fund: `payload.accountIdTo is not the fund`.
+4. The paying account exists.
+5. The signatures, any two pairs.
+6. `transactionId` is the SHA-256 of the canonical payload without
+   itself.
+7. `createdAt` is within `LOCK_OFFSET_MINUTES` of the validator's clock,
+   before or after: `payload.createdAt must be within 10 minutes of
+   now`.
+8. The paying account is a spending account: `paymentToFund can only be
+   sent from a spending account`.
+9. `previousTransactionId` is the account's newest link.
+10. The fund's account exists, and nothing with this transaction id or
+    of this account waits in one of the five holding tables or is on
+    the chain.
+11. The balance covers the amount.
+12. The question to the masterpod, below.
+
+Checks 1 to 6 are `checkPaymentToFundSignaturesAndIds`. Checks 1 to 11
+are `verifyPaymentToFund`. They are the checks of `verifyTransferToFund`
+without the stake's own two, the purpose's name and its minimum amount.
+One thing stands earlier than in the stake: the form of `paymentFor` is
+checked with the shape, before the ids and the fund, where the stake
+checks its purpose's name after the fund.
+
+**The question.** Asked by that same validator, after all its own checks
+have passed and before it stores anything
+(`askMasterpodAboutPayment`):
+
+```
+POST MASTERPOD_URL/check-fund-payment
+{ payload: { ...the payment's payload from above, as signed, without the signatures... } }
+
+200 { ok: true }                     the payment may be taken
+200 { ok: false, reason: "..." }     the masterpod says no; the reason is 1 to 60 letters, digits and spaces
+```
+
+The call is `checkFundPayment(payload)`, new at the end of
+`src/masterpod/masterpod.client.js`: a `fetch` with the JSON body, the
+5-second timeout of the file's other two calls (`TIMEOUT_MS`) and
+`redirect: 'manual'`. Above it stands the rule for a reason, `REASON`,
+`/^[A-Za-z0-9 ]{1,60}$/`, which is the rule the signing server has for
+the masterpod's reasons. It hands back one of three things: `{ answered:
+true, ok: true }`, `{ answered: true, ok: false, reason }`, or
+`{ answered: false, detail }` with a few words for the journal.
+
+| The masterpod's answer | What this validator does |
+| --- | --- |
+| `200 { ok: true }` | The payment goes on as every transfer does: it is stored in `pending`, goes round the other validators, and the next round writes it as one link of type `paymentToFund`. The balance trigger moves the amount from the account to the fund. No stake is added. |
+| `200 { ok: false, reason }` with a reason of that form | `400 { error: <the reason> }` to the wallet, word for word. Nothing is stored. |
+| anything else: no answer within 5 seconds, no connection, a redirect, a status other than 200, a body that is not JSON or that says neither | `400 { error: "the masterpod could not confirm this payment" }` to the wallet. Nothing is stored. |
+
+The journal has `failed: <reason>` for both refusals, as for every
+refused submission. For the second kind it has one more line before it,
+which says why:
+
+```text
+no answer from the masterpod about a payment: status 404
+failed: the masterpod could not confirm this payment
+```
+
+In the place of `status 404` stands the status that came, or `a 200
+whose body is not JSON`, `a 200 that says neither a yes nor a no with a
+reason`, or the `fetch`'s own error, such as `The operation was aborted
+due to timeout` and `fetch failed`. The line holds nothing that the
+payment's sender or the masterpod wrote. What the masterpod decides by
+is the later plan's: whether the account belongs to an approved business
+pod, whether it knows the purpose, and whether this payment is allowed.
+
+**The four places that tell transaction types apart** each got one
+branch for the new type, beside the stake's:
+
+- The approval that another validator sends: `verifyTransaction` in
+  `src/validators/validators.service.js` runs `verifyPaymentToFund`
+  alone.
+- The batch write of a round: `writeTransactions` in
+  `src/accounts/accounts.service.js` calls `writePaymentToFund`, which
+  writes the link exactly as `writeTransferToFund` writes a stake's (the
+  sender as `account_id`, the fund as `account_id_to`, the amount, the
+  type) and does not call `addStake`.
+- The replay of a chain chunk: `checkByType` in
+  `src/garlic-chain/replay.service.js` runs
+  `checkPaymentToFundSignaturesAndIds` on the chunk's connection. The
+  type has no side effect there.
+- A joiner's waiting rows: `checkHeldTransaction` in
+  `src/held-transactions/held-rows.service.js` runs the same helper.
+
+None of the four asks the masterpod.
+
+What it does not do. The masterpod's yes holds nothing back: it is an
+answer at that moment, and a payment that was allowed can still fail to
+be written, for one when another validator refuses it. A payment adds no
+stake, and nothing pays it back: anos leave the fund only by a proposal
+of the guardians, as before. And no validator refuses a purpose: any
+word of the right form passes.
+
+### 35.3 The two reads
+
+Both are public, as `/list-dao-stakes` is (section 23): no envelope, no
+signature, no middleware. The body must be an object (`400 bad request
+shape`). The masterpod has no anos account and no validator key to sign
+with. Both are for the masterpod, whose side comes with the later plan,
+and anybody can send them. The 503 "not counted yet" of `src/app.js`
+applies as to every POST.
+
+**The read of an account's payments**, for the masterpod when it works
+out until when a business pod has paid:
+
+```
+POST /list-fund-payments
+{ accountId: 64 hex, afterPosition?: a whole number from 0, limit?: 1 to 200 }
+
+200 {
+  asOf:     this validator's clock at the read, ISO 8601
+  payments: [ { transactionId, position, amount, paymentFor, createdAt }, ... ]
+}
+400 { error: "invalid accountId" | "invalid afterPosition" | "invalid limit" | "bad request shape" }
+```
+
+The payments are the written links of type `paymentToFund` whose sender
+is that account, the oldest first, above `afterPosition` when it is
+given, at most `limit` of them, and 200 when no limit is given
+(`MAX_LIMIT`). `amount` is millionths as a decimal string. `paymentFor`
+and `createdAt` are taken from the payment's signed payload. A caller
+that got as many payments as it asked for asks again with
+`afterPosition` set to the last one's `position`. An account with no
+such payment, and an id that is no account's, answer an empty list: the
+read never answers `404`. Everything it answers is on the public chain:
+each `paymentToFund` link names its sender, its amount and what it paid
+for.
+
+- `createdAt` is the PAYLOAD's date, not the link's `created_at`. A
+  link's `created_at` is the moment each validator wrote it, and it
+  differs from validator to validator: the planning chat's trial read
+  `04:37:42.672909`, `.672911`, `.672828` and `.678494` for one link on
+  four validators. The payload's date is signed and is the same
+  everywhere, so whoever counts by it gets one answer whichever
+  validator it asks. The validators held it within
+  `LOCK_OFFSET_MINUTES` of their clock when the payment came in.
+- `afterPosition` has to be a whole number from 0 that JavaScript holds
+  exactly (`Number.isSafeInteger`); anything else is `400 invalid
+  afterPosition`. A first draft of the code let every whole number
+  through, and one above the largest BIGINT reached PostgreSQL as a
+  number it cannot read and came back as a `500`.
+- The query is `findFundPayments` at the end of
+  `src/reads/reads.queries.js`. The type stands written out in its
+  statement, as the partial index of 35.4 has it, so that the index
+  serves its `WHERE` and its `ORDER BY`.
+
+**The read that confirms one transfer**, for the masterpod before it
+marks a payment on a business site complete:
+
+```
+POST /confirm-transaction
+{ transactionId: 64 hex, accountId: 64 hex, accountIdTo: 64 hex, amount: millionths, a decimal string }
+
+200 { written: true, type, position, writtenAt }
+200 { written: false }
+400 { error: "invalid transactionId" | "invalid accountId" | "invalid accountIdTo" | "invalid amount" | "bad request shape" }
+```
+
+The answer is yes only when a link on this validator's chain has that
+transaction id AND that sender, that receiver and that amount. Then it
+carries the link's `type`, its `position` and `writtenAt`, the moment
+this validator wrote the link (`created_at`, ISO 8601). In every other
+case the answer is `{ written: false }` and nothing more: no link with
+that id (not written yet, never sent, or dropped), or a link whose
+sender, receiver or amount is another. So an asker learns nothing about
+a transfer that it could not describe, and nobody can list or look up
+transfers with it. It works for a link of any type that has a sender and
+a receiver; an account creation's id answers no. A transaction that
+waits in a holding table is not written. The read does not say why a no
+is a no.
+
+- Both answers are a `200`. A `404` is what a doorman or a validator
+  without the route answers, and the masterpod's client for the
+  validators moves on to the next validator on a `404`.
+- `amount` is a decimal string of a positive whole number, at most the
+  largest value a BIGINT holds; anything else is `400 invalid amount`.
+- The query is `findLink` in `src/reads/reads.queries.js`, one row by
+  the table's primary key.
+
+An id in the two reads is 64 hex characters, in small or capital
+letters, as `/get-fund-proposal` takes a proposal's id (`isDigestHex` in
+`src/reads/reads.service.js`). Base64 is not taken here, where section 1
+says that it is accepted wherever hex is; the public reads have not
+followed that since section 25.
+
+The two functions are `listFundPayments` and `confirmTransaction` in
+`src/reads/reads.service.js`, after `getFundProposal`. Their handlers
+are in `src/reads/reads.handlers.js`, and their routes in
+`src/reads/reads.router.js` stand with the three public reads of before,
+behind no middleware.
+
+### 35.4 The trigger, the index and the check at the start
+
+**The trigger.** The balances move in the database. The trigger
+`garlic_chain_apply_anos_transfer` of `db/schema.sql` fires for the link
+types that its `WHEN` clause names, and that list gains the ninth type:
+
+```sql
+  WHEN (NEW.type IN ('anosTransfer', 'guardedAnosTransfer', 'vaultAnosTransfer',
+                     'assistedAnosTransfer', 'escrowTransfer', 'breakGlassTransfer',
+                     'transferToFund', 'transferFromFund', 'paymentToFund'))
+  EXECUTE FUNCTION apply_anos_transfer();
+```
+
+There is no `ALTER` line. The file is written to be run again, and its
+`CREATE OR REPLACE TRIGGER` puts the new list in the old one's place.
+On a worker that run is the round's database line (35.5).
+
+Why the list matters. A link of a type the list does not name is written
+and moves no anos. A validator whose code writes the new type on a
+database whose trigger does not name it would hold two balances that
+differ from every other validator's, and the chain's hashes would not
+show it. The planning chat tried it by hand: with the trigger of before,
+a link of type `paymentToFund` was inserted and both balances stayed as
+they were, and the database line run afterwards did not put that link
+right. A link inserted after the line moved its anos.
+
+**The index.** One partial index, after the trigger:
+
+```sql
+CREATE INDEX IF NOT EXISTS garlic_chain_fund_payments_idx
+  ON garlic_chain (account_id, position)
+  WHERE type = 'paymentToFund';
+```
+
+It holds the links of type `paymentToFund` alone, so it stays small and
+no other link's write touches it. `garlic_chain` had no index on
+`account_id`, and a public read that anybody can call should not walk
+the whole chain. The index comes with the same run of the file as the
+trigger's list.
+
+**The check at the start.** `balanceTriggerNames(type)`, new at the end
+of `src/garlic-chain/garlic-chain.queries.js`, reads the trigger's own
+text as the database gives it (`pg_get_triggerdef`, which writes each
+type as a quoted word) and says whether it names the type. It is false
+too when the trigger is not there. `src/server.js` asks it once for
+`paymentToFund`, right after the chain write check of section 31 and
+before the genesis. When the answer is no, the server prints one line
+and ends with code 1, before it listens:
+
+```text
+Balance trigger check failed: the balance trigger of this database does not name paymentToFund yet; run the database line of the pull, and the validator starts by itself: sudo -u postgres sh /opt/anos/anossoftware/scripts/setup-db.sh
+```
+
+A database error at the read ends the start the same way, with `Balance
+trigger check failed: <message>`. The unit starts a server that ended
+this way again every five seconds (`deploy/anos-validator.service`:
+`Restart=on-failure`, `RestartSec=5`), so the validator comes up by
+itself once the line has run, and its journal shows the line every five
+seconds until then. The sentence names the line with the path a worker
+has, `/opt/anos/anossoftware`, which the unit file names too. When the
+trigger names the type, the check prints nothing.
+
+What the check does not see. It reads the list once, at the start. It
+does not see a trigger that was switched off, and it does not see a
+schema file of an older checkout that is run later against a running
+validator. No step of any paper does either of the two.
+
+**The worker script.** `scripts/bootstrap-worker.sh` reads a unit's
+journal for the line that stopped its start, in `boot_error` and in the
+sentence it fails with when a server does not answer in time. Both
+patterns gain `Balance trigger check failed`, so that a worker that is
+updated by this script and stops at the check is told why at once. The
+script itself runs the database scripts before the restart when its own
+pull changed `db/`, or when a database or a role is missing. So an
+update by this script brings the trigger's new list with it. When the
+new code came into the folder another way, by the round's paste or by a
+pull by hand, the script's pull finds nothing new and it runs no
+database script: a validator that is down at the check is then named
+with the check's line, and the database line puts it right. (The plan
+first said that the script meets the check "only after a run that
+failed halfway". The second reader of this section's documents found
+that too narrow, in the script's own lines, and the plan's sentence was
+put right the same evening, on the user's word.)
+
+`scripts/setup-db.sh` is not changed. Its words stay true: it changes
+no table that already exists.
+
+### 35.5 The pull
+
+The code reaches the validators with a round of pulls, whose papers are
+in `~/Desktop/Z-TestNet/upcoming_validator_pulls`. It is version 4 of
+the validator's code (the README there has the versions: v1 the code of
+the launch, v2 the round `Nov_19`, v3 the round `v3_nov_22`, which is
+section 34). The round's folder is made when the user names the round,
+so this build's entry for its `pull_steps.md` was not written when this
+section was. The plan's section 6 is what the round's papers are written
+from. In short:
+
+- **What is new against the round of version 3.** Each validator's
+  doorman pulls and restarts too, because a doorman lets through only
+  the routes of its table; the rounds of v2 and v3 did not touch the
+  doormen. The database line is no longer harmless to leave out: in v3 a
+  validator without it only reported nothing (34.4), in v4 a validator
+  without it does not start. So the line stands in the same paste as the
+  restart. And nothing happens at the first pull: no payment can be
+  sent before the later plan's masterpod route exists, and nothing
+  changes for a person. What answers at once on a validator that is
+  done is the two reads.
+- **Before the first pull.** This build and the doorman's are committed,
+  pushed and merged: the new code is on GitHub `main` of
+  `Anosphere/anosvalidator` and of `Anosphere/anosvalidatornode`. The
+  operator pushes and merges; the Mac of the build does not push. The
+  tag `v4` stands on the merge commit of `Anosphere/anosvalidator`, the
+  commit a health page will show. This line, in a terminal on any
+  computer, prints `1` when GitHub holds the validator's new code and
+  `0` before; after a merge GitHub's raw files can lag by up to five
+  minutes.
+
+  ```bash
+  curl -s https://raw.githubusercontent.com/Anosphere/anosvalidator/main/src/fund/fund.router.js | grep -c payment-to-fund
+  ```
+- **On the worker, one paste**: the restart paste of the rounds of v2
+  and v3 with the database line put in after the question about the
+  leader.
+
+  ```text
+  sudo -iu anos git -C /opt/anos/anossoftware pull --ff-only && node -e "fetch('http://127.0.0.1:3000/health').then((r) => r.json()).then((h) => { if (h.leader === h.validator.id) { console.log('This validator is the leader right now. Nothing was restarted. Wait for the next transaction, then paste the line again.'); process.exit(1); } }, () => {})" && sudo -u postgres sh /opt/anos/anossoftware/scripts/setup-db.sh && sudo systemctl restart anos-validator && sleep 3 && sudo journalctl -u anos-validator -n 8 --no-pager -o cat
+  ```
+
+  When right it prints the pull's lines with `Fast-forward`, then the
+  database line's one line,
+
+  ```text
+  ./.env: role 'anossoftware' and database 'anos' are ready (schema applied; the registry is applied by the server at boot).
+  ```
+
+  then the eight lines of a start, the last of them `counted at position
+  <P>`. The database line puts the ninth link type onto the balance
+  trigger's list and adds the one index, and changes no table. On a
+  validator that comes from v2 it also adds v3's table,
+  `masterpod_reports`. Nothing is installed (`package-lock.json` did not
+  change), no setting changes, and the keyholder is not touched.
+- **When it prints something else.** `This validator is the leader right
+  now. Nothing was restarted.`: nothing but the pull has happened, and
+  the same paste goes in again after the next transaction on the
+  network. An error of psql in place of the database line's one line,
+  such as `ERROR:  deadlock detected` (34.6): nothing was changed and
+  nothing was restarted, and the same paste goes in again. The last
+  lines read `Balance trigger check failed: ...`: the validator was
+  restarted in some other way, without the database line; it is down,
+  and the database line alone puts it right, after which it starts by
+  itself within five seconds.
+- **On the doorman, one paste**, the operator guide's line for a
+  doorman's software change:
+
+  ```text
+  sudo -iu doorman git -C /opt/doorman/doormansoftware pull --ff-only && sudo systemctl restart doorman && sleep 3 && sudo journalctl -u doorman -n 5 --no-pager -o cat
+  ```
+
+  When right it prints the pull's lines with `Fast-forward`, then the
+  boot lines of a doorman. While the doorman restarts, its validator
+  cannot be reached for a second or two; a transaction that another
+  validator sends round in that moment waits for it, as it waits for a
+  validator that restarts (read in section 29, not tried; no doorman has
+  been restarted in a round before). The worker and the doorman of one
+  validator can be done in either order. Until both are done, only the
+  three new routes answer `404` at that validator.
+- **How a validator is seen to be done.** Its public health page shows
+  the doorman's commit under `version.commit` and the validator's under
+  `worker.version.commit`. It is done when both are the new merge
+  commits and `worker.counted` is `true`.
+- **The versions together.** Version 4 works with the older versions
+  for as long as nobody sends a payment of the new type: it changes
+  nothing else that one validator says to another. And nobody can send
+  one before the masterpod has the route `/check-fund-payment`, because
+  every validator on this code then refuses it and no validator on older
+  code has the route. So the round can take the days it takes. A
+  validator goes from v2 straight to v4 by the same steps: the pull
+  brings v3's one build and this one together, and the one database line
+  serves both. A doorman and its worker on different code work in either
+  mix.
+- **Once payments start, which this plan does not do.** A validator on
+  older code that is still counted refuses the approval of every payment
+  of the new type (`payload.transactionType "paymentToFund" is not a
+  transaction type this validator knows`), and it passes the health
+  check, so its refusal stays (section 29). Then no validator can get
+  such a payment accepted: the payment waits unapproved, is dropped
+  after `UNAPPROVED_AGE_LIMIT_SECONDS` (section 21), and nothing leaves
+  the account. During those five minutes the paying account can send
+  nothing else. A validator on older code that was not counted while a
+  payment was written cannot catch up past that payment (`"paymentToFund"
+  is not a link type this validator knows`) and stays out until it has
+  pulled. And a validator on older code cannot join while a payment
+  waits. So the later plan switches the masterpod's route on only when
+  all 25 validators and all 25 doormen show the new commits.
+- **The way back** is for the operator: the line of the round's papers
+  with the commit before this build, and a restart. The database keeps
+  the new trigger list and the new index, and the older code runs on
+  such a database (tried by the planning chat). This holds as long as no
+  payment of the new type is on the chain. After the first payment a
+  validator must not go back: it would refuse every further payment, and
+  if it still held a payment that waits, its next round's write would
+  fail on a type it does not know (read in the code, not tried).
+- **The masterpod's doormen are not touched.** A validator calls
+  `https://api.anocloud.com` once for each payment it receives, from an
+  address of its own, and those doormen refuse an address only above 50
+  requests in 10 seconds.
+
+### 35.6 Files
+
+New: none.
+Changed, 20 files in 53 places: `db/schema.sql` (the comment on running
+the file again, the two comments above the balance trigger, and the
+trigger's list with the index after it); `src/fund/fund.service.js` (the
+import of `checkFundPayment`; the opening comment and the three
+constants `PAYMENT_TO_FUND`, `PAYMENT_FOR` and `PAYMENT_NOT_CONFIRMED`;
+after `writeTransferToFund` the five functions `verifyPaymentToFund`,
+`checkPaymentToFundSignaturesAndIds`, `receivePaymentToFund`,
+`askMasterpodAboutPayment` and `writePaymentToFund`; after
+`checkTransferToFundShape` the function `checkPaymentToFundShape`);
+`src/fund/fund.handlers.js` (the import and the handler
+`paymentToFund`); `src/fund/fund.router.js` (the import and the route);
+`src/masterpod/masterpod.client.js` (the opening comment, which now says
+three calls, and at its end `REASON` and `checkFundPayment`);
+`src/validators/validators.service.js`,
+`src/accounts/accounts.service.js`,
+`src/garlic-chain/replay.service.js` and
+`src/held-transactions/held-rows.service.js` (in each the import, the
+branch for the new type and, but for the last, one comment);
+`src/reads/reads.queries.js` (the opening comment, and at its end
+`findFundPayments` and `findLink`); `src/reads/reads.service.js` (the
+import, the opening comment, `MAX_BIGINT` and `isDigestHex`, and after
+`getFundProposal` the two functions `listFundPayments` and
+`confirmTransaction`); `src/reads/reads.handlers.js` and
+`src/reads/reads.router.js` (in each two imports, the opening comment,
+and the two handlers or the two routes, in the router with the comment
+line above the public routes);
+`src/garlic-chain/garlic-chain.queries.js` (the opening comment and at
+its end `balanceTriggerNames`); `src/server.js` (two import lines and
+the block after the chain write check); `scripts/bootstrap-worker.sh` (the
+two patterns, with the comment of `boot_error`). Comments alone, no
+value and no line of code: `src/app.js` (the routes of two routers),
+`src/config/env.js` and `network/testnet.env` (in each the transfers
+whose date is checked, and what the masterpod is asked), and
+`src/fund/fund-account.js` (what goes to the fund's account).
+Changed after the build's report, on the user's word, in two files that
+are not among the plan's 20, one comment each and no line of code:
+`src/accounts/account-types.js` (what a spending account sends) and
+`src/accounts/account-signatures.js` (what signs under any two pairs).
+In the docs: this section; above it, section 3 ("Changes to existing
+tables"), section 4 (its opening paragraph and the new 4.6), section 6
+(one bullet of the write), section 8 (one row of the submission table,
+the paragraph "Public, unsigned" and two rows of its table), section 9
+("ten kinds"), section 10 (the row of `MASTERPOD_URL` and the paragraph
+on `LOCK_OFFSET_MINUTES`), and one dated clause in brackets each in
+19.1, 19.3, 19.5, 24.1, 31.4 and 34.2, two in 34.4 and, on the user's
+word, one in 34.5; the README
+("Scripts", the row of `npm run db:setup`; "Configuration", the row of
+`MASTERPOD_URL`; "Running", one passage with the check's line;
+"Database", its first
+paragraph, the bullet of `garlic_chain` and one dated clause in the
+paragraph on the report; "Endpoints", three rows; "The account level and
+the reads"; "Stakes and transfer to fund", one paragraph at its end;
+"The leader round"; "Ignoring and joining"; "Validator-to-validator
+messages"; five lines of "Project layout" and, on the user's word, a
+sixth, the line of `fund.service.js`).
+Not changed: the six functions of the stake in
+`src/fund/fund.service.js` (`verifyTransferToFund`,
+`checkTransferToFundSignaturesAndIds`, `receiveTransferToFund`,
+`checkAppointment`, `writeTransferToFund` and
+`checkTransferToFundShape`) and the shared `receiveTransaction`; every
+file under `src/transfer/`, `src/stakes/`, `src/pending/`,
+`src/locked-transactions/`, `src/assisted-transfers/`, `src/escrow/`,
+`src/attachments/`, `src/records/`, `src/votes/`, `src/health/`,
+`src/genesis/`, `src/auth/`, `src/crypto/`, `src/db/`,
+`src/middleware/` and `src/util/`; `scripts/setup-db.sh` and every other
+script; every file under `deploy/`; `network/testnet.registry.json`;
+and no package file. The doorman, the signing server and the chain
+verify script are steps of their own.
+
+### 35.7 Notes from the build
+
+- **The build was made on main at `c65c25c`**, the commit the plan was
+  written against, with a clean working tree (`git status --short` at
+  about 21:58 on this Mac's clock on 2026-11-27, which is 05:58 UTC on
+  2026-11-28, before the first write). The spec ended with section 34,
+  so this section is 35, as the plan names it.
+- **The code is the plan's text, put in by a script and not by hand.**
+  The plan gives the code as places: under a heading with the file's
+  path stand blocks "Old" and "New". The script `edits.py` of the
+  plan's tools folder
+  (`~/Desktop/Z-TestNet/forclaude/validator-fund-payment-plan-1-tools/`)
+  read the 53 places from the plan file itself and made each of the 20
+  files from the commit's copy of it, with its places put in. Every Old
+  stood exactly once in its file, as whole lines; had one not, nothing
+  would have been written. It was done first into a scratch copy of the
+  commit and then into this folder. Afterwards the script's `check` with
+  `named-only` said `All 20 named files are the original with their
+  places put in.` The plan's blocks and the planning chat's own list of
+  the places hold the same places, letter for letter (`The same: 20
+  files, 53 places`). Then the comparison with the tried copy: the
+  commit copied to a scratch folder (`git archive HEAD`), `git apply
+  --check` and `git apply` of the planning chat's patch there, and `cmp`
+  of each of the 20 files with the working tree. All 20 are the same.
+  The build was not made from that patch. So the code of this section
+  is, byte for byte, the code that ran in the planning chat's trial. The
+  two comments that came later on the user's word stand in two other
+  files and change no line of code.
+- **Where the plan gave words and no exact place.** In section 3 the
+  index has a bullet of its own, and the last bullet no longer names
+  `garlic_chain` among the tables that are unchanged. In section 8 the
+  paragraph "Public, unsigned" now says "the first three" where it said
+  "they", and gained two sentences on the two new reads: "everything
+  they answer is the fund's public business" does not hold for
+  `/confirm-transaction`. In section 10 the question stands in the row
+  of `MASTERPOD_URL`. The dated clause in 31.4 also says that `Chain
+  write check failed` is still not among the worker script's patterns,
+  so that nobody reads the clause as that note put right. In the README
+  the paragraph on the payment stands at the very end of "Stakes and
+  transfer to fund", after the paragraph on the guardian votes; the
+  plan's line numbers for that section end one paragraph earlier. In
+  "The account level and the reads" the two new reads are told in the
+  passage that tells the three, with their bodies and answers.
+- **Places the plan does not name.** Six were listed for the user in the
+  build's report. Four were brought in line the same evening, before
+  the commit, on the user's word ("Yes, bring them in line"). Three
+  sentences listed what goes to the fund or who signs how, and named the
+  stake alone. Each now names the payment to the fund too: the opening
+  comment of `src/accounts/account-types.js` (what a spending account
+  sends), the comment of `ANY_TWO_PAIRS` in
+  `src/accounts/account-signatures.js` (what signs under any two pairs),
+  and in the README's "Project layout" the line of `fund.service.js`.
+  And in 34.5 above, "the opening comment, which now says two calls"
+  got a dated clause: that comment says three since this build. The two
+  comments are comments alone, in two files that are not among the
+  plan's 20. Two places stay as they are. Section 1 says "Base64 is
+  accepted wherever hex is", which the public reads have not followed
+  since section 25 and the two new ones do not follow either; the plan
+  names this one as left. And one comment of the plan's own new code is
+  not exact and stands as the plan has it, so that the file stays the
+  tried copy byte for byte: the comment of `verifyPaymentToFund` says
+  "the checks of verifyTransferToFund in their order, with the form of
+  paymentFor in the place of the purpose", and the form is checked
+  earlier than the stake checks its purpose (35.2).
+- **The planning chat's trial** (the plan's "What was tried, and what
+  was not"), on this Mac on 2026-11-27, with this section's code in
+  scratch copies. It is told here as that chat's; the build ran none of
+  it again but for what the next point names. Five validators were made
+  and started by the committed tools of the rig
+  (`/Users/codex/Desktop/Z-local`) from a throwaway copy with ports of
+  its own. In the masterpod's place stood a stand-in of 80 lines that
+  answers `/check-fund-payment` by the word in `paymentFor` and writes
+  every request down. The rig's own first account, a spending account,
+  signed the payments. What it showed:
+  - A payment that the stand-in allows, once through validator 1 and
+    once through validator 3: `202`. The masterpod is asked exactly
+    once, by the validator that received the payment, with `{ payload }`
+    and nothing else: the payload field for field as signed, and no
+    signature. The payment is written on all five at one position as a
+    link of type `paymentToFund`. On every validator the account has the
+    amount less and the fund the amount more. No stake row is added, and
+    nothing is left in `pending`.
+  - A no with a reason (`past the 12 months`, `unknown purpose`): `400`
+    with that reason, word for word.
+  - No answer that reads as a yes or a no, eleven ways: a no whose
+    reason is no short phrase, one of 61 characters, one without a
+    reason, `ok` as the text "true", an empty object, a `200` that is
+    not JSON, a `500`, a `404`, a `201` that says ok, a redirect, and no
+    answer within 5 seconds. Each: `400` with the fixed sentence. With
+    nothing listening at the masterpod's address: the same. For each of
+    the twelve the journal says why.
+  - Refused by the validator's own checks, with the masterpod not
+    asked: `paymentFor` with a space, of 33 characters, starting with a
+    digit, empty, left out, a number; a receiver that is not the fund; a
+    date 11 minutes old; more than the balance; an amount of 0; a wrong
+    previous transaction; a changed signature; a changed payload. And
+    the new type at `/transfer-to-fund` and `/anos-transfer`, and a
+    stake and a plain transfer at `/payment-to-fund`. After all the
+    refusals every balance was as before, nothing was in `pending`, all
+    five were counted, and the next payment went through.
+  - `/list-fund-payments`: the same payments from all five, the oldest
+    first, five fields each, with the payload's own `createdAt`; `limit`
+    and `afterPosition` page through them; an id in capital letters
+    works; an account with no payment and an id that is no account's
+    answer an empty list; eleven bad bodies get their `400`, among them
+    an `afterPosition` one above the largest BIGINT, which a first draft
+    of the code answered with a `500`. PostgreSQL can serve the list
+    from the new index, which was 16 KB with three payments in it.
+  - `/confirm-transaction`: a payment and a plain transfer that are
+    described rightly answer `{ written: true, type, position,
+    writtenAt }`; another amount, swapped accounts, another sender,
+    another receiver, an id that is on no chain and the id of an account
+    creation answer `{ written: false }` and nothing more; eight bad
+    bodies get their `400`.
+  - A validator that is down while a payment is written: the other four
+    write it. Started again, it replays the link, its balances are the
+    others', and the masterpod is not asked a second time.
+  - The check at the start: this code on a database whose trigger is the
+    one of before ends at once, before it listens, with the line of
+    35.4, and a second start ends the same way. After the new schema
+    file was applied, the same start goes through and the validator
+    counts itself.
+  - One validator on the code of before (`c65c25c`) among four on this
+    code. It starts on a database that already has the new trigger list
+    and the new index, and counts itself. Plain transfers through a new
+    and through the older validator are written on all five. On the
+    older one the three new routes are `404 Not Found`.
+  - A payment through validator 1 while that older validator is counted:
+    validator 1 answers `202` all the same, and its log has `validator 5
+    failed: answered 400: {"error":"transaction:
+    payload.transactionType \"paymentToFund\" is not a transaction type
+    this validator knows"}`. The older validator is not voted out. The
+    payment waits unapproved on the four, is on no chain and moves no
+    balance. While it waits the account can send nothing else (`a
+    transaction for this accountId is already pending`). The row was
+    gone from all five 304 seconds after the send. Then, with all five
+    on this code, the same payment signed anew went through.
+  - A validator on the code of before that was not counted while a
+    payment was written: started, it does not count itself; its log has
+    `chain replay: position 10: "paymentToFund" is not a link type this
+    validator knows`, and its chain stands one link before the payment.
+    The same validator on this code catches up in 1.3 seconds.
+  - The waiting rows a joiner takes over, by the two functions of that
+    pull, each run as a process of its own. `readHeldRows` by this code
+    gives the waiting payment. `storeHeldRows` by the code of before
+    refuses it (`transactionType "paymentToFund" is not one this
+    validator knows`) and stores nothing. By this code it stores it, and
+    a second time it skips it. One thing came out other than that chat
+    expected, and nothing is wrong in the code: a validator that
+    restarts while the others still count it takes no waiting rows over
+    (`join: counted`). That pull is part of a join after a vote.
+  - The round's database line, the validator's own `scripts/setup-db.sh`
+    under dash, on a database that the code of before had set up: it
+    prints its one line and took 67 thousandths of a second; two dumps
+    of the schema, before and after, differ in exactly the new index and
+    the trigger's list; the 16 tables, the link and the balances are as
+    before; a second run changes nothing; a database built from the new
+    file alone has the same schema, byte for byte.
+  - The balance trigger by hand, as told in 35.4.
+  - The same trial also ran the doorman, the signing server and the
+    chain verify script with their steps' code. Those are the records of
+    their own steps.
+  - Two second readers read the code with none of that chat's
+    conclusions in hand. They found no place under `src/` that tells
+    types apart and was missed, and no change for anything that exists
+    today. From their findings came the bound on `afterPosition`, the
+    journal's line for no answer, the worker script's patterns, some
+    comments, and most of the document places that this build wrote.
+    After those changes
+    the cases of the first six points and the check at the start ran
+    again; the others ran on the code before those changes, which touch
+    none of what they try.
+  - Later that evening the rig got its keyholders and its signing
+    servers, so the run on the rig that the next point tells was tried
+    first in a throwaway copy of the rig's newer tools, without
+    keyholders, with the same outcome as the build's.
+- **The build's own checks** (the plan's 1.9), all on this Mac on
+  2026-11-27, at about 22:00 to 22:05 on its clock.
+  - `node --check` passed on the 17 changed `.js` files, and later on
+    the two files whose comment changed on the user's word. `sh -n` and
+    `dash -n` passed on `scripts/bootstrap-worker.sh`, and its pattern
+    finds the check's line in a made-up journal.
+  - The schema, in a PostgreSQL 17.11 of the moment in the build's
+    scratch folder, on 127.0.0.1 and a port of its own, never this Mac's
+    own server on port 5432. It was the tools folder's
+    `database/setupdb.sh`, run from a scratch copy: the validator's real
+    `scripts/setup-db.sh` under dash, behind a wrapper in front of psql
+    that names the scratch server whatever the settings files say. The
+    commit's files set the database up: 16 tables, 23 indexes, 12
+    triggers, and a trigger that does not name `paymentToFund`. With the
+    working tree's files in their place, the same line printed its one
+    line in 66 thousandths of a second: 16 tables, 24 indexes, 12
+    triggers, the trigger names `paymentToFund`, and the two dumps of
+    the schema differ in exactly the new index and the trigger's list.
+    The one link and both balances were as before. The line a second
+    time left the schema byte for byte as it was. A database built from
+    the new file alone gave the same dump, byte for byte. A link of type
+    `paymentToFund` that was then inserted by hand moved its anos. The
+    tools folder's `database/trigger-trial.sh` ran too, with the outcome
+    35.4 tells.
+  - The rig, `/Users/codex/Desktop/Z-local` at `8a556bb`, in its own
+    folder, since the run makes no person. `./rig look` first: the rig
+    was stopped. Once up, it showed no person and a chain of two links,
+    its two genesis accounts. `./rig up` ended with code 0. It said `The
+    validator program: /Users/codex/Desktop/Z-TestNet/anossoftware at
+    commit c65c25c, 20 files changed since that commit.` (the two
+    documents and the two comments of the user's word were written after
+    the run, which was not made again for them) and for the masterpod
+    (`cbd51ce`), the keyholder (`6d4b89c`), the signing server
+    (`21e5a2e`) and the wallet (`65eedc9`) each `no file changed since
+    that commit`. It applied the new `db/schema.sql` to the five kept
+    databases, which the code of before had made, and then `All 5
+    validators count themselves, 10.3 seconds after the start`: so the
+    check of the trigger passed on all five. The five keyholders, the
+    two signing servers and the wallet's three editions came up beside
+    them, and `./rig look` ended with code 0. `./rig send` wrote a plain
+    transfer: `Written at position 3 on all 5 validators, 0.1 seconds
+    after the send.`
+  - Then `trial/rig-payment.mjs` of the tools folder, with the rig's
+    folder as its one word: one payment to the fund from the rig's first
+    account through validator 1, signed as `./rig send` signs, against
+    the REAL masterpod program, which has no route `/check-fund-payment`
+    before the later plan. The answer: `400 {"error":"the masterpod
+    could not confirm this payment"}`. Validator 1's log: `no answer
+    from the masterpod about a payment: status 404`, then `failed: the
+    masterpod could not confirm this payment`. The masterpod wrote no
+    line. On all five the chain, both balances and the account's newest
+    transaction were as before, and nothing waited. `/list-fund-payments`
+    for that account, on all five: `200` with `asOf` and an empty list.
+    `/confirm-transaction` for the plain transfer, on all five: `200
+    {"written":true,"type":"anosTransfer","position":3,"writtenAt":"<a
+    time>"}`; with another amount: `200 {"written":false}`. Its last
+    line: `Every line is ok.` The rig was left with `./rig stop` and was
+    not wiped. Its kept world has one link more, that plain transfer of
+    1 anos, and its five databases have the new trigger list and the new
+    index.
+  - A second reader, a separate agent that was given the changes of the
+    two documents, the code and the plan and none of the build's
+    conclusions, read the documents for untrue sentences after the
+    checks and changed nothing. It found the user's words, the
+    decisions, the counts, the order of the checks, every refusal text,
+    log line and pasted line to be the plan's and the code's, the 20
+    code files to be the tried patch byte for byte, and no place of the
+    plan's list for the documents missing. Seven sentences of this
+    section that it found too wide or not exact were put right: what the
+    worker script does when the code came another way (35.4), what can
+    be seen at the first pull (35.5), which `afterPosition` a first
+    draft answered with a `500` (35.3), where the form of `paymentFor`
+    is checked (35.2), two entries of 35.6, and two lines of this note.
+    The first four had come from the plan's own words. The planning
+    chat put the first three right in the plan's text the same evening,
+    on the user's word ("Yes, the three"). The fourth is the comment
+    that stays as it is (above). No code block of the plan changed.
+- **Not tried.** A payment that goes through against the real masterpod:
+  its route comes with the later plan, and the planning chat's trial
+  showed it with a stand-in. A payment that a signing server of the rig
+  signs: that needs a person's account and that person's passkey answer
+  for exactly that payment, and no page of the wallet makes a payment
+  before the later plan. Anything on a worker or a doorman of the
+  network: the `sudo` lines,
+  systemd's new start every five seconds, a doorman's restart. No
+  validator of the network was touched, and nothing was sent to it.

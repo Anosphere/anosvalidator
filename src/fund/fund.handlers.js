@@ -1,6 +1,6 @@
 import { answerSubmission } from '../util/submission-response.js';
 import { runLeader } from '../validators/validators.service.js';
-import { receiveFundProposal, receiveTransferToFund } from './fund.service.js';
+import { receiveFundProposal, receivePaymentToFund, receiveTransferToFund } from './fund.service.js';
 
 /**
  * Route handlers for the fund feature's transactions. HTTP in and out only:
@@ -14,6 +14,13 @@ import { receiveFundProposal, receiveTransferToFund } from './fund.service.js';
 /** POST /transfer-to-fund */
 export async function transferToFund(req, res) {
   const result = await receiveTransferToFund(req.body);
+  answerSubmission(res, result);
+  if (result.ok) runLeader().catch((err) => console.log(err));
+}
+
+/** POST /payment-to-fund */
+export async function paymentToFund(req, res) {
+  const result = await receivePaymentToFund(req.body);
   answerSubmission(res, result);
   if (result.ok) runLeader().catch((err) => console.log(err));
 }

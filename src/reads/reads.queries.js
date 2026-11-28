@@ -3,7 +3,9 @@ import { DECIDING_VERDICTS } from '../escrow/escrow.queries.js';
 
 /**
  * SQL for the reads feature: what an account may read about itself (wallet
- * spec 5.4). Ids are Buffers of 32 raw bytes, matching the BYTEA columns;
+ * spec 5.4) and, at the end of the file, the two queries behind the public
+ * reads of spec section 35: one account's payments to the fund, and one
+ * link by its id. Ids are Buffers of 32 raw bytes, matching the BYTEA columns;
  * pg sends a Buffer parameter as bytea and hands BIGINT columns over as
  * decimal strings, so no amount is ever a JavaScript number.
  */
@@ -191,6 +193,44 @@ export async function findLockedFor(accountId) {
      FROM locked_transactions
      WHERE account_id = $1`,
     [accountId],
+  );
+  return rows.length === 0 ? null : rows[0];
+}
+
+/**
+ * One account's payments to the fund (spec section 35): the garlic chain
+ * links of type paymentToFund whose account_id is this account, position
+ * ascending, above `afterPosition` when it is not null, at most `limit`
+ * rows. Each row: transaction_id, position, amount and og_transaction, as
+ * the columns are. The type stands written out in the statement, as the
+ * partial index garlic_chain_fund_payments_idx has it (db/schema.sql), so
+ * that the index serves this WHERE and this ORDER BY.
+ */
+export async function findFundPayments(accountId, afterPosition, limit) {
+  const { rows } = await query(
+    `SELECT transaction_id, position, amount, og_transaction
+     FROM garlic_chain
+     WHERE type = 'paymentToFund'
+       AND account_id = $1
+       AND ($2::bigint IS NULL OR position > $2::bigint)
+     ORDER BY position
+     LIMIT $3`,
+    [accountId, afterPosition, limit],
+  );
+  return rows;
+}
+
+/**
+ * The garlic chain link with this transaction_id, its primary key, or null
+ * when no link has it: position, type, account_id, account_id_to, amount
+ * and created_at, as the columns are.
+ */
+export async function findLink(transactionId) {
+  const { rows } = await query(
+    `SELECT position, type, account_id, account_id_to, amount, created_at
+     FROM garlic_chain
+     WHERE transaction_id = $1`,
+    [transactionId],
   );
   return rows.length === 0 ? null : rows[0];
 }

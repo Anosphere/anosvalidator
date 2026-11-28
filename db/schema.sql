@@ -3,8 +3,9 @@
 -- The whole database schema, built from nothing. scripts/setup-db.sh applies
 -- it to every validator's database, followed by db/validators.sql.
 --
--- Safe to run again on a database that already has it: tables use IF NOT
--- EXISTS, the function and triggers use OR REPLACE, comments just overwrite.
+-- Safe to run again on a database that already has it: tables and indexes
+-- use IF NOT EXISTS, the function and triggers use OR REPLACE, comments just
+-- overwrite. So a run also puts a changed trigger in the old one's place.
 -- It never alters a table that already exists, with one exception: the
 -- ALTER TABLE right after the validators table adds its ignored column
 -- (2026-11-07) to a database built before it, and is a no-op after that.
@@ -201,8 +202,8 @@ COMMENT ON COLUMN garlic_chain.position            IS 'The row''s place in the c
 
 
 -- ---------------------------------------------------------------------------
--- Moving the anos: when a transfer link is inserted, of any of the eight
--- transfer types below, its amount leaves the sender's balance (account_id)
+-- Moving the anos: when a transfer link is inserted, of any of the nine
+-- link types below, its amount leaves the sender's balance (account_id)
 -- and lands in the receiver's (account_id_to). Done by a trigger so the
 -- balances can never
 -- disagree with the chain: the link and both balance changes happen in one
@@ -217,14 +218,22 @@ COMMENT ON COLUMN garlic_chain.position            IS 'The row''s place in the c
 -- pending; the trigger is the backstop. The UPDATEs fire
 -- accounts_set_updated_at, so both accounts' updated_at move.
 --
--- Only rows whose type is one of the eight transfer types qualify (the WHEN
--- clause): 'anosTransfer', 'guardedAnosTransfer', 'vaultAnosTransfer',
+-- Only rows whose type is one of these nine qualify (the WHEN clause):
+-- 'anosTransfer', 'guardedAnosTransfer', 'vaultAnosTransfer',
 -- 'assistedAnosTransfer', 'escrowTransfer', 'breakGlassTransfer' (the whole
 -- balance of an account whose keys died with its passkey, to a new account
 -- of the same type; 2026-11-08), 'transferToFund' (an account staking anos
--- with the fund) and 'transferFromFund' (a payout of a fund proposal; the
--- fund is the sender). An account creation or a fund proposal link has no
--- account_id_to and amount 0, and is left alone.
+-- with the fund), 'transferFromFund' (a payout of a fund proposal; the
+-- fund is the sender) and 'paymentToFund' (a payment to the fund that is no
+-- stake; docs/schemas.md section 35). An account creation or a fund
+-- proposal link has no account_id_to and amount 0, and is left alone.
+--
+-- A link of a type this list does not name is written and moves no anos. A
+-- validator whose code writes a type that its database's trigger does not
+-- name would hold balances that differ from every other validator's. So the
+-- server reads the trigger at its start (src/server.js) and does not start
+-- on such a database. Running this file again (scripts/setup-db.sh) puts
+-- the list below in the trigger's place.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION apply_anos_transfer()
@@ -261,8 +270,21 @@ CREATE OR REPLACE TRIGGER garlic_chain_apply_anos_transfer
   FOR EACH ROW
   WHEN (NEW.type IN ('anosTransfer', 'guardedAnosTransfer', 'vaultAnosTransfer',
                      'assistedAnosTransfer', 'escrowTransfer', 'breakGlassTransfer',
-                     'transferToFund', 'transferFromFund'))
+                     'transferToFund', 'transferFromFund', 'paymentToFund'))
   EXECUTE FUNCTION apply_anos_transfer();
+
+
+-- ---------------------------------------------------------------------------
+-- The payments to the fund of one account, for the public read
+-- /list-fund-payments (src/reads/reads.queries.js findFundPayments,
+-- docs/schemas.md section 35): the links of type 'paymentToFund', by sender
+-- and position. A partial index: it holds those links alone, so it stays
+-- small and no other link's write touches it.
+-- ---------------------------------------------------------------------------
+
+CREATE INDEX IF NOT EXISTS garlic_chain_fund_payments_idx
+  ON garlic_chain (account_id, position)
+  WHERE type = 'paymentToFund';
 
 
 -- ---------------------------------------------------------------------------

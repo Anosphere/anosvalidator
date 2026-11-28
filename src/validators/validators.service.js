@@ -6,9 +6,11 @@ import { findReadyAssistedIds } from '../assisted-transfers/assisted-transfers.q
 import { findReadyEscrowIds } from '../escrow/escrow.queries.js';
 import {
   FUND_PROPOSAL,
+  PAYMENT_TO_FUND,
   TRANSFER_TO_FUND,
   findReadyProposalIds,
   verifyFundProposal,
+  verifyPaymentToFund,
   verifyTransferToFund,
 } from '../fund/fund.service.js';
 import { HELD_TABLES, PENDING, findHeld } from '../held-transactions/held-transactions.js';
@@ -163,8 +165,9 @@ async function findRepeatedApproval(payload) {
  * Runs on a submission the checks the originating validator ran, picked by
  * its transactionType: verifyCreateAccount (accounts.service.js) for an
  * account creation, verifyAnosTransfer (transfer.service.js) for any of the
- * six transfer types, verifyTransferToFund and verifyFundProposal
- * (fund.service.js) for a transfer to the fund and a fund proposal. All
+ * six transfer types, verifyTransferToFund, verifyPaymentToFund and
+ * verifyFundProposal (fund.service.js) for a stake, a payment to the fund
+ * (docs/schemas.md section 35) and a fund proposal. All
  * answer { ok: true, accountId, transactionId, heldIn, ... } or { ok: false,
  * reason }: heldIn names the holding table the transaction waits in, with
  * whatever else that table's row needs (futureDate, accountIdTo,
@@ -180,6 +183,7 @@ async function verifyTransaction(transaction) {
   }
   if (isTransferType(transactionType)) return verifyAnosTransfer(transaction);
   if (transactionType === TRANSFER_TO_FUND) return verifyTransferToFund(transaction);
+  if (transactionType === PAYMENT_TO_FUND) return verifyPaymentToFund(transaction);
   if (transactionType === FUND_PROPOSAL) return verifyFundProposal(transaction);
   return {
     ok: false,

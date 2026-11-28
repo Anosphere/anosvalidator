@@ -1,5 +1,6 @@
 import { answer } from '../util/result.js';
 import {
+  confirmTransaction,
   getAccount,
   getAssistedTransfer,
   getFundProposal,
@@ -8,6 +9,7 @@ import {
   listDaoStakes,
   listDisputedEscrows,
   listEscrows,
+  listFundPayments,
   listFundProposals,
   listTransactions,
 } from './reads.service.js';
@@ -15,9 +17,10 @@ import {
 /**
  * Route handlers for the reads feature. HTTP in and out only: the caller is
  * req.account (src/auth/require-account.js; for the two attestor reads the
- * verified attestor, src/auth/require-attestor.js; the three public reads,
- * /list-dao-stakes, /list-fund-proposals and /get-fund-proposal, have
- * none), the route's object is req.body; the service checks and answers.
+ * verified attestor, src/auth/require-attestor.js; the five public reads,
+ * /list-dao-stakes, /list-fund-proposals, /get-fund-proposal,
+ * /list-fund-payments and /confirm-transaction, have none), the route's
+ * object is req.body; the service checks and answers.
  */
 
 /** POST /get-account */
@@ -68,4 +71,14 @@ export async function listFundProposalsHandler(req, res) {
 /** POST /get-fund-proposal */
 export async function getFundProposalHandler(req, res) {
   answer(res, await getFundProposal(req.body));
+}
+
+/** POST /list-fund-payments */
+export async function listFundPaymentsHandler(req, res) {
+  answer(res, await listFundPayments(req.body));
+}
+
+/** POST /confirm-transaction */
+export async function confirmTransactionHandler(req, res) {
+  answer(res, await confirmTransaction(req.body));
 }

@@ -43,7 +43,8 @@ export const BREAK_GLASS_KEYS = Object.freeze([
 
 /**
  * Signing rule: at least two of the three pairs, both keys of each. Every
- * transfer kind but the break-glass transfer, transfers to the fund, fund
+ * transfer kind but the break-glass transfer, transfers to the fund,
+ * payments to the fund (paymentToFund, docs/schemas.md section 35), fund
  * proposals and every follow-up but the break-glass cancel use it: their
  * one rule since 2026-11-07, when the assisted transfer's own rule, pair
  * one and the wallet pair, was dropped.

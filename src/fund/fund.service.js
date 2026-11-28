@@ -14,7 +14,7 @@ import {
   PENDING,
   takeApprovalBack,
 } from '../held-transactions/held-transactions.js';
-import { fetchAnosAccount } from '../masterpod/masterpod.client.js';
+import { checkFundPayment, fetchAnosAccount } from '../masterpod/masterpod.client.js';
 import { VOTE_FAILED, moveToArchives } from '../records/records.queries.js';
 import { PURPOSE_NAMES, isAppointedPurpose, isPurpose, minimumFor } from '../stakes/stake-purposes.js';
 import { addStake, findStake, subtractStake } from '../stakes/stakes.queries.js';
@@ -28,17 +28,34 @@ import { FUND_ACCOUNT_ID } from './fund-account.js';
 import { findClosedProposals, findExistingAccounts, findProposalConflicts } from './fund.queries.js';
 
 /**
- * The fund feature: the two transaction kinds that move anos to and from the
- * fund. A transferToFund stakes anos with the fund for a purpose
+ * The fund feature: the three transaction kinds that move anos to and from
+ * the fund. A transferToFund stakes anos with the fund for a purpose
  * (stake-purposes.js) and is held in pending like a plain transfer; a
- * fundProposal is a guardian's list of payouts from the fund, held in
- * fund_proposals while the guardians vote on it (guardian-vote.js), then
- * written as one proposal link followed by one transferFromFund link per
- * payout. Both go round the validators exactly as every transaction does.
+ * paymentToFund (docs/schemas.md section 35) pays anos into the fund for
+ * something that is no stake, says what for in a word, and is held in
+ * pending too; a fundProposal is a guardian's list of payouts from the
+ * fund, held in fund_proposals while the guardians vote on it
+ * (guardian-vote.js), then written as one proposal link followed by one
+ * transferFromFund link per payout. All three go round the validators
+ * exactly as every transaction does.
  */
 
 /** The transactionType of a stake: a transfer from a spending account to the fund, naming its purpose. */
 export const TRANSFER_TO_FUND = 'transferToFund';
+
+/** The transactionType of a payment to the fund that is no stake: a transfer from a spending account to the fund, naming what it pays for (docs/schemas.md section 35). */
+export const PAYMENT_TO_FUND = 'paymentToFund';
+
+/**
+ * How payload.paymentFor of a paymentToFund must look: a short word, 1 to
+ * 32 letters and digits, the first a letter. No validator keeps a list of
+ * the words: the masterpod knows what a payment may be for
+ * (askMasterpodAboutPayment).
+ */
+const PAYMENT_FOR = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
+
+/** The reason a paymentToFund is refused with when the masterpod gave no answer that reads as a yes or a no. */
+const PAYMENT_NOT_CONFIRMED = 'the masterpod could not confirm this payment';
 
 /** The transactionType of a fund proposal. */
 export const FUND_PROPOSAL = 'fundProposal';
@@ -276,6 +293,194 @@ export async function writeTransferToFund(client, { transactionId, accountId, og
     ogTransaction,
   });
   await addStake(client, accountId, payload.stakeFor, payload.amount);
+  return recordHash;
+}
+
+/**
+ * Validates a paymentToFund, { payload, signatures } (docs/schemas.md
+ * section 35): the transfer payload of transfer.service.js (accountId,
+ * transactionId, previousTransactionId, transactionType, amount,
+ * accountIdTo, createdAt) plus paymentFor, a short word that says what the
+ * payment is for. It is a transferToFund without the stake: the checks of
+ * verifyTransferToFund in their order, with the form of paymentFor in the
+ * place of the purpose and with no minimum amount. accountIdTo is the
+ * fund; the sender must be a spending account; the signatures follow the
+ * any-two-pairs rule; createdAt is within LOCK_OFFSET_MINUTES of now,
+ * before or after; the uniqueness checks cover the five holding tables and
+ * the chain.
+ *
+ * The shape, signature and id parts are
+ * checkPaymentToFundSignaturesAndIds, which the replay of a chain chunk
+ * (src/garlic-chain/replay.service.js) and the held-row checks
+ * (src/held-transactions/held-rows.service.js) run and nothing else; the
+ * date, the account's type and the rest follow here.
+ *
+ * Returns { ok: true, accountId, transactionId, accountIdTo, heldIn } with
+ * the ids as 32-byte Buffers and heldIn 'pending', the shape every verify
+ * function gives, or { ok: false, reason }. Storing is
+ * receivePaymentToFund's job, and so is the question to the masterpod
+ * (askMasterpodAboutPayment), asked after this passed on the receiving
+ * validator only: this function is what the approval path runs on every
+ * peer (validators.service.js verifyTransaction), and it never asks the
+ * masterpod.
+ */
+export async function verifyPaymentToFund(body) {
+  const checked = await checkPaymentToFundSignaturesAndIds(body);
+  if (!checked.ok) return checked;
+
+  const { payload } = body;
+  const { accountId, accountIdTo, amount, account, transactionId } = checked;
+
+  // 1b. The date.
+  const createdAt = Date.parse(payload.createdAt);
+  if (!(Math.abs(createdAt - Date.now()) <= env.locks.offsetMinutes * MS_PER_MINUTE)) {
+    return { ok: false, reason: `payload.createdAt must be within ${env.locks.offsetMinutes} minutes of now` };
+  }
+
+  // 2b. The sending account is a spending account.
+  if (account.type !== SPENDING) {
+    return { ok: false, reason: `${PAYMENT_TO_FUND} can only be sent from a ${SPENDING} account` };
+  }
+
+  // 5. previousTransactionId.
+  const latest = await findLatestTransactionId(accountId);
+  if (latest === null || !digestMatches(payload.previousTransactionId, latest)) {
+    return { ok: false, reason: "payload.previousTransactionId is not the account's latest transaction" };
+  }
+
+  // 6. The fund exists, and uniqueness.
+  const existing = await findExisting({ accountId, accountIdTo, transactionId });
+  if (!existing.accountToExists) return { ok: false, reason: 'no account with this accountIdTo' };
+  const conflict = heldConflict(existing);
+  if (conflict) return { ok: false, reason: conflict };
+  if (existing.chainTransaction) {
+    return { ok: false, reason: 'a transaction with this transactionId is already in the garlic chain' };
+  }
+
+  // 7. Balance.
+  if (BigInt(account.currentBalance) < amount) {
+    return { ok: false, reason: "payload.amount is more than the account's balance" };
+  }
+
+  return { ok: true, accountId, transactionId, accountIdTo, heldIn: PENDING };
+}
+
+/**
+ * The shape, signature and id checks of a paymentToFund: the shape, with
+ * the form of paymentFor; the ids and the amount; accountIdTo is the fund;
+ * the sending account exists, read on `client` when one is given (the
+ * replay of a chain chunk, inside its transaction) and through the pool
+ * otherwise; the signatures, any two pairs; transactionId. Returns
+ * { ok: true, accountId, accountIdTo, amount (BigInt), account,
+ * transactionId } with the ids as 32-byte Buffers, or { ok: false, reason }.
+ */
+export async function checkPaymentToFundSignaturesAndIds(body, { client } = {}) {
+  const problem = checkPaymentToFundShape(body);
+  if (problem) return { ok: false, reason: problem };
+
+  const { payload, signatures } = body;
+
+  // 1. Ids and amount.
+  const accountId = decodeDigest(payload.accountId);
+  if (!accountId) return { ok: false, reason: 'payload.accountId is not a SHA-256 digest' };
+  const accountIdTo = decodeDigest(payload.accountIdTo);
+  if (!accountIdTo) return { ok: false, reason: 'payload.accountIdTo is not a SHA-256 digest' };
+  if (!decodeDigest(payload.previousTransactionId)) {
+    return { ok: false, reason: 'payload.previousTransactionId is not a SHA-256 digest' };
+  }
+  const amount = parseAmount(payload.amount);
+  if (amount === null) return { ok: false, reason: `payload.amount ${AMOUNT_RULE}` };
+
+  // 1b. The fund.
+  if (!accountIdTo.equals(FUND_ACCOUNT_ID)) return { ok: false, reason: 'payload.accountIdTo is not the fund' };
+
+  // 2a. The sending account exists.
+  const account = await findAccount(accountId, client);
+  if (!account) return { ok: false, reason: 'no account with this accountId' };
+
+  // 3. Signatures.
+  const message = Buffer.from(canonicalize(payload), 'utf8');
+  const badSignatures = verifyAccountSignatures(account, signatures, message, ANY_TWO_PAIRS);
+  if (badSignatures) return { ok: false, reason: badSignatures };
+
+  // 4. transactionId: the hash of the payload without itself.
+  const transactionId = unsignedHash(payload);
+  if (!digestMatches(payload.transactionId, transactionId)) {
+    return { ok: false, reason: 'payload.transactionId is not the SHA-256 of the canonical payload without transactionId' };
+  }
+
+  return { ok: true, accountId, accountIdTo, amount, account, transactionId };
+}
+
+/**
+ * What the initial validator does with a paymentToFund: verify it
+ * (verifyPaymentToFund), ask the masterpod whether it may be taken
+ * (askMasterpodAboutPayment, docs/schemas.md section 35), store it in
+ * pending and send it round, exactly as receiveTransferToFund does. Returns
+ * what that returns.
+ */
+export function receivePaymentToFund(body) {
+  return receiveTransaction(body, async (b) => {
+    const r = await verifyPaymentToFund(b);
+    return r.ok ? askMasterpodAboutPayment(b, r) : r;
+  });
+}
+
+/**
+ * The question to the masterpod before a paymentToFund is taken
+ * (docs/schemas.md section 35), the way checkAppointment asks before an
+ * appointed stake: run by receivePaymentToFund once verifyPaymentToFund
+ * passed, with `verified` its result. The masterpod is sent the payment's
+ * payload (masterpod.client.js checkFundPayment, five seconds) and answers
+ * two things in one: whether the sending account may pay for
+ * payload.paymentFor at all, and whether this payment is allowed. A yes
+ * gives `verified` back. A no refuses the payment with the masterpod's own
+ * reason. No answer that reads as a yes or a no, a masterpod that cannot
+ * be reached or does not have the route among them, refuses it with "the
+ * masterpod could not confirm this payment", and one line here says why
+ * for the journal (the client's detail: an error, a status). The handler
+ * logs the reason and answers 400 like any refusal
+ * (util/submission-response.js). Only the
+ * receiving validator asks: the validator-to-validator approval path
+ * (validators.service.js verifyTransaction) runs verifyPaymentToFund alone
+ * and trusts the question, as it trusts the appointment check; the replay
+ * of a chain chunk (garlic-chain/replay.service.js) and the held-row
+ * checks (held-transactions/held-rows.service.js) run
+ * checkPaymentToFundSignaturesAndIds alone. No price, no list of purposes
+ * and nothing about who pays is kept on a validator.
+ */
+async function askMasterpodAboutPayment(body, verified) {
+  const answer = await checkFundPayment(body.payload);
+  if (!answer.answered) {
+    console.log(`no answer from the masterpod about a payment: ${answer.detail}`);
+    return { ok: false, reason: PAYMENT_NOT_CONFIRMED };
+  }
+  if (!answer.ok) return { ok: false, reason: answer.reason };
+  return verified;
+}
+
+/**
+ * Writes one paymentToFund on `client`, inside the batch that
+ * accounts.service.js writeTransactions runs: its garlic chain link,
+ * exactly as writeTransferToFund writes a stake's (the sender as
+ * account_id, the fund as account_id_to, the amount, the transactionType
+ * as its type; the balance trigger moves the anos). Nothing else: no stake
+ * is added. Returns the link's record_hash for the next link to chain on.
+ */
+export async function writePaymentToFund(client, { transactionId, accountId, ogTransaction }, previousRecordHash) {
+  const { payload } = ogTransaction;
+  const transHash = canonicalHash(payload);
+  const recordHash = chainHash(transHash, previousRecordHash);
+  await insertLink(client, {
+    accountId,
+    accountIdTo: decodeDigest(payload.accountIdTo),
+    transactionId,
+    amount: payload.amount,
+    transHash,
+    recordHash,
+    type: payload.transactionType,
+    ogTransaction,
+  });
   return recordHash;
 }
 
@@ -654,6 +859,25 @@ function checkTransferToFundShape(body) {
   if (typeof payload.accountIdTo !== 'string') return 'payload.accountIdTo must be a string';
   if (typeof payload.createdAt !== 'string') return 'payload.createdAt must be a string';
   if (typeof payload.stakeFor !== 'string') return 'payload.stakeFor must be a string';
+  if (!isObject(body.signatures)) return 'signatures must be an object';
+  return null;
+}
+
+/** Returns a description of the first structural problem with a paymentToFund, or null. The form of paymentFor is part of the shape. */
+function checkPaymentToFundShape(body) {
+  if (!isObject(body)) return 'body must be a JSON object';
+  if (!isObject(body.payload)) return 'payload must be an object';
+  const { payload } = body;
+  if (typeof payload.accountId !== 'string') return 'payload.accountId must be a string';
+  if (typeof payload.transactionId !== 'string') return 'payload.transactionId must be a string';
+  if (typeof payload.previousTransactionId !== 'string') return 'payload.previousTransactionId must be a string';
+  if (payload.transactionType !== PAYMENT_TO_FUND) return `payload.transactionType must be "${PAYMENT_TO_FUND}"`;
+  if (typeof payload.amount !== 'string') return 'payload.amount must be a string';
+  if (typeof payload.accountIdTo !== 'string') return 'payload.accountIdTo must be a string';
+  if (typeof payload.createdAt !== 'string') return 'payload.createdAt must be a string';
+  if (typeof payload.paymentFor !== 'string' || !PAYMENT_FOR.test(payload.paymentFor)) {
+    return 'payload.paymentFor must be 1 to 32 letters and digits, the first a letter';
+  }
   if (!isObject(body.signatures)) return 'signatures must be an object';
   return null;
 }

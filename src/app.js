@@ -51,11 +51,11 @@ export function createApp() {
   app.use('/health', healthRouter);
   app.use(accountsRouter); // owns top-level paths such as /create-account
   app.use(transferRouter); // owns /anos-transfer
-  app.use(fundRouter); // owns /transfer-to-fund, /fund-proposal and /guardian-vote
+  app.use(fundRouter); // owns /transfer-to-fund, /payment-to-fund, /fund-proposal and /guardian-vote
   app.use(assistedTransfersRouter); // owns /attestation, /assisted-transfer-cancel and /break-glass-cancel
   app.use(lockedTransactionsRouter); // owns /locked-transfer-cancel
   app.use(escrowRouter); // owns /escrow-signature
-  app.use(readsRouter); // the account level: /get-account, /list-transactions, /list-escrows, /get-assisted-transfer and /get-locked-transfer; the attestor reads: /list-assisted-transfers and /list-disputed-escrows; the public reads: /list-dao-stakes, /list-fund-proposals and /get-fund-proposal
+  app.use(readsRouter); // the account level: /get-account, /list-transactions, /list-escrows, /get-assisted-transfer and /get-locked-transfer; the attestor reads: /list-assisted-transfers and /list-disputed-escrows; the public reads: /list-dao-stakes, /list-fund-proposals, /get-fund-proposal, /list-fund-payments and /confirm-transaction
   app.use(validatorsRouter); // validator-to-validator messages: /transaction-approval and the rest, the chunk read, the votes, the join
 
   // Order matters: these must come after every router.

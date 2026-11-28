@@ -158,9 +158,11 @@ unit_log() {
 }
 
 # boot_error UNIT: the line that stopped the unit's current run, if any:
-# a registry, genesis, database or KMS failure, or an env.js refusal.
+# a registry, genesis, database or KMS failure, an env.js refusal, or a
+# database whose balance trigger does not name a link type the validator
+# writes (docs/schemas.md section 35).
 boot_error() {
-  unit_log "$1" | grep -E '^(Registry failed|Genesis failed|Could not connect|KMS self-test failed|Error:)' | tail -n 1
+  unit_log "$1" | grep -E '^(Registry failed|Genesis failed|Could not connect|KMS self-test failed|Balance trigger check failed|Error:)' | tail -n 1
 }
 
 # wait_unit UNIT PORT SECONDS: up to SECONDS for the unit's /health on PORT
@@ -177,7 +179,7 @@ wait_unit() {
       fail "$error"
     fi
     if [ "$waited" -ge "$3" ]; then
-      fail "$1 answers $code on port $2 after $3 seconds (unit $(systemctl is-active "$1" || true)); the last error in its journal: $(journalctl -u "$1" -n 30 --no-pager -o cat | grep -E '^(Registry failed|Genesis failed|Could not connect|KMS self-test failed|Error:)' | tail -n 1)"
+      fail "$1 answers $code on port $2 after $3 seconds (unit $(systemctl is-active "$1" || true)); the last error in its journal: $(journalctl -u "$1" -n 30 --no-pager -o cat | grep -E '^(Registry failed|Genesis failed|Could not connect|KMS self-test failed|Balance trigger check failed|Error:)' | tail -n 1)"
     fi
     sleep 1
     waited=$((waited + 1))

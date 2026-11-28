@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { attachmentHandler } from '../attachments/attachments.handlers.js';
-import { fundProposal, transferToFund } from './fund.handlers.js';
+import { fundProposal, paymentToFund, transferToFund } from './fund.handlers.js';
 import { guardianVote } from './guardian-vote.js';
 
 /**
@@ -13,5 +13,6 @@ import { guardianVote } from './guardian-vote.js';
 export const fundRouter = Router();
 
 fundRouter.post('/transfer-to-fund', transferToFund);
+fundRouter.post('/payment-to-fund', paymentToFund);
 fundRouter.post('/fund-proposal', fundProposal);
 fundRouter.post('/guardian-vote', attachmentHandler(guardianVote));

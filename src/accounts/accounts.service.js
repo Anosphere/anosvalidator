@@ -4,7 +4,14 @@ import { decodePublicKey, decodeSignature, verifySignature } from '../crypto/sig
 import { ACCOUNT_KEYS } from './account-keys.js';
 import { ACCOUNT_TYPES } from './account-types.js';
 import { pool } from '../db/pool.js';
-import { FUND_PROPOSAL, TRANSFER_TO_FUND, writeFundProposal, writeTransferToFund } from '../fund/fund.service.js';
+import {
+  FUND_PROPOSAL,
+  PAYMENT_TO_FUND,
+  TRANSFER_TO_FUND,
+  writeFundProposal,
+  writePaymentToFund,
+  writeTransferToFund,
+} from '../fund/fund.service.js';
 import { findTail, insertLink, prepareChainWrite } from '../garlic-chain/garlic-chain.queries.js';
 import {
   ASSISTED_TRANSFERS,
@@ -266,9 +273,10 @@ export async function writeApproved(transactionIds) {
  * any other holding table, in id order. Each row is written by its
  * transactionType: an account creation by writeAccountCreation below, a
  * transfer of any of the six types by transfer.service.js
- * writeAnosTransfer, a transfer to the fund and a fund proposal (the
- * proposal link, then its payout links) by fund.service.js
- * writeTransferToFund and writeFundProposal. Returns true when the batch
+ * writeAnosTransfer, a stake, a payment to the fund (docs/schemas.md
+ * section 35) and a fund proposal (the proposal link, then its payout
+ * links) by fund.service.js writeTransferToFund, writePaymentToFund and
+ * writeFundProposal. Returns true when the batch
  * committed, false when it was rolled back: a row whose transactionType is
  * none of these, or a database error on one of the writes. A connection
  * that drops still throws, like every other query.
@@ -296,6 +304,8 @@ async function writeTransactions(rows) {
         previousRecordHash = await writeAnosTransfer(client, row, previousRecordHash);
       } else if (transactionType === TRANSFER_TO_FUND) {
         previousRecordHash = await writeTransferToFund(client, row, previousRecordHash);
+      } else if (transactionType === PAYMENT_TO_FUND) {
+        previousRecordHash = await writePaymentToFund(client, row, previousRecordHash);
       } else if (transactionType === FUND_PROPOSAL) {
         previousRecordHash = await writeFundProposal(client, row, previousRecordHash);
       } else {
