@@ -2,7 +2,8 @@ import { ownPublicKeyHex } from './validators/validators.signing.js';
 import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { closePool, query } from './db/pool.js';
-import { checkChainWrite } from './garlic-chain/garlic-chain.queries.js';
+import { PAYMENT_TO_FUND } from './fund/fund.service.js';
+import { balanceTriggerNames, checkChainWrite } from './garlic-chain/garlic-chain.queries.js';
 import { runGenesis } from './genesis/genesis.service.js';
 import { startUnapprovedSweep, stopUnapprovedSweep } from './held-transactions/unapproved-sweep.js';
 import { startMasterpodReports, stopMasterpodReports } from './masterpod/masterpod-reports.js';
@@ -37,6 +38,27 @@ try {
   await checkChainWrite();
 } catch (err) {
   console.error('Chain write check failed:', err.message);
+  process.exit(1);
+}
+
+// The balance trigger of the database (db/schema.sql) must name the payment
+// to the fund (docs/schemas.md section 35). A link of a type the trigger
+// does not name is written and moves no anos, and this validator's balances
+// would then differ from every other's without a sign. A database that the
+// pull's database line has not reached stops the boot here. The unit starts
+// the server again every few seconds (deploy/anos-validator.service), so it
+// comes up by itself once the line has run.
+try {
+  if (!(await balanceTriggerNames(PAYMENT_TO_FUND))) {
+    console.error(
+      `Balance trigger check failed: the balance trigger of this database does not name ${PAYMENT_TO_FUND} yet; ` +
+        'run the database line of the pull, and the validator starts by itself: ' +
+        'sudo -u postgres sh /opt/anos/anossoftware/scripts/setup-db.sh',
+    );
+    process.exit(1);
+  }
+} catch (err) {
+  console.error('Balance trigger check failed:', err.message);
   process.exit(1);
 }
 

@@ -4,8 +4,10 @@ import fundAccount from '../genesis/fund-account.json' with { type: 'json' };
 /**
  * The fund's account id: the SHA-256 of the word "anosFund", the accountId
  * of the genesis fund account (src/genesis/). Anos staked with the fund go
- * to this account (transferToFund) and fund proposals pay out of it. Nothing
- * can sign for it: its keys were thrown away after genesis.
+ * to this account (transferToFund), and so do the payments to the fund that
+ * are no stake (paymentToFund, docs/schemas.md section 35); fund proposals
+ * pay out of it. Nothing can sign for it: its keys were thrown away after
+ * genesis.
  */
 
 /** As the wire carries it: 64 lowercase hex characters. */

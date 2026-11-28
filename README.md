@@ -36,7 +36,7 @@ pulled: a validator whose own row is missing refuses to start. Then
 | `npm run dev`                   | Same, restarting on file changes                                            |
 | `npm run make-keys -- --id <N>` | Once, on the VM: a fresh P-256 key into `validator.key` (JSON, mode 0600, never shown) and `.env` with the id, a random database password and the key file's path. Refuses to run when either file exists. Prints the public key. `--key-file <path>` puts the key elsewhere. |
 | `npm run show-key`              | Print the public key derived from `validator.key` (or `-- <path>`) and start nothing |
-| `npm run db:setup`              | Create the role, the database and its tables (idempotent). Loads `network/testnet.env` then `.env`; pass a machine file to use another. On the VM: `sudo -u postgres sh scripts/setup-db.sh`. |
+| `npm run db:setup`              | Create the role, the database and its tables (idempotent). Run again on a database that is in use, it also puts the schema file's balance trigger, with its list of link types, in the old one's place and adds an index that is missing (`docs/schemas.md` section 35). Loads `network/testnet.env` then `.env`; pass a machine file to use another. On the VM: `sudo -u postgres sh scripts/setup-db.sh`. |
 | `npm run db:reset`              | Drop that database and run setup again. Everything in it is lost.          |
 
 ## Configuration
@@ -72,7 +72,7 @@ Shared values, in `network/testnet.env`:
 | `GUARDIAN_VOTE_ANOS`       | `1000`         | Guardian stake behind one vote on a fund proposal, in whole anos |
 | `GUARDIAN_VOTE_PERCENT`    | `70`           | Share of the votes cast a proposal needs to pass              |
 | `GUARDIAN_VOTE_MINUTES`    | `10080`        | How long a proposal is open for votes, in minutes: a week (60 on the testnet until 2026-11-12) |
-| `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) and for every moderator, attestor, validator or masterPod stake (the appointment check, `docs/schemas.md` sections 24 and 26). Since 2026-11-22 it is also told of every transfer that has started to wait, at `/report-waiting-transfers` (`docs/schemas.md` section 34) |
+| `MASTERPOD_URL`            | `<fill in>`    | The masterpod's load balancer, scheme, host and port, no path: asked `/get-anos-account` for every create-account submission (the binding check) and for every moderator, attestor, validator or masterPod stake (the appointment check, `docs/schemas.md` sections 24 and 26). Since 2026-11-22 it is also told of every transfer that has started to wait, at `/report-waiting-transfers` (`docs/schemas.md` section 34). Since 2026-11-27 it is also asked `/check-fund-payment` before a payment to the fund is taken (`docs/schemas.md` section 35) |
 | `WEB_ORIGIN`               | `<fill in>`    | The wallet's origin for CORS, scheme, host and port, no path; a comma-separated list when there is more than one |
 | `TIMESTAMP_WINDOW_SECONDS` | `120`          | Allowed clock difference on a signed account-level request, each way; nonces are kept twice this long |
 | `VALIDATOR_CALL_TIMEOUT_SECONDS` | `10`     | How long a call to another validator waits for its answer; past it, no answer (section "Ignoring and joining") |
@@ -153,6 +153,22 @@ two statements that open every write of links (section "Database",
 rolled back. It prints nothing when they run. A database user that may not
 run them stops the process with `Chain write check failed: <message>`.
 
+Since 2026-11-27 (`docs/schemas.md` section 35) the start also reads the
+balance trigger of the database, right after that check. The trigger
+moves the anos of the link types on its list (section "Database",
+`garlic_chain`), and a link of a type that is not on the list is written
+and moves nothing. The read prints nothing when the list names
+`paymentToFund`. A database whose trigger does not name it yet, because
+the database line of the pull has not run there, stops the process with
+one line:
+
+```
+Balance trigger check failed: the balance trigger of this database does not name paymentToFund yet; run the database line of the pull, and the validator starts by itself: sudo -u postgres sh /opt/anos/anossoftware/scripts/setup-db.sh
+```
+
+Under systemd the start is tried again every five seconds, so the
+validator comes up by itself once that line has run.
+
 A stop (SIGTERM or SIGINT) waits for a round, a vote or a join that this
 validator leads, at most 30 seconds, and starts none meanwhile. While it
 waits the log says `a round, a vote or a join is under way; stopping when
@@ -172,7 +188,13 @@ The whole schema is one file, `db/schema.sql`: the tables, the
 that are missing and replaces the functions and triggers, but it never
 alters a table that already exists, with one exception: the `ignored`
 column of `validators` is added to a database from before it by an
-`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. After changing an existing table
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. A run also replaces the
+balance trigger's list of link types and adds an index that is missing:
+since 2026-11-27 (`docs/schemas.md` section 35) that is how the
+`paymentToFund` comes onto the list and how the index
+`garlic_chain_fund_payments_idx` is made on a database that is in use,
+and the server does not start on a database that such a run has not
+reached (section "Running"). After changing an existing table
 otherwise, run `npm run db:reset` to drop the database and build it again.
 
 The validator registry is not part of the schema:
@@ -197,7 +219,15 @@ Tables:
   links waits for (`prepareChainWrite` in
   `src/garlic-chain/garlic-chain.queries.js`): a batch that is rolled back
   moves the counter on, and this puts it back, so the positions have no
-  hole.
+  hole. Since 2026-11-27 (`docs/schemas.md` section 35) the table has an
+  index for the read of one account's payments to the fund,
+  `garlic_chain_fund_payments_idx` on `(account_id, position)`, which
+  holds the links of type `paymentToFund` alone. And the table's balance
+  trigger, `garlic_chain_apply_anos_transfer`, moves the anos for a list
+  of nine link types: the six transfer types, `transferToFund`,
+  `transferFromFund` and `paymentToFund`. A link of a type that is not on
+  the list moves nothing, so the start checks that the list names
+  `paymentToFund` (section "Running").
 - `pending`: transactions received but not yet on the chain, one per account.
 - `locked_transactions`: guarded and vault transfers waiting out their time
   lock, one per account, with `future_date`, the moment each may be written,
@@ -269,7 +299,9 @@ Since 2026-11-22 (`docs/schemas.md` section 34) every validator tells the
 masterpod of the transfers that wait long enough to be cancelled: a
 guarded or a vault transfer in `locked_transactions`, an assisted transfer
 or a break-glass move in `assisted_transfers`. It is the second call this
-server makes to the masterpod, `POST MASTERPOD_URL/report-waiting-transfers`
+server makes to the masterpod (of three since 2026-11-27: the third is
+the question before a payment to the fund is taken, `docs/schemas.md`
+section 35), `POST MASTERPOD_URL/report-waiting-transfers`
 (`src/masterpod/masterpod.client.js`, 5-second timeout, no redirect
 followed). A job (`src/masterpod/masterpod-reports.js`) runs once at the
 start and then once a minute, on every validator, counted or not. It reads
@@ -317,6 +349,7 @@ multi-word URL segments.
 | POST   | `/create-account` | `202` + `{ transactionId }` once verified, stored in `pending` and sent round, else `400` + reason |
 | POST   | `/anos-transfer`  | `202` + `{ transactionId }` once verified, stored in its holding table (`pending` for a plain transfer, `locked_transactions` for a guarded or vault one, `assisted_transfers` for an assisted one or a break-glass one, `escrow_transfers` for an escrow) and sent round, else `400` + reason |
 | POST   | `/transfer-to-fund` | A stake: `202` + `{ transactionId }` once verified, stored in `pending` and sent round, else `400` + reason |
+| POST   | `/payment-to-fund` | A payment into the fund that is no stake and says what it is for (added 2026-11-27, `docs/schemas.md` section 35): `202` + `{ transactionId }` once verified, allowed by the masterpod, stored in `pending` and sent round, else `400` + reason |
 | POST   | `/fund-proposal`  | `202` + `{ transactionId }` once verified, stored in `fund_proposals` and sent round, else `400` + reason |
 | POST   | `/attestation`    | An attestor's attestation to an assisted transfer: `202` + `{ transactionId }` (the transfer's) once stored and sent round, else `400` + reason |
 | POST   | `/assisted-transfer-cancel` | The sender's cancellation of an assisted transfer, or of a break-glass transfer, answered the same way |
@@ -332,6 +365,8 @@ multi-word URL segments.
 | POST   | `/list-dao-stakes` | Public, no signature (added 2026-11-08, `docs/schemas.md` section 23). Every account's DAO vote stake, for the masterpod's snapshot of DAO voting weights, with their total and the server's clock: `200 { asOf, total, stakes: [ { accountId, daoVoteStake } ] }`, else `400 bad request shape` |
 | POST   | `/list-fund-proposals` | Public, no signature (added 2026-11-08, `docs/schemas.md` section 25). The fund's proposals with their status, their tally and their votes, for the wallet's Guardians page: body `{ status: 'open' }` the open proposal (at most one), `{ status: 'decided', limit?, offset?, from?, to? }` the decided ones from `archives`, newest first: `200 { settings, proposals }`, else `400` + reason |
 | POST   | `/get-fund-proposal` | Public, no signature (the same day, section 25). One proposal, open or decided, with its payouts and the proposer's weight: body `{ transactionId }`: `200 { settings, proposal }`, else `400` + reason or `404 unknown proposal` |
+| POST   | `/list-fund-payments` | Public, no signature (added 2026-11-27, `docs/schemas.md` section 35). One account's payments to the fund, the `paymentToFund` links it sent, oldest first, paged with `afterPosition` and `limit`, for the masterpod: body `{ accountId, afterPosition?, limit? }`: `200 { asOf, payments: [ { transactionId, position, amount, paymentFor, createdAt } ] }`, else `400` + reason |
+| POST   | `/confirm-transaction` | Public, no signature (the same day, section 35). A yes or no to one transfer that the asker describes, for the masterpod: body `{ transactionId, accountId, accountIdTo, amount }`: `200 { written: true, type, position, writtenAt }` when a link on this validator's chain has that id, that sender, that receiver and that amount, `200 { written: false }` in every other case, else `400` + reason |
 | POST   | `/list-assisted-transfers` | Attestor level (account level plus attestor stake). The assisted transfers waiting for attestors on this validator, newest first: `200 { transfers }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/list-disputed-escrows` | Attestor level. The escrows in dispute that no verdict has decided on this validator, newest first: `200 { escrows }`, else `400`, `401` or `403 not an attestor` + reason |
 | POST   | `/transaction-approval` | Validator to validator. `200` + a transaction approved receipt once the transaction checks out and is stored, else `400` + reason |
@@ -355,16 +390,29 @@ whatever the validators said.
 A fourth kind of caller, beside wallets submitting transactions, the other
 validators and nobody: an account signing with pair one, or since
 2026-11-08 with its break-glass pair, for reads about itself
-(`src/auth/require-account.js`, `src/reads/`). Three public reads live in
+(`src/auth/require-account.js`, `src/reads/`). Five public reads live in
 `src/reads/` too but take no envelope and no signature, only a body that
 is an object: `POST /list-dao-stakes` (added 2026-11-08, `docs/schemas.md`
 section 23), body `{}`, `200 { asOf, total, stakes: [ { accountId,
 daoVoteStake } ] }`, every account's DAO vote stake with their total and
 the server's clock, read by the masterpod for its snapshot of DAO voting
-weights; and `POST /list-fund-proposals` and `POST /get-fund-proposal`
+weights; `POST /list-fund-proposals` and `POST /get-fund-proposal`
 (the same day, section 25), the fund's proposals with their statuses,
 tallies, votes and payouts, and the validator's guardian-vote `settings`,
-read by the wallet's Guardians page. The envelope of the signed reads is
+read by the wallet's Guardians page; and, since 2026-11-27 (section 35),
+two for the masterpod. `POST /list-fund-payments`, body `{ accountId,
+afterPosition?, limit? }`, `200 { asOf, payments: [ { transactionId,
+position, amount, paymentFor, createdAt } ] }`: one account's payments to
+the fund, the `paymentToFund` links it sent, the oldest first, at most
+200 at a time, with `paymentFor` and `createdAt` as the payment's own
+signed payload has them, so the date is the same on every validator. And
+`POST /confirm-transaction`, body `{ transactionId, accountId,
+accountIdTo, amount }`: `200 { written: true, type, position, writtenAt }`
+when a link on this validator's chain has that id, that sender, that
+receiver and that amount, and `200 { written: false }` in every other
+case, so an asker learns nothing about a transfer that it could not
+describe. An id in these two is 64 hex characters. The envelope of the
+signed reads is
 the masterpod's and the keyholder's, with `accountId` as the signer field:
 
 ```json
@@ -745,6 +793,36 @@ amount in it is zero.
 Guardian votes: one vote per `GUARDIAN_VOTE_ANOS` of guardian stake, rounded
 down. An account with at least one vote may propose and vote.
 
+A payment to the fund that is no stake (since 2026-11-27,
+`docs/schemas.md` section 35): `POST /payment-to-fund` takes a
+`paymentToFund`, the transfer payload above with `accountIdTo` the fund's
+id, `transactionType` `paymentToFund` and one more field, `paymentFor`, a
+short word that says what the payment is for: 1 to 32 letters and
+digits, the first a letter, as in `businessLicense`. No validator keeps
+a list of the words; what a payment may be for is the masterpod's to
+know. The checks are the stake's without the stake: the sender is a
+spending account, the signing rule is any two pairs, `createdAt` is
+within `LOCK_OFFSET_MINUTES` of the validator's clock, and the transfer
+checks; there is no minimum amount. Then the question, on the receiving
+validator only: it asks the masterpod
+`POST MASTERPOD_URL/check-fund-payment { payload }`, with the payment's
+payload as it was signed (`src/masterpod/masterpod.client.js`, 5-second
+timeout, no redirect followed), and goes on only when the answer is `200
+{ ok: true }`. A `200 { ok: false, reason }` refuses the payment with the
+masterpod's reason, when the reason is 1 to 60 letters, digits and
+spaces. Anything else, and no answer at all, refuses it with `the
+masterpod could not confirm this payment`, and the log says why first:
+`no answer from the masterpod about a payment: status 404`, for one. Both
+refusals are logged
+`failed: <reason>` and answered `400` like any refusal. The
+validator-to-validator approval path trusts the question, as it trusts
+the appointment check. The payment is held in `pending` like a plain
+transfer and written at the next round as one link of type
+`paymentToFund`, with the balance trigger. No `stakes` row is touched, no
+role follows from it, and nothing pays it back. The masterpod reads an
+account's payments at `/list-fund-payments` (section "The account level
+and the reads").
+
 ## Follow-ups
 
 A follow-up is a signed object attached to a transaction that is waiting in
@@ -986,7 +1064,9 @@ The write, one database transaction per validator, rows in id order
 (`src/accounts/accounts.service.js` `writeTransactions`): an
 `accountCreation` as before; a transfer of any of the five types as one link
 with the balance trigger; a `transferToFund` as one link, the balance
-trigger and the stake added; a `fundProposal` as the proposal link, then the
+trigger and the stake added; a `paymentToFund` (since 2026-11-27,
+`docs/schemas.md` section 35) as one link with the balance trigger and no
+stake; a `fundProposal` as the proposal link, then the
 payout links in index order, the balance trigger for each and the stakes
 reduced for payouts with `stakeFor`. `record_hash` chains over every link
 written, in `position` order: each link hashes its `trans_hash` with the
@@ -1248,7 +1328,9 @@ the previous link's `recordHash`, as the batch write chains them; `type`,
 write would have put in the row; the signature and id checks of the type,
 lifted out of the verify functions (`checkCreateAccountSignaturesAndIds`,
 `checkTransferSignaturesAndIds`, `checkTransferToFundSignaturesAndIds`,
-`checkFundProposalSignaturesAndIds`); a `transferFromFund` link follows its
+`checkFundProposalSignaturesAndIds` and, since 2026-11-27,
+`checkPaymentToFundSignaturesAndIds` for the `paymentToFund`); a
+`transferFromFund` link follows its
 proposal and is that payout. Then the side effect of the type (an account
 row, a stake added or taken back; the balance trigger fires on the insert)
 and the insert with the chunk's `createdAt`. The clock checks, the masterpod
@@ -1442,8 +1524,9 @@ The receiver checks the shape; that `originatingValidator` is an active
 validator and the signature verifies against its key; that the embedded
 transaction passes every check the originating validator ran, against the
 receiver's own database, picked by `payload.transaction.payload.
-transactionType`, now one of nine kinds (`accountCreation`, the six
-transfer types, `transferToFund`, `fundProposal`); and that `transactionId`
+transactionType`, now one of ten kinds (`accountCreation`, the six
+transfer types, `transferToFund`, `fundProposal` and, since 2026-11-27,
+`paymentToFund`); and that `transactionId`
 is the transaction's own. Then it stores the transaction in its own copy of
 the same holding table the originating validator used, `approved = false`,
 logs `correct`, and answers `200` with a transaction approved receipt. On
@@ -1776,7 +1859,7 @@ feature like `health` may keep its handler inline in the router.
 ```
 src/
   app.js                 builds the app: middleware, feature routers, 404, errors
-  server.js              prints who this is, verifies the DB, runs genesis, applies the registry, starts HTTP, handles graceful shutdown
+  server.js              prints who this is, verifies the DB, checks that the balance trigger names paymentToFund (since 2026-11-27, docs/schemas.md section 35), runs genesis, applies the registry, starts HTTP, handles graceful shutdown
   config/env.js          reads and validates the two env files once (network/testnet.env, then .env)
   db/pool.js             shared pg connection pool
   middleware/            cross-cutting middleware, one per file
@@ -1786,10 +1869,10 @@ src/
   util/version.js        the commit and tag git reports, read once at boot, for /health
   auth/                  the account level: require-account.js, signed-request.js, common-checks.js, nonces.queries.js;
                          the attestor gate on top of it: require-attestor.js
-  masterpod/masterpod.client.js  the two calls to the masterpod: /get-anos-account, the binding check of create-account and the appointment check of a moderator, attestor, validator or masterPod stake; and, since 2026-11-22, /report-waiting-transfers
+  masterpod/masterpod.client.js  the three calls to the masterpod: /get-anos-account, the binding check of create-account and the appointment check of a moderator, attestor, validator or masterPod stake; since 2026-11-22, /report-waiting-transfers; and, since 2026-11-27, /check-fund-payment, the question before a payment to the fund is taken
   masterpod/masterpod-reports.js  the report of waiting transfers: once a minute, every approved guarded, vault and assisted transfer and break-glass move that the masterpod has not been told of yet, in one signed message
   reads/                 feature: the five signed reads (get-account, list-transactions, list-escrows, get-assisted-transfer, get-locked-transfer),
-                         the two attestor reads (list-assisted-transfers, list-disputed-escrows) and the three public reads (list-dao-stakes, list-fund-proposals, get-fund-proposal)
+                         the two attestor reads (list-assisted-transfers, list-disputed-escrows) and the five public reads (list-dao-stakes, list-fund-proposals, get-fund-proposal, list-fund-payments, confirm-transaction)
     reads.router.js, reads.handlers.js, reads.service.js, reads.queries.js
   crypto/hash.js         SHA-256, digest decoding and constant-time comparison
   crypto/canonical.js    canonical JSON (canonicalize package) and its hash
@@ -1817,7 +1900,7 @@ src/
     held-rows.service.js the held rows a joiner pulls: readHeldRows (the leader), storeHeldRows (the joiner)
     written-rows.js      the two deletes of a validator that comes back: dropWrittenHeldRows (already on the chain), clearHeldRows (before the pull of a join)
   garlic-chain/          the chain: its SQL, the chunk read and the replay (section "Ignoring and joining")
-    garlic-chain.queries.js  findTail, findTailRow, insertLink; prepareChainWrite and checkChainWrite, the two statements that open every write of links
+    garlic-chain.queries.js  findTail, findTailRow, insertLink; prepareChainWrite and checkChainWrite, the two statements that open every write of links; balanceTriggerNames, whether the balance trigger names a link type, read at the start
     chain-links.service.js, chain-links.handlers.js, chain-links.queries.js  POST /chain-links, both sides
     replay.service.js    replayLinks, the writer of a chunk; sweepHealth, catchUp and fetchChainFrom, the catch-up pass; adoptIgnoredList
   transfer/              feature: transfers (anos-transfer), all six types
@@ -1829,10 +1912,10 @@ src/
     stake-purposes.js    the six purposes, each with its column and minimum
     stakes.queries.js    findStake, addStake, subtractStake, moveStake, listDaoVoteStakes
     stakes.service.js    holdsRole, guardianWeight
-  fund/                  feature: the fund (transfer-to-fund, fund-proposal, guardian-vote)
+  fund/                  feature: the fund (transfer-to-fund, payment-to-fund, fund-proposal, guardian-vote)
     fund-account.js      the fund's account id
     fund.router.js, fund.handlers.js
-    fund.service.js      verifies, receives and writes transfers to the fund and fund proposals; the tally
+    fund.service.js      verifies, receives and writes transfers to the fund, payments to the fund and fund proposals; the tally
     fund.queries.js      the fund_proposals and guardian_votes SQL; the open proposals with their tally and their votes, for the reads
     guardian-vote.js     the guardianVote follow-up kind
   assisted-transfers/    feature: the assisted_transfers table and its follow-ups

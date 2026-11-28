@@ -5,8 +5,10 @@ import { decodeDigest } from '../crypto/hash.js';
 import { pool, query } from '../db/pool.js';
 import {
   FUND_PROPOSAL,
+  PAYMENT_TO_FUND,
   TRANSFER_TO_FUND,
   checkFundProposalSignaturesAndIds,
+  checkPaymentToFundSignaturesAndIds,
   checkTransferToFundSignaturesAndIds,
 } from '../fund/fund.service.js';
 import { checkTransferSignaturesAndIds, isTransferType } from '../transfer/transfer.service.js';
@@ -240,6 +242,7 @@ async function checkHeldTransaction(ogTransaction, transactionId, accountId) {
   if (type === ACCOUNT_CREATION) checked = checkCreateAccountSignaturesAndIds(ogTransaction);
   else if (isTransferType(type)) checked = await checkTransferSignaturesAndIds(ogTransaction);
   else if (type === TRANSFER_TO_FUND) checked = await checkTransferToFundSignaturesAndIds(ogTransaction);
+  else if (type === PAYMENT_TO_FUND) checked = await checkPaymentToFundSignaturesAndIds(ogTransaction);
   else if (type === FUND_PROPOSAL) checked = await checkFundProposalSignaturesAndIds(ogTransaction);
   else return { ok: false, reason: `transactionType ${JSON.stringify(type)} is not one this validator knows` };
   if (!checked.ok) return checked;

@@ -11,6 +11,8 @@ import { pool } from '../db/pool.js';
  * with them, and every statement of a transaction has to run on the same
  * connection. findTailRow takes one too, or reads through the pool when
  * none is given. The chunk read's queries are in chain-links.queries.js.
+ * balanceTriggerNames, at the end of the file, reads the table's balance
+ * trigger for the check the server runs at its start (src/server.js).
  *
  * Ids and hashes are Buffers of 32 raw bytes, matching the BYTEA columns; pg
  * sends a Buffer parameter as bytea.
@@ -95,4 +97,22 @@ export async function checkChainWrite() {
     await client.query('ROLLBACK');
     client.release();
   }
+}
+
+/**
+ * Whether the balance trigger of garlic_chain (db/schema.sql,
+ * garlic_chain_apply_anos_transfer) names `type` among the link types it
+ * moves the anos for. Read from the trigger's own text as the database has
+ * it (pg_get_triggerdef writes each type as a quoted word). False too when
+ * the trigger is not there. The server asks it once, at its start
+ * (src/server.js).
+ */
+export async function balanceTriggerNames(type) {
+  const { rows } = await pool.query(
+    `SELECT pg_get_triggerdef(t.oid) AS definition
+     FROM pg_trigger t
+     WHERE t.tgrelid = 'garlic_chain'::regclass
+       AND t.tgname = 'garlic_chain_apply_anos_transfer'`,
+  );
+  return rows.length === 1 && rows[0].definition.includes(`'${type}'`);
 }

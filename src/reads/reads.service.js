@@ -11,7 +11,9 @@ import {
   findAccountSummary,
   findAssistedFor,
   findAssistedWaitingForAttestors,
+  findFundPayments,
   findLatestTransactionId,
+  findLink,
   findLockedFor,
   findOpenEscrowsFor,
   findPendingFor,
@@ -24,11 +26,13 @@ import {
  * (wallet spec 5.4: its account, its transactions, its open escrow trades,
  * its held assisted transfer, its locked transfer), nothing about anyone
  * else; the two attestor reads (spec 13.2), the held transactions waiting
- * for an attestor; and the three public reads: every account's daoVote
- * stake for the masterpod's DAO voting snapshot (spec 23), and the fund's
+ * for an attestor; and the five public reads: every account's daoVote
+ * stake for the masterpod's DAO voting snapshot (spec 23), the fund's
  * proposals with their votes and payouts for the wallet's Guardians page
  * (spec 25), which /get-account serves too with the account's stakes and
- * guardian votes. The caller of a signed read is the verified signer,
+ * guardian votes, and for the masterpod one account's payments to the fund
+ * and the yes or no to one transfer that the asker describes (spec 35).
+ * The caller of a signed read is the verified signer,
  * req.account from src/auth/require-account.js (for the attestor reads the
  * verified attestor, src/auth/require-attestor.js); a public read has no
  * caller.
@@ -49,6 +53,14 @@ const DECIDED_DEFAULT_LIMIT = 20;
 /** The two lists /list-fund-proposals answers, as body.status names them (spec 25.1): the open proposal from fund_proposals, or the decided ones from archives. */
 const OPEN_LIST = 'open';
 const DECIDED_LIST = 'decided';
+
+/** The largest value a BIGINT column holds: an amount above it is on no link. */
+const MAX_BIGINT = 2n ** 63n - 1n;
+
+/** True for an id as a public read takes it: 64 hex characters, as /get-fund-proposal takes a proposal's. */
+function isDigestHex(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value);
+}
 
 /**
  * The stages of an open escrow trade, as /list-escrows names them (spec
@@ -465,6 +477,89 @@ export async function getFundProposal(body) {
   }
   const proposal = { ...itemOf(fields), proposerWeight: fields.proposerWeight, payouts: payoutsOf(fields.payload) };
   return ok(200, { settings: settingsOf(), proposal });
+}
+
+/**
+ * POST /list-fund-payments (spec 35). Public, as /list-dao-stakes: no
+ * envelope, no signature, no caller; the body must be an object. Body
+ * { accountId: hex, afterPosition?: integer (0 or more, a whole number
+ * JavaScript holds exactly), limit?: integer (default and at most 200) }.
+ * payments: the garlic chain links of type paymentToFund
+ * from that account, position ascending, above afterPosition when given,
+ * limit rows. Each: transactionId, position, amount (millionths as a
+ * decimal string), and paymentFor and createdAt as the payment's signed
+ * payload has them. createdAt is the PAYLOAD's date, not the link's
+ * created_at: the payload's is the same on every validator, a link's
+ * created_at is the moment each validator wrote it. So whoever counts by
+ * it gets one answer whichever validator it asks. asOf this server's clock
+ * at the read. An account with no such link, and an id that is no
+ * account's, answer an empty list. A caller that got limit rows asks again
+ * with afterPosition the last row's position. Bad values are 400 invalid
+ * accountId, invalid afterPosition and invalid limit. Everything answered
+ * is on the public chain: each paymentToFund link names its sender, its
+ * amount and what it paid for.
+ */
+export async function listFundPayments(body) {
+  if (!isObject(body)) return refuse(400, BAD_SHAPE);
+  if (!isDigestHex(body.accountId)) return refuse(400, 'invalid accountId');
+  const afterPosition = body.afterPosition === undefined ? null : body.afterPosition;
+  if (afterPosition !== null && !(Number.isSafeInteger(afterPosition) && afterPosition >= 0)) {
+    return refuse(400, 'invalid afterPosition');
+  }
+  const limit = body.limit === undefined ? MAX_LIMIT : body.limit;
+  if (!(Number.isInteger(limit) && limit >= 1 && limit <= MAX_LIMIT)) return refuse(400, 'invalid limit');
+
+  const rows = await findFundPayments(Buffer.from(body.accountId, 'hex'), afterPosition, limit);
+  const payments = rows.map((row) => {
+    const payload = isObject(row.og_transaction?.payload) ? row.og_transaction.payload : {};
+    return {
+      transactionId: hex(row.transaction_id),
+      position: Number(row.position),
+      amount: String(row.amount),
+      paymentFor: stringOrNull(payload.paymentFor),
+      createdAt: stringOrNull(payload.createdAt),
+    };
+  });
+  return ok(200, { asOf: new Date().toISOString(), payments });
+}
+
+/**
+ * POST /confirm-transaction (spec 35). Public, as /list-dao-stakes. Body
+ * { transactionId: hex, accountId: hex, accountIdTo: hex, amount: millionths
+ * as a decimal string }: one transfer as the asker describes it. Answers
+ * { written: true, type, position, writtenAt } when a garlic chain link
+ * has that transaction id AND that sender, that receiver and that amount:
+ * the link's type, its position, and writtenAt, the moment this validator
+ * wrote it (created_at, ISO 8601). Everything else answers { written:
+ * false }: no link with that id (not written yet, never sent, or dropped),
+ * or a link whose sender, receiver or amount is another. So an asker
+ * learns nothing about a transfer it could not describe, and nobody can
+ * list or look up transfers with it. A transaction that waits in a holding
+ * table is not written. Both answers are a 200: a 404 is what a doorman or
+ * a validator without the route answers. A bad field is 400 invalid
+ * <field>.
+ */
+export async function confirmTransaction(body) {
+  if (!isObject(body)) return refuse(400, BAD_SHAPE);
+  for (const field of ['transactionId', 'accountId', 'accountIdTo']) {
+    if (!isDigestHex(body[field])) return refuse(400, `invalid ${field}`);
+  }
+  if (!(typeof body.amount === 'string' && /^[1-9][0-9]*$/.test(body.amount) && BigInt(body.amount) <= MAX_BIGINT)) {
+    return refuse(400, 'invalid amount');
+  }
+
+  const link = await findLink(Buffer.from(body.transactionId, 'hex'));
+  const same = link !== null
+    && link.account_id !== null && link.account_id.equals(Buffer.from(body.accountId, 'hex'))
+    && link.account_id_to !== null && link.account_id_to.equals(Buffer.from(body.accountIdTo, 'hex'))
+    && BigInt(link.amount) === BigInt(body.amount);
+  if (!same) return ok(200, { written: false });
+  return ok(200, {
+    written: true,
+    type: link.type,
+    position: Number(link.position),
+    writtenAt: link.created_at.toISOString(),
+  });
 }
 
 /**

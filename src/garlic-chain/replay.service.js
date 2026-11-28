@@ -9,9 +9,11 @@ import { pool } from '../db/pool.js';
 import { FUND_ACCOUNT_ID } from '../fund/fund-account.js';
 import {
   FUND_PROPOSAL,
+  PAYMENT_TO_FUND,
   TRANSFER_FROM_FUND,
   TRANSFER_TO_FUND,
   checkFundProposalSignaturesAndIds,
+  checkPaymentToFundSignaturesAndIds,
   checkTransferToFundSignaturesAndIds,
   payoutObject,
 } from '../fund/fund.service.js';
@@ -198,6 +200,9 @@ function sameId(actual, expected) {
  *     write does;
  *   transferToFund and fundProposal: the shape, signature and id parts of
  *     their verify functions; a transferToFund adds the stake;
+ *   paymentToFund (docs/schemas.md section 35): the shape, signature and
+ *     id parts of its verify function; it has no side effect, and the
+ *     masterpod is not asked;
  *   transferFromFund: no signatures; the link must follow a fundProposal
  *     link or a transferFromFund link of the same proposal (`proposal`), and
  *     its payload must equal the payout object for the next index; a payout
@@ -252,6 +257,13 @@ async function checkByType(client, link, transHash, proposal) {
       sideEffect: () => addStake(client, accountId, payload.stakeFor, payload.amount),
       proposal: null,
     };
+  }
+
+  if (type === PAYMENT_TO_FUND) {
+    const checked = await checkPaymentToFundSignaturesAndIds(ogTransaction, { client });
+    if (!checked.ok) return checked;
+    const { accountId, accountIdTo, transactionId, amount } = checked;
+    return { ok: true, expected: { accountId, accountIdTo, transactionId, amount }, sideEffect: null, proposal: null };
   }
 
   if (type === FUND_PROPOSAL) {

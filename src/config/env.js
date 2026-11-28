@@ -102,11 +102,11 @@ export const env = Object.freeze({
   // offset also bounds how far a fund proposal's createdAt may be from the
   // validator's clock (src/fund/fund.service.js), and since 2026-11-11
   // (docs/schemas.md section 27) the createdAt of every transfer without a
-  // lock: a plain, an assisted and an escrow transfer, a transferToFund and
-  // a break-glass move out of a spending or assisted account must be dated
-  // within the offset of the validator's clock, before or after. A cancel
-  // of an assisted transfer or of an escrow trade waits until its transfer
-  // is more than the offset old.
+  // lock: a plain, an assisted and an escrow transfer, a transferToFund, a
+  // paymentToFund (section 35) and a break-glass move out of a spending or
+  // assisted account must be dated within the offset of the validator's
+  // clock, before or after. A cancel of an assisted transfer or of an
+  // escrow trade waits until its transfer is more than the offset old.
   locks: Object.freeze({
     guardedMinutes: requiredInteger('GUARDED_LOCK_MINUTES'),
     vaultMinutes: requiredInteger('VAULT_LOCK_MINUTES'),
@@ -145,7 +145,9 @@ export const env = Object.freeze({
 
   // Where the masterpod's /get-anos-account is (src/masterpod/
   // masterpod.client.js): the binding check a create-account submission
-  // must pass. Required; in network/testnet.env. A trailing slash is dropped.
+  // must pass. The other calls of that file go to the same address,
+  // /check-fund-payment among them (docs/schemas.md section 35). Required;
+  // in network/testnet.env. A trailing slash is dropped.
   masterpodUrl: required('MASTERPOD_URL').replace(/\/+$/, ''),
 
   // How far a signed account-level request's timestamp may be from the
